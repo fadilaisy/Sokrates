@@ -1,0 +1,105 @@
+[
+  {
+    "id": "HOOK-001",
+    "name": "Motor Temperature High Alert",
+    "name_id": "Peringatan Suhu Motor Tinggi",
+    "trigger_type": "telemetry",
+    "condition": "motor_temp_celsius > 85",
+    "condition_description_id": "Suhu motor melebihi 85°C (peringatan dini sebelum interlock Tier 1 di 95°C)",
+    "skill_action": "WARN_AND_PREPARE_COOLDOWN",
+    "skill_action_steps": [
+      "Log telemetry event to audit ledger",
+      "Notify maintenance_technician via dashboard",
+      "Increase coolant flow if controllable",
+      "Monitor every 60 seconds",
+      "If temp exceeds 95°C, trigger SAFE-001 immediately"
+    ],
+    "auto_resolve_if": "motor_temp_celsius < 80 FOR 5_CONSECUTIVE_READINGS",
+    "notify_roles": ["maintenance_technician", "production_supervisor"],
+    "severity": "WARNING",
+    "debounce_seconds": 30
+  },
+  {
+    "id": "HOOK-002",
+    "name": "Spindle Vibration High Alert",
+    "name_id": "Peringatan Getaran Spindel Tinggi",
+    "trigger_type": "telemetry",
+    "condition": "spindle_vibration_mm_per_s > 5",
+    "condition_description_id": "Getaran spindel melebihi 5 mm/s (peringatan dini sebelum interlock Tier 1 di 8 mm/s)",
+    "skill_action": "REDUCE_FEED_RATE_AND_MONITOR",
+    "skill_action_steps": [
+      "Reduce spindle feed rate by 20%",
+      "Log vibration telemetry",
+      "Alert maintenance_technician",
+      "Schedule vibration analysis inspection",
+      "If vibration exceeds 8 mm/s, trigger SAFE-002 immediately"
+    ],
+    "auto_resolve_if": "spindle_vibration_mm_per_s < 4 FOR 3_CONSECUTIVE_READINGS",
+    "notify_roles": ["maintenance_technician", "production_supervisor"],
+    "severity": "WARNING",
+    "debounce_seconds": 10
+  },
+  {
+    "id": "HOOK-003",
+    "name": "Coolant Pressure Low Alert",
+    "name_id": "Peringatan Tekanan Pendingin Rendah",
+    "trigger_type": "telemetry",
+    "condition": "coolant_pressure_bar < 2.5",
+    "condition_description_id": "Tekanan pendingin mendekati batas minimum (interlock Tier 1 di < 2 bar)",
+    "skill_action": "INSPECT_COOLANT_SYSTEM",
+    "skill_action_steps": [
+      "Log pressure drop event",
+      "Check coolant reservoir level",
+      "Inspect pump motor status",
+      "Alert maintenance_technician",
+      "If pressure drops below 2 bar, trigger SAFE-003 immediately"
+    ],
+    "auto_resolve_if": "coolant_pressure_bar >= 3.0 FOR 2_CONSECUTIVE_READINGS",
+    "notify_roles": ["maintenance_technician"],
+    "severity": "WARNING",
+    "debounce_seconds": 15
+  },
+  {
+    "id": "HOOK-004",
+    "name": "Scheduled Maintenance Window",
+    "name_id": "Jendela Pemeliharaan Terjadwal",
+    "trigger_type": "schedule",
+    "condition": "current_time >= maintenance_window.start AND current_time < maintenance_window.end",
+    "condition_description_id": "Mesin mendekati slot pemeliharaan yang telah dijadwalkan",
+    "pre_trigger_hours": 2,
+    "skill_action": "PREPARE_FOR_MAINTENANCE_HANDOVER",
+    "skill_action_steps": [
+      "Identify orders currently on affected work center",
+      "Run schedule_solver to find rerouting options",
+      "Propose rerouting scenarios to production_supervisor",
+      "On approval: update SAP schedule, notify operators",
+      "At window start: confirm machine is cleared and handed over to maintenance"
+    ],
+    "auto_resolve_if": null,
+    "notify_roles": ["production_supervisor", "maintenance_technician", "operator"],
+    "severity": "INFO",
+    "debounce_seconds": 0
+  },
+  {
+    "id": "HOOK-005",
+    "name": "Production Order Late Risk",
+    "name_id": "Risiko Keterlambatan Pesanan Produksi",
+    "trigger_type": "telemetry",
+    "condition": "order.estimated_completion > order.deadline AND order.status = 'IN_PROGRESS'",
+    "condition_description_id": "Estimasi waktu selesai pesanan melebihi deadline yang dijanjikan ke pelanggan",
+    "skill_action": "TRIGGER_DISRUPTION_ANALYSIS",
+    "skill_action_steps": [
+      "Calculate expected delay in hours",
+      "Compute SLA penalty based on order class",
+      "Run schedule_solver with disruption parameters",
+      "Generate Gemini analysis summary in Bahasa Indonesia",
+      "If estimated penalty >= escalation_threshold: escalate to supervisor",
+      "If estimated penalty < auto_resolve_threshold: auto-apply cheapest scenario",
+      "Write all actions to audit ledger"
+    ],
+    "auto_resolve_if": "order.estimated_completion <= order.deadline",
+    "notify_roles": ["production_supervisor", "production_manager"],
+    "severity": "CRITICAL",
+    "debounce_seconds": 60
+  }
+]

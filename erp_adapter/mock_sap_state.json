@@ -1,0 +1,328 @@
+{
+  "_meta": {
+    "schema": "mock_sap_s4hana_v1",
+    "facility": "PT Karawang Precision Manufacturing",
+    "location": "Karawang Industrial Estate, Jawa Barat, Indonesia",
+    "sap_system_id": "PRD",
+    "client": "100",
+    "generated_at": "2025-01-15T07:00:00+07:00",
+    "version": 1
+  },
+  "shop_floor_config": {
+    "facility_name": "PT Karawang Precision Manufacturing",
+    "facility_code": "KPMI-KRW",
+    "shift_start": "07:00",
+    "shift_end": "15:00",
+    "shift_hours": 8,
+    "night_shift_start": "15:00",
+    "night_shift_end": "23:00",
+    "night_shift_overtime_rate": 1.5,
+    "timezone": "Asia/Jakarta",
+    "currency": "IDR",
+    "working_days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
+    "contact_supervisor": "+62-812-3456-7890"
+  },
+  "work_centers": [
+    {
+      "id": "CNC-01",
+      "name": "Haas VF-2 No. 1",
+      "machine_type": "Vertical Machining Center",
+      "controller": "Haas NGC",
+      "status": "RUNNING",
+      "capacity_hours_per_day": 8,
+      "current_order_id": "WO-2025-001",
+      "operator_id": "OP-001",
+      "operator_name": "Budi Santoso",
+      "planned_maintenance_windows": [
+        {
+          "id": "PM-001",
+          "type": "PREVENTIVE",
+          "start": "2025-01-17T07:00:00",
+          "end": "2025-01-17T10:00:00",
+          "description": "Spindle bearing lubrication & coolant flush"
+        }
+      ],
+      "telemetry": {
+        "motor_temp_celsius": 72.4,
+        "spindle_vibration_mm_per_s": 2.1,
+        "coolant_pressure_bar": 3.8,
+        "spindle_speed_rpm": 4500,
+        "feed_rate_percent": 85
+      }
+    },
+    {
+      "id": "CNC-02",
+      "name": "Haas VF-2 No. 2",
+      "machine_type": "Vertical Machining Center",
+      "controller": "Haas NGC",
+      "status": "RUNNING",
+      "capacity_hours_per_day": 8,
+      "current_order_id": "WO-2025-003",
+      "operator_id": "OP-002",
+      "operator_name": "Agus Permana",
+      "planned_maintenance_windows": [],
+      "telemetry": {
+        "motor_temp_celsius": 68.1,
+        "spindle_vibration_mm_per_s": 1.8,
+        "coolant_pressure_bar": 4.1,
+        "spindle_speed_rpm": 3800,
+        "feed_rate_percent": 90
+      }
+    },
+    {
+      "id": "CNC-03",
+      "name": "Fanuc Robodrill α-D21MiA",
+      "machine_type": "Compact Machining Center",
+      "controller": "Fanuc 0i-MD",
+      "status": "IDLE",
+      "capacity_hours_per_day": 8,
+      "current_order_id": null,
+      "operator_id": "OP-003",
+      "operator_name": "Sari Dewi",
+      "planned_maintenance_windows": [
+        {
+          "id": "PM-002",
+          "type": "CORRECTIVE",
+          "start": "2025-01-15T13:00:00",
+          "end": "2025-01-15T15:00:00",
+          "description": "ATC magazine cam adjustment"
+        }
+      ],
+      "telemetry": {
+        "motor_temp_celsius": 45.0,
+        "spindle_vibration_mm_per_s": 0.0,
+        "coolant_pressure_bar": 0.0,
+        "spindle_speed_rpm": 0,
+        "feed_rate_percent": 0
+      }
+    },
+    {
+      "id": "CNC-04",
+      "name": "Mazak Variaxis i-500",
+      "machine_type": "5-Axis Machining Center",
+      "controller": "Mazatrol SmoothX",
+      "status": "RUNNING",
+      "capacity_hours_per_day": 8,
+      "current_order_id": "WO-2025-005",
+      "operator_id": "OP-004",
+      "operator_name": "Rizky Fauzan",
+      "planned_maintenance_windows": [],
+      "telemetry": {
+        "motor_temp_celsius": 81.2,
+        "spindle_vibration_mm_per_s": 3.5,
+        "coolant_pressure_bar": 3.6,
+        "spindle_speed_rpm": 6000,
+        "feed_rate_percent": 95
+      }
+    },
+    {
+      "id": "CNC-05",
+      "name": "DMG MORI NLX 2500",
+      "machine_type": "CNC Turning Center",
+      "controller": "CELOS + Fanuc",
+      "status": "MAINTENANCE",
+      "capacity_hours_per_day": 8,
+      "current_order_id": null,
+      "operator_id": null,
+      "operator_name": null,
+      "planned_maintenance_windows": [
+        {
+          "id": "PM-003",
+          "type": "CORRECTIVE",
+          "start": "2025-01-15T07:00:00",
+          "end": "2025-01-15T15:00:00",
+          "description": "Turret servo motor replacement (unplanned)"
+        }
+      ],
+      "telemetry": {
+        "motor_temp_celsius": 25.0,
+        "spindle_vibration_mm_per_s": 0.0,
+        "coolant_pressure_bar": 0.0,
+        "spindle_speed_rpm": 0,
+        "feed_rate_percent": 0
+      }
+    }
+  ],
+  "production_orders": [
+    {
+      "id": "WO-2025-001",
+      "order_class": "A",
+      "work_center_id": "CNC-01",
+      "product_code": "BRCKT-AUTO-4412",
+      "product_name": "Transmission Bracket Assembly — Toyota Kijang",
+      "quantity": 120,
+      "quantity_unit": "PCS",
+      "planned_start": "2025-01-15T07:00:00",
+      "planned_end": "2025-01-15T13:00:00",
+      "deadline": "2025-01-15T15:00:00",
+      "sla_penalty_per_hour_idr": 750000,
+      "status": "IN_PROGRESS",
+      "progress_percent": 45,
+      "material_availability": "FULL",
+      "customer": "PT Toyota Motor Manufacturing Indonesia",
+      "priority": 1
+    },
+    {
+      "id": "WO-2025-002",
+      "order_class": "A",
+      "work_center_id": "CNC-02",
+      "product_code": "CAMSH-AUTO-2210",
+      "product_name": "Camshaft Housing — Honda Civic",
+      "quantity": 60,
+      "quantity_unit": "PCS",
+      "planned_start": "2025-01-15T07:00:00",
+      "planned_end": "2025-01-15T12:00:00",
+      "deadline": "2025-01-15T14:00:00",
+      "sla_penalty_per_hour_idr": 750000,
+      "status": "QUEUED",
+      "progress_percent": 0,
+      "material_availability": "FULL",
+      "customer": "PT Honda Prospect Motor",
+      "priority": 2
+    },
+    {
+      "id": "WO-2025-003",
+      "order_class": "B",
+      "work_center_id": "CNC-02",
+      "product_code": "FLNG-IND-8805",
+      "product_name": "Hydraulic Flange DN80 — Pertamina",
+      "quantity": 200,
+      "quantity_unit": "PCS",
+      "planned_start": "2025-01-15T07:00:00",
+      "planned_end": "2025-01-15T15:00:00",
+      "deadline": "2025-01-16T12:00:00",
+      "sla_penalty_per_hour_idr": 300000,
+      "status": "IN_PROGRESS",
+      "progress_percent": 30,
+      "material_availability": "FULL",
+      "customer": "PT Pertamina EP",
+      "priority": 3
+    },
+    {
+      "id": "WO-2025-004",
+      "order_class": "B",
+      "work_center_id": "CNC-03",
+      "product_code": "GBOX-BODY-1103",
+      "product_name": "Gearbox Housing Cover — Astra",
+      "quantity": 50,
+      "quantity_unit": "PCS",
+      "planned_start": "2025-01-15T09:00:00",
+      "planned_end": "2025-01-15T15:00:00",
+      "deadline": "2025-01-15T17:00:00",
+      "sla_penalty_per_hour_idr": 300000,
+      "status": "QUEUED",
+      "progress_percent": 0,
+      "material_availability": "PARTIAL",
+      "material_eta": "2025-01-15T08:30:00",
+      "customer": "PT Astra Otoparts",
+      "priority": 4
+    },
+    {
+      "id": "WO-2025-005",
+      "order_class": "A",
+      "work_center_id": "CNC-04",
+      "product_code": "IMPEL-PUMP-0091",
+      "product_name": "Titanium Impeller — Oil & Gas",
+      "quantity": 10,
+      "quantity_unit": "PCS",
+      "planned_start": "2025-01-15T07:00:00",
+      "planned_end": "2025-01-15T15:00:00",
+      "deadline": "2025-01-15T15:00:00",
+      "sla_penalty_per_hour_idr": 750000,
+      "status": "IN_PROGRESS",
+      "progress_percent": 60,
+      "material_availability": "FULL",
+      "customer": "PT Medco Energi",
+      "priority": 1
+    },
+    {
+      "id": "WO-2025-006",
+      "order_class": "C",
+      "work_center_id": "CNC-01",
+      "product_code": "SPKT-MRO-3301",
+      "product_name": "Drive Sprocket — MRO Internal",
+      "quantity": 30,
+      "quantity_unit": "PCS",
+      "planned_start": "2025-01-15T13:00:00",
+      "planned_end": "2025-01-15T15:00:00",
+      "deadline": "2025-01-17T15:00:00",
+      "sla_penalty_per_hour_idr": 100000,
+      "status": "QUEUED",
+      "progress_percent": 0,
+      "material_availability": "FULL",
+      "customer": "Internal MRO",
+      "priority": 8
+    },
+    {
+      "id": "WO-2025-007",
+      "order_class": "C",
+      "work_center_id": "CNC-03",
+      "product_code": "BUSH-MRO-0052",
+      "product_name": "Bronze Bushing Set — MRO Spare",
+      "quantity": 100,
+      "quantity_unit": "PCS",
+      "planned_start": "2025-01-15T11:00:00",
+      "planned_end": "2025-01-15T14:00:00",
+      "deadline": "2025-01-18T15:00:00",
+      "sla_penalty_per_hour_idr": 100000,
+      "status": "QUEUED",
+      "progress_percent": 0,
+      "material_availability": "FULL",
+      "customer": "Internal MRO",
+      "priority": 9
+    },
+    {
+      "id": "WO-2025-008",
+      "order_class": "B",
+      "work_center_id": "CNC-04",
+      "product_code": "VALV-BODY-2240",
+      "product_name": "Valve Body CNC — Industrial",
+      "quantity": 25,
+      "quantity_unit": "PCS",
+      "planned_start": "2025-01-16T07:00:00",
+      "planned_end": "2025-01-16T12:00:00",
+      "deadline": "2025-01-16T15:00:00",
+      "sla_penalty_per_hour_idr": 300000,
+      "status": "PLANNED",
+      "progress_percent": 0,
+      "material_availability": "FULL",
+      "customer": "PT Pupuk Kujang",
+      "priority": 5
+    }
+  ],
+  "maintenance_slots": [
+    {
+      "id": "PM-001",
+      "work_center_id": "CNC-01",
+      "type": "PREVENTIVE",
+      "start": "2025-01-17T07:00:00",
+      "end": "2025-01-17T10:00:00",
+      "duration_hours": 3,
+      "description": "Spindle bearing lubrication, coolant system flush, way lube check",
+      "technician": "Ahmad Ridwan",
+      "status": "SCHEDULED"
+    },
+    {
+      "id": "PM-002",
+      "work_center_id": "CNC-03",
+      "type": "CORRECTIVE",
+      "start": "2025-01-15T13:00:00",
+      "end": "2025-01-15T15:00:00",
+      "duration_hours": 2,
+      "description": "ATC magazine cam wear — requires cam replacement",
+      "technician": "Bambang Susilo",
+      "status": "CONFIRMED"
+    },
+    {
+      "id": "PM-003",
+      "work_center_id": "CNC-05",
+      "type": "CORRECTIVE",
+      "start": "2025-01-15T07:00:00",
+      "end": "2025-01-15T15:00:00",
+      "duration_hours": 8,
+      "description": "Turret servo motor replacement — urgent, machine offline all day",
+      "technician": "Bambang Susilo",
+      "status": "IN_PROGRESS"
+    }
+  ]
+}

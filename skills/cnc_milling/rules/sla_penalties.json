@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "facility": "PT Karawang Precision Manufacturing",
+  "currency": "IDR",
+  "effective_date": "2025-01-01",
+  "order_classes": {
+    "A": {
+      "name": "OEM Automotive — Highest Priority",
+      "name_id": "OEM Otomotif — Prioritas Tertinggi",
+      "description_id": "Pesanan dari pelanggan OEM otomotif dengan SLA ketat. Keterlambatan langsung berdampak pada lini perakitan pelanggan.",
+      "penalty_per_hour_idr": 750000,
+      "max_penalty_idr": 15000000,
+      "escalation_threshold_idr": 1000000,
+      "priority_weight": 10,
+      "grace_period_minutes": 0
+    },
+    "B": {
+      "name": "General Industry — Medium Priority",
+      "name_id": "Industri Umum — Prioritas Menengah",
+      "description_id": "Pesanan industri umum dengan tenggat waktu fleksibel sedang.",
+      "penalty_per_hour_idr": 300000,
+      "max_penalty_idr": 6000000,
+      "escalation_threshold_idr": 1500000,
+      "priority_weight": 5,
+      "grace_period_minutes": 30
+    },
+    "C": {
+      "name": "MRO / Spare Parts — Low Priority",
+      "name_id": "MRO / Suku Cadang — Prioritas Rendah",
+      "description_id": "Pesanan suku cadang dan pemeliharaan dengan tenggat waktu lebih longgar.",
+      "penalty_per_hour_idr": 100000,
+      "max_penalty_idr": 2000000,
+      "escalation_threshold_idr": 2000000,
+      "priority_weight": 2,
+      "grace_period_minutes": 60
+    }
+  },
+  "operational_costs": {
+    "overtime_cost_per_hour_idr": 450000,
+    "overtime_description_id": "Biaya lembur malam per jam per mesin CNC (termasuk upah operator, utilitas, dan overhead)",
+    "changeover_cost_idr": 350000,
+    "changeover_description_id": "Biaya setup ulang per perpindahan pesanan antar work center (termasuk waktu setup, tooling check, dan first-article inspection)",
+    "emergency_maintenance_call_idr": 1500000,
+    "preventive_maintenance_per_session_idr": 500000
+  },
+  "calculation_rules": {
+    "penalty_calculation": "FLOOR(delay_hours) * penalty_per_hour_idr",
+    "cap_at_max_penalty": true,
+    "overtime_calc": "ceil(hours_needed) * overtime_cost_per_hour_idr",
+    "reroute_cost_calc": "changeover_cost_idr + (overtime_hours * overtime_cost_per_hour_idr)",
+    "net_savings_calc": "penalty_avoided_idr - solution_cost_idr"
+  },
+  "escalation_matrix": {
+    "auto_resolve_below_idr": 500000,
+    "supervisor_approval_above_idr": 1000000,
+    "manager_approval_above_idr": 5000000,
+    "plant_manager_approval_above_idr": 10000000
+  }
+}

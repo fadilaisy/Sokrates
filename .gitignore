@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment secrets — never commit real keys
+.env
+
+# Audit ledger (runtime data, not source)
+audit_ledger.jsonl
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/.env
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
