@@ -2,16 +2,17 @@
 backend/main.py
 ───────────────
 SkillForge FastAPI backend — Agentic AI Supervisor for Indonesian Manufacturers.
+AI model: Claude Haiku (Anthropic) via the Messages API.
 
 Endpoints
 ---------
 GET  /api/state              Current SAP mock state
-POST /api/disrupt            Trigger disruption analysis (CP-SAT solver + Gemini)
+POST /api/disrupt            Disruption analysis — CP-SAT solver + Claude summary
 POST /api/approve            Approve scenario, apply SAP delta, write audit entry
 GET  /api/ledger             Full immutable audit ledger
 GET  /api/ledger/verify      SHA-256 hash-chain integrity check
 POST /api/skills/generate    Generate SKILL.md from natural language description
-WS   /ws/telemetry           Real-time telemetry event streaming + AI analysis
+WS   /ws/telemetry           Real-time telemetry streaming + AI analysis
 GET  /health                 Health check
 
 Start:  uvicorn backend.main:app --reload --port 8000
@@ -37,7 +38,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, stat
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-# Ensure project root is on sys.path regardless of launch directory
+# Ensure project root is importable regardless of launch directory
 _ROOT = Path(__file__).parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -46,20 +47,19 @@ from erp_adapter.sap_client import DriftError, SAPClient
 from erp_adapter.audit_ledger import AuditLedger
 from solver.schedule_solver import ScheduleSolver
 
-import google.generativeai as genai
+import anthropic
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Gemini configuration
+# Anthropic / Claude configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+# Model from proposal: claude-haiku-4-5 (Claude 4.6 Haiku in Anthropic API naming)
+ANTHROPIC_MODEL   = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
 
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-
-_gemini: genai.GenerativeModel | None = (
-    genai.GenerativeModel(GEMINI_MODEL) if GEMINI_API_KEY else None
+# Instantiate client once; None if key is missing (graceful degradation)
+_claude: anthropic.Anthropic | None = (
+    anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -78,9 +78,9 @@ app = FastAPI(
     title="SkillForge — Agentic AI Supervisor for Indonesian Manufacturers",
     version="1.0.0",
     description=(
-        "Backend API for the SkillForge shop-floor AI supervisor. "
-        "Combines OR-Tools CP-SAT scheduling, Gemini AI, and a tamper-evident "
-        "audit ledger to help Indonesian manufacturers recover from disruptions."
+        "Backend API for SkillForge. Combines OR-Tools CP-SAT scheduling, "
+        "Claude Haiku AI (Anthropic), and a tamper-evident audit ledger to help "
+        "Indonesian manufacturers recover from shop-floor disruptions."
     ),
 )
 
@@ -109,7 +109,7 @@ class DisruptionResponse(BaseModel):
     disruption_type: str
     disruption_hours: int
     scenarios: list[dict[str, Any]]
-    gemini_summary: str
+    claude_summary: str
     sap_version: int
 
 
@@ -150,29 +150,37 @@ class SkillGenerateResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Gemini helper — non-blocking via thread-pool executor
+# Claude helper — non-blocking via thread-pool executor
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def _call_gemini(prompt: str) -> str:
+async def _call_claude(prompt: str, max_tokens: int = 512) -> str:
     """
-    Run a synchronous Gemini SDK call in a thread-pool executor so it does
-    not block the FastAPI async event loop. Returns a graceful fallback string
-    when Gemini is not configured or encounters an error.
+    Call Claude Haiku via the Anthropic Messages API in a thread-pool executor
+    so the synchronous SDK call does not block the FastAPI async event loop.
+
+    Returns a graceful fallback string when the API key is not configured
+    or an error occurs — the app stays functional without AI summaries.
     """
-    if _gemini is None:
+    if _claude is None:
         return (
-            "[Gemini tidak dikonfigurasi — tambahkan GEMINI_API_KEY ke file .env] "
+            "[Claude tidak dikonfigurasi — tambahkan ANTHROPIC_API_KEY ke file .env] "
             "Tinjau skenario solver di atas dan pilih yang sesuai secara manual."
         )
     loop = asyncio.get_event_loop()
     try:
         response = await loop.run_in_executor(
-            None, lambda: _gemini.generate_content(prompt)
+            None,
+            lambda: _claude.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            ),
         )
-        return response.text.strip()
+        # content is a list of ContentBlock; grab the first text block
+        return response.content[0].text.strip()
     except Exception as exc:
-        return f"[Gemini error: {exc}] Silakan tinjau skenario solver secara manual."
+        return f"[Claude error: {exc}] Silakan tinjau skenario solver secara manual."
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -189,13 +197,13 @@ async def get_state() -> dict[str, Any]:
 @app.post(
     "/api/disrupt",
     response_model=DisruptionResponse,
-    summary="Trigger disruption analysis — CP-SAT solver + Gemini summary",
+    summary="Trigger disruption analysis — CP-SAT solver + Claude Haiku summary",
 )
 async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
     """
     Simulate a machine disruption. Runs the CP-SAT solver to generate three
-    recovery scenarios (A / B / C), then calls Gemini to produce a 2-3 sentence
-    executive summary in Bahasa Indonesia with specific IDR cost figures.
+    recovery scenarios (A / B / C), then calls Claude Haiku to produce a 2-3
+    sentence executive summary in Bahasa Indonesia with specific IDR cost figures.
     """
     if body.end_hour <= body.start_hour:
         raise HTTPException(
@@ -221,7 +229,7 @@ async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
 
     disruption_hours = body.end_hour - body.start_hour
 
-    # ── Gemini: Bahasa Indonesia executive summary ────────────────────────────
+    # ── Claude Haiku: Bahasa Indonesia executive summary ──────────────────────
     prompt = (
         f"Anda adalah AI Supervisor lantai produksi di PT Karawang Precision Manufacturing.\n"
         f"Mesin {body.machine_id} mengalami gangguan ({body.disruption_type}) "
@@ -234,14 +242,14 @@ async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
         "3. Tindakan konkret apa yang harus diambil supervisor selanjutnya.\n\n"
         "Jawab HANYA dengan ringkasan tersebut, tanpa kata pengantar atau penjelasan tambahan."
     )
-    gemini_summary = await _call_gemini(prompt)
+    claude_summary = await _call_claude(prompt, max_tokens=512)
 
     return DisruptionResponse(
         machine_id=body.machine_id,
         disruption_type=body.disruption_type,
         disruption_hours=disruption_hours,
         scenarios=scenarios,
-        gemini_summary=gemini_summary,
+        claude_summary=claude_summary,
         sap_version=_sap.get_version(),
     )
 
@@ -253,11 +261,11 @@ async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
 )
 async def post_approve(body: ApproveRequest) -> ApproveResponse:
     """
-    Apply the approved scenario delta to the SAP state with drift/version check,
+    Apply the approved scenario delta to the SAP state (with drift/version check),
     then write an immutable SHA-256 hash-chained audit entry.
 
-    Returns HTTP 409 (Conflict) if the SAP state version has changed since the
-    caller last fetched it — optimistic locking / drift detection.
+    Returns HTTP 409 if the SAP version has changed since the caller's last read
+    (optimistic locking / drift detection).
     """
     gantt_changes: list[dict] = body.scenario_data.get("gantt_changes", [])
     order_updates = [
@@ -298,7 +306,6 @@ async def post_approve(body: ApproveRequest) -> ApproveResponse:
 
     version_after = new_state["_meta"]["version"]
 
-    # Write tamper-evident audit entry
     entry = _ledger.append({
         "action_type":        "SCENARIO_APPROVED",
         "scenario_chosen":    body.scenario_id,
@@ -346,8 +353,8 @@ async def get_ledger_verify() -> LedgerVerifyResponse:
 )
 async def post_skills_generate(body: SkillGenerateRequest) -> SkillGenerateResponse:
     """
-    Call Gemini to produce a full bilingual EN/ID SKILL.md playbook from a
-    plain-language supervisor description provided by the user.
+    Call Claude Haiku to produce a full bilingual EN/ID SKILL.md playbook from
+    a plain-language supervisor description.
     """
     prompt = (
         "You are SkillForge, an AI platform that creates Declarative Skill Playbooks (SKILL.md)\n"
@@ -365,8 +372,8 @@ async def post_skills_generate(body: SkillGenerateRequest) -> SkillGenerateRespo
         "Be specific, realistic, and production-ready. Include concrete threshold values.\n"
         "Output ONLY the raw markdown, starting with # SKILL.md."
     )
-    skill_md = await _call_gemini(prompt)
-    return SkillGenerateResponse(skill_md=skill_md, model_used=GEMINI_MODEL)
+    skill_md = await _call_claude(prompt, max_tokens=2048)
+    return SkillGenerateResponse(skill_md=skill_md, model_used=ANTHROPIC_MODEL)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -382,9 +389,10 @@ async def ws_telemetry(websocket: WebSocket) -> None:
     Client → Server (JSON text frame):
         {"machine_id": "CNC-04", "metric": "motor_temp_celsius", "value": 91.5}
 
-    Server → Client (JSON, two frames on CRITICAL events):
+    Server → Client (JSON):
         Frame 1 — telemetry_analysis:
-            {event, machine_id, metric, value, severity, rule_triggered, analysis, timestamp}
+            {event, machine_id, metric, value, severity, rule_triggered,
+             analysis, timestamp}
         Frame 2 — safety_alert (CRITICAL only):
             {event, machine_id, rule_triggered, action_required, message, timestamp}
     """
@@ -420,7 +428,7 @@ async def ws_telemetry(websocket: WebSocket) -> None:
                   "Jawab HANYA analisisnya, tanpa kata pengantar."
             )
 
-            analysis = await _call_gemini(analysis_prompt)
+            analysis = await _call_claude(analysis_prompt, max_tokens=150)
 
             await websocket.send_json({
                 "event":          "telemetry_analysis",
@@ -433,7 +441,7 @@ async def ws_telemetry(websocket: WebSocket) -> None:
                 "timestamp":      datetime.now(timezone.utc).isoformat(),
             })
 
-            # Extra safety alert frame for CRITICAL conditions
+            # Extra safety alert for CRITICAL conditions
             if severity == "CRITICAL":
                 await websocket.send_json({
                     "event":           "safety_alert",
@@ -465,7 +473,6 @@ def _classify_telemetry(metric: str, value: float) -> tuple[str, str | None]:
     Map telemetry metric + value → (severity, safety_rule_id | None).
     Mirrors threshold values in safety_interlocks.json.
     """
-    # Coolant pressure: lower is worse (inverted logic)
     if metric == "coolant_pressure_bar":
         if value < 2.0:
             return "CRITICAL", "SAFE-003"
@@ -502,10 +509,11 @@ def _classify_telemetry(metric: str, value: float) -> tuple[str, str | None]:
 @app.get("/health", include_in_schema=False)
 async def health() -> dict[str, str]:
     return {
-        "status":            "ok",
-        "gemini_configured": "yes" if GEMINI_API_KEY else "no — set GEMINI_API_KEY in .env",
-        "sap_version":       str(_sap.get_version()),
-        "ledger_entries":    str(len(_ledger.get_all())),
+        "status":             "ok",
+        "ai_model":           ANTHROPIC_MODEL,
+        "claude_configured":  "yes" if ANTHROPIC_API_KEY else "no — set ANTHROPIC_API_KEY in .env",
+        "sap_version":        str(_sap.get_version()),
+        "ledger_entries":     str(len(_ledger.get_all())),
     }
 
 
