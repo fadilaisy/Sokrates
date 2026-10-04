@@ -92,7 +92,7 @@
       "Calculate expected delay in hours",
       "Compute SLA penalty based on order class",
       "Run schedule_solver with disruption parameters",
-      "Generate Gemini analysis summary in Bahasa Indonesia",
+      "Generate Claude analysis summary in Bahasa Indonesia",
       "If estimated penalty >= escalation_threshold: escalate to supervisor",
       "If estimated penalty < auto_resolve_threshold: auto-apply cheapest scenario",
       "Write all actions to audit ledger"
