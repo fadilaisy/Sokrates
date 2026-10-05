@@ -4,7 +4,7 @@ Project: **SkillForge** — Supervised Autonomy Agentic AI Supervisor for Indone
 
 ## Stack
 - Backend: FastAPI (`backend/main.py`), OR-Tools CP-SAT (`solver/`), SAP S/4HANA mock adapter (`erp_adapter/`)
-- AI: Claude Haiku via Anthropic Messages API (env `ANTHROPIC_MODEL`, default `claude-haiku-4-5`)
+- AI: Gemini 3.5 Flash via Google Generative AI SDK (env `GEMINI_MODEL`, default `gemini-3.5-flash`)
 - Skills: declarative playbooks under `skills/<skill>/SKILL.md` + `rules/` + `hooks.json`
 
 ## Rules
@@ -16,10 +16,10 @@ Project: **SkillForge** — Supervised Autonomy Agentic AI Supervisor for Indone
 6. **Costs in IDR (Rupiah)** — never USD in operator-facing figures.
 
 ## Commands
-- Install: `pip install -r requirements.txt`
+- Install: `pip install -r requirements.txt` (after updating with `pip install google-generativeai`)
 - Run backend: `uvicorn backend.main:app --reload --port 8000` (or `python backend/main.py`)
 - Docs: http://localhost:8000/docs
-- Copy `.env.example` → `.env` and set `ANTHROPIC_API_KEY` before enabling AI summaries.
+- Copy `.env.example` → `.env` and set `GEMINI_API_KEY` before enabling AI summaries.
 
 ## Notes
 - No `.env`/secrets committed (`.gitignore` covers it).

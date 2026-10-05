@@ -67,7 +67,7 @@ export interface DisruptResponse {
   disruption_type: string;
   disruption_hours: number;
   scenarios: Scenario[];
-  claude_summary: string;
+  claude_summary: string;  // kept as-is for backward compatibility
   sap_version: number;
 }
 

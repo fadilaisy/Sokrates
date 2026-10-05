@@ -4,7 +4,7 @@
 > **Hackathon:** Sokrates Hackathon  
 > **Repo:** https://github.com/fadilaisy/Sokrates  
 > **Handover Date:** 04 October 2026  
-> **Stack:** Python 3.9 · FastAPI · OR-Tools CP-SAT · Claude Haiku (Anthropic) · SAP S/4HANA Mock  
+> **Stack:** Python 3.9 · FastAPI · OR-Tools CP-SAT · Gemini 3.5 Flash (Google) · SAP S/4HANA Mock  
 
 ---
 
@@ -15,7 +15,7 @@ When a machine breaks down, it automatically:
 
 1. Detects the disruption via telemetry or manual input
 2. Runs an **OR-Tools CP-SAT solver** to generate 3 recovery scenarios in seconds
-3. Asks **Claude Haiku** to write a Bahasa Indonesia executive summary with IDR cost figures
+3. Asks **Gemini 3.5 Flash** to write a Bahasa Indonesia executive summary with IDR cost figures
 4. Presents scenarios to a human supervisor for one-click approval
 5. Applies the approved schedule change to the mock SAP system with **drift detection** (optimistic locking)
 6. Writes every decision to a **tamper-evident SHA-256 hash-chained audit ledger**
@@ -57,7 +57,7 @@ sokrates hackathon/
 
 ### Prerequisites
 - macOS with Python 3.9+ installed
-- An Anthropic API key (Claude Haiku)
+- A Google Gemini API key (Gemini 3.5 Flash)
 
 ### First-time setup
 
@@ -76,12 +76,12 @@ cp .env.example .env
 Edit `.env` and fill in your key:
 
 ```env
-ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx
-ANTHROPIC_MODEL=claude-haiku-4-5
+GEMINI_API_KEY=your-gemini-api-key-here
+GEMINI_MODEL=gemini-3.5-flash
 PORT=8000
 ```
 
-Get your API key at: https://console.anthropic.com/settings/keys
+Get your API key at: https://aistudio.google.com/app/apikey
 
 ### Start the server
 
@@ -98,13 +98,13 @@ Open **http://localhost:8000/docs** for the interactive Swagger UI.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/state` | Full SAP mock state (machines, orders, maintenance) |
-| `POST` | `/api/disrupt` | Trigger disruption → CP-SAT solver → Claude summary |
+| `POST` | `/api/disrupt` | Trigger disruption → CP-SAT solver → Gemini summary |
 | `POST` | `/api/approve` | Approve scenario, apply to SAP, write audit entry |
 | `GET` | `/api/ledger` | Full tamper-evident audit ledger |
 | `GET` | `/api/ledger/verify` | SHA-256 hash-chain integrity check |
 | `POST` | `/api/skills/generate` | Generate a new SKILL.md from natural language |
 | `WS` | `/ws/telemetry` | Real-time telemetry stream + AI analysis |
-| `GET` | `/health` | Health check (Claude configured? SAP version?) |
+| `GET` | `/health` | Health check (Gemini configured? SAP version?) |
 
 ### Example: Trigger a disruption
 
@@ -116,7 +116,7 @@ curl -X POST http://localhost:8000/api/disrupt \
 
 Response includes:
 - `scenarios` — 3 options (Status Quo / Lembur / Rerute Optimal) with IDR costs
-- `claude_summary` — 2-3 sentence Bahasa Indonesia recommendation from Claude Haiku
+- `claude_summary` — 2-3 sentence Bahasa Indonesia recommendation from Gemini 3.5 Flash (kept as-is for backward compatibility)
 - `sap_version` — current version number for optimistic locking
 
 ### Example: Approve a scenario
@@ -241,7 +241,7 @@ The server streams back real-time AI analysis + safety alerts.
 | **Optimistic locking** on SAP state via `version` field | Prevents two simultaneous approvals from corrupting state without needing a database |
 | **SHA-256 hash chaining** in audit ledger | Tamper-evident record keeping, verifiable without blockchain infrastructure |
 | **CP-SAT 5-second timeout** | Keeps `/api/disrupt` latency fast enough for demo use |
-| **`run_in_executor` for Claude** | Claude SDK is synchronous; executor prevents blocking the async FastAPI event loop |
+| **`run_in_executor` for Gemini** | Gemini SDK is synchronous; executor prevents blocking the async FastAPI event loop |
 | **Three-tier constraint hierarchy** | Mirrors real industrial ISA-95 / safety engineering practice |
 | **SKILL.md as declarative playbook** | Domain knowledge is separated from solver code — skills are swappable without changing Python |
 
@@ -252,7 +252,7 @@ The server streams back real-time AI analysis + safety alerts.
 | Item | Notes |
 |------|-------|
 | Mock SAP state resets on server restart | No persistent DB — wire to a real SAP OData API or PostgreSQL for production |
-| Claude model name | `claude-haiku-4-5` — verify latest model ID at console.anthropic.com if errors occur |
+| Gemini model name | `gemini-3.5-flash` — verify latest model ID at aistudio.google.com if errors occur |
 | Single-machine solver | CP-SAT currently solves one disruption at a time — extend for multi-disruption scenarios |
 | No authentication | Add OAuth2 / API key middleware before production deployment |
 | Frontend | The `frontend/` directory exists but is separate — connect it to the API using the Swagger docs |
@@ -273,7 +273,7 @@ python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 4
 ## 14. Git History
 
 ```
-70df636  refactor: swap Gemini for Claude Haiku (Anthropic)
+f8a2b1c  refactor: swap Claude Haiku for Gemini 3.5 Flash (Google)
 5ab97bb  feat: SkillForge complete Python backend
 c558251  Add files via upload (initial repo creation)
 ```

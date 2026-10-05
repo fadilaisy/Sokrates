@@ -2,12 +2,12 @@
 backend/main.py
 ───────────────
 SkillForge FastAPI backend — Agentic AI Supervisor for Indonesian Manufacturers.
-AI model: Claude Haiku (Anthropic) via the Messages API.
+AI model: Gemini 3.5 Flash (Google) via the REST API.
 
 Endpoints
 ---------
 GET  /api/state              Current SAP mock state
-POST /api/disrupt            Disruption analysis — CP-SAT solver + Claude summary
+POST /api/disrupt            Disruption analysis — CP-SAT solver + Gemini summary
 POST /api/approve            Approve scenario, apply SAP delta, write audit entry
 GET  /api/ledger             Full immutable audit ledger
 GET  /api/ledger/verify      SHA-256 hash-chain integrity check
@@ -38,6 +38,8 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, stat
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+import httpx
+
 # Ensure project root is importable regardless of launch directory
 _ROOT = Path(__file__).parent.parent
 if str(_ROOT) not in sys.path:
@@ -47,19 +49,17 @@ from erp_adapter.sap_client import DriftError, SAPClient
 from erp_adapter.audit_ledger import AuditLedger
 from solver.schedule_solver import ScheduleSolver
 
-import anthropic
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Anthropic / Claude configuration
+# Google Gemini configuration (REST API, no SDK dependency)
 # ─────────────────────────────────────────────────────────────────────────────
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-# Model from proposal: claude-haiku-4-5 (Claude 4.6 Haiku in Anthropic API naming)
-ANTHROPIC_MODEL   = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
 
-# Instantiate client once; None if key is missing (graceful degradation)
-_claude: anthropic.Anthropic | None = (
-    anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+# Async HTTP client for Gemini API
+_gemini_client: httpx.AsyncClient | None = (
+    httpx.AsyncClient(timeout=60.0) if GEMINI_API_KEY else None
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -79,7 +79,7 @@ app = FastAPI(
     version="1.0.0",
     description=(
         "Backend API for SkillForge. Combines OR-Tools CP-SAT scheduling, "
-        "Claude Haiku AI (Anthropic), and a tamper-evident audit ledger to help "
+        "Gemini 3.5 Flash AI (Google), and a tamper-evident audit ledger to help "
         "Indonesian manufacturers recover from shop-floor disruptions."
     ),
 )
@@ -150,37 +150,54 @@ class SkillGenerateResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Claude helper — non-blocking via thread-pool executor
+# Gemini helper — non-blocking via thread-pool executor
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def _call_claude(prompt: str, max_tokens: int = 512) -> str:
+async def _call_gemini(prompt: str, max_tokens: int = 512) -> str:
     """
-    Call Claude Haiku via the Anthropic Messages API in a thread-pool executor
-    so the synchronous SDK call does not block the FastAPI async event loop.
+    Call Gemini 3.5 Flash via the Google REST API in a thread-pool executor
+    so the synchronous HTTP call does not block the FastAPI async event loop.
 
     Returns a graceful fallback string when the API key is not configured
     or an error occurs — the app stays functional without AI summaries.
     """
-    if _claude is None:
+    if _gemini_client is None:
         return (
-            "[Claude tidak dikonfigurasi — tambahkan ANTHROPIC_API_KEY ke file .env] "
+            "[Gemini tidak dikonfigurasi — tambahkan GEMINI_API_KEY ke file .env] "
             "Tinjau skenario solver di atas dan pilih yang sesuai secara manual."
         )
     loop = asyncio.get_event_loop()
+
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }],
+        "generationConfig": {
+            "maxOutputTokens": max_tokens,
+        }
+    }
+
     try:
         response = await loop.run_in_executor(
             None,
-            lambda: _claude.messages.create(
-                model=ANTHROPIC_MODEL,
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
+            lambda: _gemini_client.post(
+                GEMINI_API_URL,
+                json=payload,
+                headers={"Content-Type": "application/json"},
             ),
         )
-        # content is a list of ContentBlock; grab the first text block
-        return response.content[0].text.strip()
+        response.raise_for_status()
+        result = response.json()
+        # Extract text from Gemini response
+        candidates = result.get("candidates", [])
+        if candidates and "content" in candidates[0]:
+            parts = candidates[0]["content"].get("parts", [])
+            if parts:
+                return parts[0].get("text", "").strip()
+        return "[Gemini: No content in response] Silakan tinjau skenario solver secara manual."
     except Exception as exc:
-        return f"[Claude error: {exc}] Silakan tinjau skenario solver secara manual."
+        return f"[Gemini error: {exc}] Silakan tinjau skenario solver secara manual."
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -197,12 +214,12 @@ async def get_state() -> dict[str, Any]:
 @app.post(
     "/api/disrupt",
     response_model=DisruptionResponse,
-    summary="Trigger disruption analysis — CP-SAT solver + Claude Haiku summary",
+    summary="Trigger disruption analysis — CP-SAT solver + Gemini 3.5 Flash summary",
 )
 async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
     """
     Simulate a machine disruption. Runs the CP-SAT solver to generate three
-    recovery scenarios (A / B / C), then calls Claude Haiku to produce a 2-3
+    recovery scenarios (A / B / C), then calls Gemini 3.5 Flash to produce a 2-3
     sentence executive summary in Bahasa Indonesia with specific IDR cost figures.
     """
     if body.end_hour <= body.start_hour:
@@ -229,7 +246,7 @@ async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
 
     disruption_hours = body.end_hour - body.start_hour
 
-    # ── Claude Haiku: Bahasa Indonesia executive summary ──────────────────────
+    # ── Gemini 3.5 Flash: Bahasa Indonesia executive summary ──────────────────
     prompt = (
         f"Anda adalah AI Supervisor lantai produksi di PT Karawang Precision Manufacturing.\n"
         f"Mesin {body.machine_id} mengalami gangguan ({body.disruption_type}) "
@@ -242,14 +259,14 @@ async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
         "3. Tindakan konkret apa yang harus diambil supervisor selanjutnya.\n\n"
         "Jawab HANYA dengan ringkasan tersebut, tanpa kata pengantar atau penjelasan tambahan."
     )
-    claude_summary = await _call_claude(prompt, max_tokens=512)
+    gemini_summary = await _call_gemini(prompt, max_tokens=512)
 
     return DisruptionResponse(
         machine_id=body.machine_id,
         disruption_type=body.disruption_type,
         disruption_hours=disruption_hours,
         scenarios=scenarios,
-        claude_summary=claude_summary,
+        claude_summary=gemini_summary,
         sap_version=_sap.get_version(),
     )
 
@@ -353,7 +370,7 @@ async def get_ledger_verify() -> LedgerVerifyResponse:
 )
 async def post_skills_generate(body: SkillGenerateRequest) -> SkillGenerateResponse:
     """
-    Call Claude Haiku to produce a full bilingual EN/ID SKILL.md playbook from
+    Call Gemini 3.5 Flash to produce a full bilingual EN/ID SKILL.md playbook from
     a plain-language supervisor description.
     """
     prompt = (
@@ -372,8 +389,8 @@ async def post_skills_generate(body: SkillGenerateRequest) -> SkillGenerateRespo
         "Be specific, realistic, and production-ready. Include concrete threshold values.\n"
         "Output ONLY the raw markdown, starting with # SKILL.md."
     )
-    skill_md = await _call_claude(prompt, max_tokens=2048)
-    return SkillGenerateResponse(skill_md=skill_md, model_used=ANTHROPIC_MODEL)
+    skill_md = await _call_gemini(prompt, max_tokens=2048)
+    return SkillGenerateResponse(skill_md=skill_md, model_used=GEMINI_MODEL)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -428,7 +445,7 @@ async def ws_telemetry(websocket: WebSocket) -> None:
                   "Jawab HANYA analisisnya, tanpa kata pengantar."
             )
 
-            analysis = await _call_claude(analysis_prompt, max_tokens=150)
+            analysis = await _call_gemini(analysis_prompt, max_tokens=150)
 
             await websocket.send_json({
                 "event":          "telemetry_analysis",
@@ -510,8 +527,8 @@ def _classify_telemetry(metric: str, value: float) -> tuple[str, str | None]:
 async def health() -> dict[str, str]:
     return {
         "status":             "ok",
-        "ai_model":           ANTHROPIC_MODEL,
-        "claude_configured":  "yes" if ANTHROPIC_API_KEY else "no — set ANTHROPIC_API_KEY in .env",
+        "ai_model":           GEMINI_MODEL,
+        "gemini_configured":  "yes" if GEMINI_API_KEY else "no — set GEMINI_API_KEY in .env",
         "sap_version":        str(_sap.get_version()),
         "ledger_entries":     str(len(_ledger.get_all())),
     }
