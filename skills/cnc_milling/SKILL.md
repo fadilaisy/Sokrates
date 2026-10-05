@@ -123,7 +123,7 @@ Gangguan Terdeteksi
 [Jalankan CP-SAT Solver]──→ 3 Skenario (A/B/C)
        │
        ▼
-[Gemini Analisis] ──→ Ringkasan Bahasa Indonesia
+[Claude Haiku Analisis] ──→ Ringkasan Bahasa Indonesia
        │
        ▼
 [Cek Threshold Eskalasi]
