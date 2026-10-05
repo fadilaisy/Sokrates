@@ -1,7 +1,8 @@
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
 ortools>=9.10.4067
-google-generativeai>=0.3.0
+# NOTE: google-generativeai removed — dead dep (backend uses raw httpx REST).
+# It pinned protobuf<5 which conflicts with ortools (needs protobuf>=6.33.1).
 python-dotenv>=1.0.1
 pydantic>=2.7.0
 httpx>=0.27.0
