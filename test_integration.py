@@ -2,7 +2,9 @@
 """Integration tests for SkillForge backend."""
 import httpx
 import asyncio
+import pytest
 
+@pytest.mark.asyncio
 async def test():
     client = httpx.AsyncClient(timeout=30)
     
