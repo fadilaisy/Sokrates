@@ -42,3 +42,6 @@ frontend/.env
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Agent scratch memory — local only, never commit
+.brain/
