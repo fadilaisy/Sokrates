@@ -59,6 +59,12 @@ class SAPClient:
     def _deep_copy_state(self):
         return copy.deepcopy(self._state)
 
+    def reset(self):
+        """Reset in-memory state back to original file contents."""
+        with self._lock:
+            self._state = self._load()
+            return self._deep_copy_state()
+
     def get_state(self):
         """Return entire shop-floor state including current version."""
         with self._lock:

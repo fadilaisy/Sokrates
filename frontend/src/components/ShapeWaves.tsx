@@ -2,14 +2,23 @@
 
 import './ShapeWaves.css';
 
+interface ShapeWavesProps {
+  text?: string;
+  color?: string;
+  hoverColor?: string;
+  backgroundColor?: string;
+  speed?: number;
+  glow?: number;
+}
+
 const ShapeWaves = ({
   text = '',
-  color = '#4A4E69',
-  hoverColor = '#F9F7F7',
+  color: _color = '#4A4E69',
+  hoverColor: _hoverColor = '#F9F7F7',
   backgroundColor = '#22223B',
   speed = 1,
   glow = 0.35
-}) => {
+}: ShapeWavesProps) => {
   const bgStyle: React.CSSProperties = {
     backgroundColor,
     backgroundImage: `
