@@ -129,6 +129,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   state: () => req<SapState>("/api/state"),
+  resetState: () => req<SapState>("/api/state/reset", { method: "POST" }),
   health: () => req<Record<string, string>>("/health"),
   disrupt: (b: { machine_id: string; disruption_type: string; start_hour: number; end_hour: number }) =>
     req<DisruptResponse>("/api/disrupt", { method: "POST", body: JSON.stringify(b) }),
@@ -139,4 +140,9 @@ export const api = {
     ),
   ledger: () => req<LedgerEntry[]>("/api/ledger"),
   verify: () => req<{ valid: boolean; total_entries: number; first_broken_index: number | null; message: string }>("/api/ledger/verify"),
+  generateSkill: (supervisor_description: string) =>
+    req<{ skill_md: string; model_used: string }>("/api/skills/generate", {
+      method: "POST",
+      body: JSON.stringify({ supervisor_description }),
+    }),
 };

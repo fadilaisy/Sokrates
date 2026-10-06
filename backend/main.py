@@ -86,7 +86,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -179,13 +179,10 @@ async def _call_gemini(prompt: str, max_tokens: int = 512) -> str:
     }
 
     try:
-        response = await loop.run_in_executor(
-            None,
-            lambda: _gemini_client.post(
-                GEMINI_API_URL,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-            ),
+        response = await _gemini_client.post(
+            GEMINI_API_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
         )
         response.raise_for_status()
         result = response.json()
@@ -209,6 +206,12 @@ async def _call_gemini(prompt: str, max_tokens: int = 512) -> str:
 async def get_state() -> dict[str, Any]:
     """Return the full in-memory shop-floor state from the SAP mock adapter."""
     return _sap.get_state()
+
+
+@app.post("/api/state/reset", summary="Reset SAP mock state to initial baseline")
+async def post_state_reset() -> dict[str, Any]:
+    """Reset the mock SAP in-memory state back to its pristine initial state."""
+    return _sap.reset()
 
 
 @app.post(

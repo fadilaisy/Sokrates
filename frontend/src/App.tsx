@@ -1,27 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Gantt from "./components/Gantt";
-import LatticeLoader from "./components/LatticeLoader";
 import ShapeWaves from "./components/ShapeWaves";
+import SkillStudio from "./components/SkillStudio";
 import { api, formatIDR } from "./lib/api";
 import type { DisruptResponse, LedgerEntry, SapState, Scenario } from "./lib/api";
 
 const APPROVAL_THRESHOLD = 1_000_000;
 
-// Design system colors
-const COLORS = {
-  bg: "#22223B",
-  card: "#2A2A40",
-  text: "#F9F7F7",
-  muted: "#9A8C98",
-  primary: "#F2A900",
-  secondary: "#4A4E69",
-  border: "#353A50",
-  success: "#CBF3F0",
-  warning: "#F2A900",
-  error: "#E76F51",
-};
-
 export default function App() {
+  const [mainTab, setMainTab] = useState<"operations" | "skills" | "ledger" | "all">("operations");
+  const [resetting, setResetting] = useState(false);
+  const [resetNotice, setResetNotice] = useState<string | null>(null);
+
   const [state, setState] = useState<SapState | null>(null);
   const [health, setHealth] = useState<Record<string, string> | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -70,6 +60,25 @@ export default function App() {
   useEffect(() => {
     load();
   }, [load]);
+
+  async function onReset() {
+    setResetting(true);
+    setErr(null);
+    setReceipt(null);
+    setDisrupt(null);
+    try {
+      const s = await api.resetState();
+      setState(s);
+      setSapVersion(s._meta.version);
+      setResetNotice("Simulasi berhasil di-reset ke kondisi awal (SAP v1)!");
+      setTimeout(() => setResetNotice(null), 4000);
+      await load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setResetting(false);
+    }
+  }
 
   async function onDisrupt() {
     setBusy(true);
@@ -193,16 +202,85 @@ export default function App() {
               <span className="rounded-lg bg-[#353A50] px-3 py-1.5 text-xs text-[#F9F7F7]">SAP v{sapVersion}</span>
               <button
                 onClick={load}
-                className="rounded-lg bg-[#F2A900] px-4 py-1.5 text-xs font-semibold text-[#F9F7F7] hover:bg-[#E29B00] active:scale-95 transition-transform shadow-lg shadow-[#F2A900]/20"
+                className="rounded-lg bg-[#353A50] px-3 py-1.5 text-xs font-medium text-[#F9F7F7] hover:bg-[#4A4E69] active:scale-95 transition-transform"
               >
                 Muat ulang
+              </button>
+              <button
+                onClick={onReset}
+                disabled={resetting}
+                className="rounded-lg border border-[#E76F51]/60 bg-[#E76F51]/15 px-3 py-1.5 text-xs font-semibold text-[#E76F51] hover:bg-[#E76F51]/25 active:scale-95 transition-transform disabled:opacity-50"
+                title="Reset seluruh state SAP kembali ke baseline semula untuk demonstrasi ulang"
+              >
+                {resetting ? "Mereset…" : "Reset Simulasi"}
               </button>
             </div>
           </div>
         </header>
 
+        {/* Navigation Tabs */}
+        <div className="sticky top-[65px] z-40 border-b border-[#353A50] bg-[#22223B]/90 backdrop-blur-md">
+          <div className="mx-auto flex max-w-7xl items-center gap-2 px-6 py-2.5 overflow-x-auto text-xs">
+            <button
+              onClick={() => setMainTab("operations")}
+              className={`rounded-lg px-3.5 py-1.5 font-medium transition-all ${
+                mainTab === "operations"
+                  ? "bg-[#F2A900] text-[#22223B] font-bold shadow"
+                  : "text-[#9A8C98] hover:bg-[#353A50]/50 hover:text-[#F9F7F7]"
+              }`}
+            >
+              📊 Operasional & Rescheduling
+            </button>
+            <button
+              onClick={() => setMainTab("skills")}
+              className={`rounded-lg px-3.5 py-1.5 font-medium transition-all ${
+                mainTab === "skills"
+                  ? "bg-[#F2A900] text-[#22223B] font-bold shadow"
+                  : "text-[#9A8C98] hover:bg-[#353A50]/50 hover:text-[#F9F7F7]"
+              }`}
+            >
+              🧠 Skill Studio (Playbook AI)
+            </button>
+            <button
+              onClick={() => setMainTab("ledger")}
+              className={`rounded-lg px-3.5 py-1.5 font-medium transition-all ${
+                mainTab === "ledger"
+                  ? "bg-[#F2A900] text-[#22223B] font-bold shadow"
+                  : "text-[#9A8C98] hover:bg-[#353A50]/50 hover:text-[#F9F7F7]"
+              }`}
+            >
+              📜 Audit Ledger
+            </button>
+            <button
+              onClick={() => setMainTab("all")}
+              className={`rounded-lg px-3.5 py-1.5 font-medium transition-all ${
+                mainTab === "all"
+                  ? "bg-[#F2A900] text-[#22223B] font-bold shadow"
+                  : "text-[#9A8C98] hover:bg-[#353A50]/50 hover:text-[#F9F7F7]"
+              }`}
+            >
+              ⚡ Semua Tampilan
+            </button>
+          </div>
+        </div>
+
         {/* Main Content */}
         <main className="mx-auto max-w-7xl space-y-6 px-6 py-8">
+          {resetNotice && (
+            <div className="animate-scale-in flex items-center justify-between rounded-xl border border-[#CBF3F0]/30 bg-[#CBF3F0]/10 p-3 text-xs font-semibold text-[#CBF3F0] shadow-lg shadow-[#CBF3F0]/10">
+              <div className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-[#CBF3F0]" />
+                <span>{resetNotice}</span>
+              </div>
+              <button
+                onClick={() => setResetNotice(null)}
+                className="text-xs text-[#CBF3F0]/70 hover:text-[#CBF3F0]"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
           {err && (
             <div className="animate-scale-in rounded-xl border border-[#E76F51]/30 bg-[#E76F51]/5 p-4 text-sm text-[#E76F51] shadow-lg shadow-[#E76F51]/10">
               <p className="font-semibold">Gagal: {err}</p>
@@ -212,8 +290,11 @@ export default function App() {
             </div>
           )}
 
-          {/* Work Centers Grid */}
-          <section className="animate-fade-in">
+          {/* Operations & Rescheduling */}
+          {(mainTab === "operations" || mainTab === "all") && (
+            <>
+              {/* Work Centers Grid */}
+              <section className="animate-fade-in">
             <h2 className="mb-4 text-sm font-semibold text-[#F9F7F7]">Status Mesin</h2>
             <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
               {state?.work_centers.map((w, i) => (
@@ -429,14 +510,23 @@ export default function App() {
                 </div>
               )}
               <p className="text-[10px] text-[#9A8C98]">
-                Catatan: Setelah approve, order jadi RESCHEDULED sehingga solver mengabaikannya pada gangguan berikut.
-                Restart backend untuk mengulang demo.
+                Catatan: Setelah disetujui, order berstatus RESCHEDULED. Gunakan tombol &quot;Reset Simulasi&quot; di atas untuk mengulang demo kapan saja tanpa perlu restart backend.
               </p>
             </section>
           )}
+        </>
+      )}
 
-          {/* Audit Ledger */}
-          <section className="animate-fade-in" style={{ animationDelay: '300ms' }}>
+      {/* Skill Studio */}
+      {(mainTab === "skills" || mainTab === "all") && (
+        <section className="animate-fade-in">
+          <SkillStudio />
+        </section>
+      )}
+
+      {/* Audit Ledger */}
+      {(mainTab === "ledger" || mainTab === "all") && (
+        <section className="animate-fade-in" style={{ animationDelay: '300ms' }}>
             <div className="overflow-hidden rounded-2xl border border-[#353A50] bg-[#2A2A40] shadow-xl shadow-black/30">
               <div className="flex items-center justify-between px-6 py-4 border-b border-[#353A50]">
                 <h2 className="text-sm font-semibold text-[#F9F7F7]">Audit Ledger</h2>
@@ -461,7 +551,7 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#353A50]">
-                    {ledger.map((e, i) => (
+                    {ledger.map((e) => (
                       <tr key={e.id} className="hover:bg-[#353A50]/50 transition-colors">
                         <td className="px-6 py-3 font-mono text-[10px] text-[#9A8C98]">
                           {String(e.timestamp).slice(0, 19)}
@@ -491,8 +581,10 @@ export default function App() {
               </div>
             </div>
           </section>
+        )}
 
-          {/* Telemetry */}
+        {/* Telemetry (Live IoT Stream) */}
+        {(mainTab === "operations" || mainTab === "all") && (
           <section className="animate-fade-in" style={{ animationDelay: '350ms' }}>
             <div className="overflow-hidden rounded-2xl border border-[#353A50] bg-[#2A2A40] shadow-xl shadow-black/30">
               <div className="flex items-center justify-between px-6 py-4 border-b border-[#353A50]">
@@ -595,6 +687,7 @@ export default function App() {
               </div>
             </div>
           </section>
+        )}
         </main>
       </div>
     </div>
