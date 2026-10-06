@@ -21,7 +21,6 @@ Docs:   http://localhost:8000/docs
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sys
@@ -150,14 +149,13 @@ class SkillGenerateResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Gemini helper — non-blocking via thread-pool executor
+# Gemini helper — async via httpx (no executor needed)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 async def _call_gemini(prompt: str, max_tokens: int = 512) -> str:
     """
-    Call Gemini 3.5 Flash via the Google REST API in a thread-pool executor
-    so the synchronous HTTP call does not block the FastAPI async event loop.
+    Call Gemini 3.5 Flash via the Google REST API with async httpx.
 
     Returns a graceful fallback string when the API key is not configured
     or an error occurs — the app stays functional without AI summaries.
@@ -167,8 +165,6 @@ async def _call_gemini(prompt: str, max_tokens: int = 512) -> str:
             "[Gemini tidak dikonfigurasi — tambahkan GEMINI_API_KEY ke file .env] "
             "Tinjau skenario solver di atas dan pilih yang sesuai secara manual."
         )
-    loop = asyncio.get_event_loop()
-
     payload = {
         "contents": [{
             "parts": [{"text": prompt}]
