@@ -45,3 +45,7 @@ htmlcov/
 
 # Agent scratch memory — local only, never commit
 .brain/
+
+# RAG index + uploaded documents
+rag_data/
+rag/samples_out/

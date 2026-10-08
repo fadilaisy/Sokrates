@@ -69,6 +69,146 @@ export interface DisruptResponse {
   scenarios: Scenario[];
   claude_summary: string;  // kept as-is for backward compatibility
   sap_version: number;
+  sources?: RagSource[];        // RAG grounding passages (may be empty)
+  grounding_abstained?: boolean;
+}
+
+// ── RAG ────────────────────────────────────────────────────────────────────
+
+export type ConstraintTier = "Safety" | "Quality" | "Cost";
+export type DocStatus = "pending" | "processing" | "indexed" | "failed" | "superseded";
+
+export interface ScoreBreakdown {
+  total: number;
+  R: number;
+  M: number;
+  F: number;
+  A: number;
+  P: number;
+  weighted: { R: number; M: number; F: number; A: number; P: number };
+  reasons: string[];
+}
+
+/** A passage the cockpit can open in the source viewer. */
+export interface RagSource {
+  chunk_id: string;
+  doc_id: string;
+  doc_title: string;
+  page: number;
+  citation: string;
+  bbox?: number[] | null;
+  constraint_tier?: ConstraintTier | string | null;
+  forced_safety?: boolean;
+  score?: number | null;
+  section_path?: string | null;
+  text?: string;
+  breakdown?: ScoreBreakdown | null;
+  sid?: string;
+}
+
+export interface RagDoc {
+  doc_id: string;
+  family_id: string;
+  version: number;
+  title: string;
+  filename: string;
+  doc_type: string | null;
+  doc_type_confidence: number | null;
+  doc_type_source: string | null;
+  summary: string | null;
+  language: string | null;
+  plant: string;
+  machine_ids: string[];
+  machine_models: string[];
+  effective_date: string | null;
+  supersedes: string | null;
+  superseded_by: string | null;
+  authority_tier: number | null;
+  status: DocStatus;
+  error: string | null;
+  warnings: string[];
+  page_count: number | null;
+  ocr_pages: number[];
+  low_conf_pages: { page: number; confidence: number }[];
+  chunk_count: number;
+  uploaded_by: string;
+  uploaded_at: string;
+  // detail-only
+  chunks_by_tier?: Record<string, number>;
+  fault_codes?: string[];
+  part_numbers?: string[];
+  has_viewer?: boolean;
+}
+
+export interface RagIncident {
+  machine_id?: string;
+  fault_code?: string;
+  severity?: string;
+  disruption_type?: string;
+  shift?: string;
+}
+
+export interface RetrieveResult extends RagSource {
+  doc_type: string;
+  version: number;
+  kind: string;
+  fault_codes: string[];
+  part_numbers: string[];
+  ocr_confidence: number | null;
+  superseded: boolean;
+}
+
+export interface RetrieveResponse {
+  abstained: boolean;
+  message: string | null;
+  results: RetrieveResult[];
+  near_miss: RagSource[];
+  filters: string[];
+  candidates: number;
+  threshold: number;
+  weights: Record<string, number>;
+  machine: { id: string; model: string } | null;
+  fault_code: string | null;
+  latency_ms: number;
+}
+
+export interface AnswerClaim {
+  text: string;
+  sources: string[];
+  citations: RagSource[];
+  support: number;
+}
+
+export interface AnswerResponse {
+  status: "answered" | "insufficient" | "abstained" | "llm_unavailable" | "error";
+  message: string | null;
+  answer: string | null;
+  claims: AnswerClaim[];
+  rejected_claims: { text: string; reason: string; sources: string[] }[];
+  sources: RagSource[];
+  injection_flags?: string[];
+  provider?: string;
+  model?: string;
+  latency_ms: number;
+  retrieval: { abstained: boolean; filters: string[]; candidates: number; latency_ms: number };
+}
+
+export interface RagStatus {
+  documents: Record<string, number>;
+  chunks: number;
+  ocr: { available: boolean; languages: string | null };
+  llm_providers: string[];
+  provider_order: string;
+  models: { gemini: string; claude: string };
+}
+
+/** The cockpit acts as a supervisor (uploads allowed). No real auth in the backend yet. */
+export const COCKPIT_ROLE = "supervisor";
+
+export function ragPageUrl(docId: string, page: number, chunkId?: string): string {
+  const q = new URLSearchParams({ role: COCKPIT_ROLE, dpi: "120" });
+  if (chunkId) q.set("chunk_id", chunkId);
+  return `${API_BASE}/api/documents/${encodeURIComponent(docId)}/pages/${page}.png?${q}`;
 }
 
 export interface LedgerEntry {
@@ -145,4 +285,44 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ supervisor_description }),
     }),
+};
+
+const roleHeaders = (role: string = COCKPIT_ROLE) => ({ "X-User-Role": role });
+
+export const rag = {
+  status: () => req<RagStatus>("/api/rag/status"),
+  listDocs: () => req<RagDoc[]>("/api/documents", { headers: roleHeaders() }),
+  getDoc: (id: string) => req<RagDoc>(`/api/documents/${encodeURIComponent(id)}`, { headers: roleHeaders() }),
+  reindex: (id: string) =>
+    req<{ doc_id: string; status: string }>(`/api/documents/${encodeURIComponent(id)}/reindex`, {
+      method: "POST",
+      headers: roleHeaders(),
+    }),
+  seedDemo: () =>
+    req<{ file: string; doc_id: string; status: string }[]>("/api/rag/seed-demo", {
+      method: "POST",
+      headers: roleHeaders("admin"),
+    }),
+  retrieve: (incident: RagIncident, query: string) =>
+    req<RetrieveResponse>("/api/retrieve", {
+      method: "POST",
+      headers: roleHeaders(),
+      body: JSON.stringify({ incident, query }),
+    }),
+  answer: (incident: RagIncident, query: string) =>
+    req<AnswerResponse>("/api/answer", {
+      method: "POST",
+      headers: roleHeaders(),
+      body: JSON.stringify({ incident, query }),
+    }),
+  /** Multipart upload — can't use req() because it forces a JSON content type. */
+  upload: async (file: File, meta: Record<string, string | undefined>) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    for (const [k, v] of Object.entries(meta)) if (v) fd.append(k, v);
+    const res = await fetch(API_BASE + "/api/documents", { method: "POST", body: fd, headers: roleHeaders() });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((body as { detail?: string }).detail ?? `HTTP ${res.status}`);
+    return body as { doc_id: string; status: string; duplicate: boolean; version: number; message?: string };
+  },
 };

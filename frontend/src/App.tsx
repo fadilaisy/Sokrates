@@ -2,13 +2,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Gantt from "./components/Gantt";
 import ShapeWaves from "./components/ShapeWaves";
 import SkillStudio from "./components/SkillStudio";
+import DocumentLibrary from "./components/DocumentLibrary";
+import SourceViewer, { SourceChips } from "./components/SourceViewer";
 import { api, formatIDR } from "./lib/api";
-import type { DisruptResponse, LedgerEntry, SapState, Scenario } from "./lib/api";
+import type { DisruptResponse, LedgerEntry, RagSource, SapState, Scenario } from "./lib/api";
 
 const APPROVAL_THRESHOLD = 1_000_000;
 
 export default function App() {
-  const [mainTab, setMainTab] = useState<"operations" | "skills" | "ledger" | "all">("operations");
+  const [mainTab, setMainTab] = useState<"operations" | "skills" | "documents" | "ledger" | "all">("operations");
+  const [openSource, setOpenSource] = useState<RagSource | null>(null);
+  const closeSource = useCallback(() => setOpenSource(null), []);
   const [resetting, setResetting] = useState(false);
   const [resetNotice, setResetNotice] = useState<string | null>(null);
 
@@ -242,6 +246,16 @@ export default function App() {
               🧠 Skill Studio (Playbook AI)
             </button>
             <button
+              onClick={() => setMainTab("documents")}
+              className={`rounded-lg px-3.5 py-1.5 font-medium transition-all ${
+                mainTab === "documents"
+                  ? "bg-[#F2A900] text-[#22223B] font-bold shadow"
+                  : "text-[#9A8C98] hover:bg-[#353A50]/50 hover:text-[#F9F7F7]"
+              }`}
+            >
+              📚 Dokumen & RAG
+            </button>
+            <button
               onClick={() => setMainTab("ledger")}
               className={`rounded-lg px-3.5 py-1.5 font-medium transition-all ${
                 mainTab === "ledger"
@@ -419,6 +433,18 @@ export default function App() {
                   <div className="mt-4 animate-scale-in rounded-lg border border-[#F2A900]/20 bg-[#F2A900]/5 p-4">
                     <p className="mb-2 text-xs font-medium text-[#F2A900]">Ringkasan AI (Bahasa Indonesia):</p>
                     <p className="text-sm text-[#F9F7F7] leading-relaxed">{disrupt.claude_summary}</p>
+                    {disrupt.sources && disrupt.sources.length > 0 ? (
+                      <div className="mt-3 border-t border-[#F2A900]/15 pt-3">
+                        <p className="mb-1.5 text-[11px] text-[#9A8C98]">
+                          Sumber dokumen pabrik{disrupt.grounding_abstained ? " (hanya slot keselamatan — tidak ada passage lain yang cukup relevan)" : ""}:
+                        </p>
+                        <SourceChips sources={disrupt.sources} onOpen={setOpenSource} />
+                      </div>
+                    ) : (
+                      <p className="mt-3 text-[11px] text-[#9A8C98]">
+                        Tidak ada dokumen pabrik yang cukup relevan — ringkasan hanya berdasarkan solver.
+                      </p>
+                    )}
                   </div>
                 )}
               </div>
@@ -521,6 +547,13 @@ export default function App() {
       {(mainTab === "skills" || mainTab === "all") && (
         <section className="animate-fade-in">
           <SkillStudio />
+        </section>
+      )}
+
+      {/* Documents & RAG */}
+      {(mainTab === "documents" || mainTab === "all") && (
+        <section className="animate-fade-in">
+          <DocumentLibrary workCenters={state?.work_centers ?? []} onOpenSource={setOpenSource} />
         </section>
       )}
 
@@ -690,6 +723,7 @@ export default function App() {
         )}
         </main>
       </div>
+      <SourceViewer key={openSource ? `${openSource.chunk_id}|${openSource.doc_id}|${openSource.page}` : "none"} source={openSource} onClose={closeSource} />
     </div>
   );
 }
