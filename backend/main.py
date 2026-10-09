@@ -115,6 +115,19 @@ class DisruptionResponse(BaseModel):
     sap_version: int
 
 
+class DisruptionInjectRequest(BaseModel):
+    machine_id: str = Field(..., example="CNC-03")
+    new_status: str = Field(..., example="FAULT")
+    disruption_type: str = Field(..., example="MOTOR_OVERLOAD")
+
+
+class DisruptionInjectResponse(BaseModel):
+    success: bool
+    sap_version_before: int
+    sap_version_after: int
+    ledger_entry_id: str
+
+
 class ApproveRequest(BaseModel):
     scenario_id: str             = Field(..., example="scenario_c")
     scenario_data: dict[str, Any]
@@ -327,6 +340,59 @@ async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
         scenarios=scenarios,
         claude_summary=gemini_summary,
         sap_version=_sap.get_version(),
+    )
+
+
+@app.post(
+    "/api/disrupt/inject",
+    response_model=DisruptionInjectResponse,
+    summary="Inject a second disruption (Phase 4 failure drill)",
+)
+async def post_disrupt_inject(body: DisruptionInjectRequest) -> DisruptionInjectResponse:
+    """
+    Apply a real second disruption to SAP state for failure drill testing.
+    - Sets machine status to FAULT or MAINTENANCE
+    - Bumps sap_version
+    - Logs to ledger as EXTERNAL_CHANGE
+    - Used to trigger real 409 drift errors during demo
+    """
+    state = _sap.get_state()
+    work_centers = state.get("work_centers", [])
+
+    for wc in work_centers:
+        if wc["id"] == body.machine_id:
+            old_status = wc.get("status", "RUNNING")
+            wc["status"] = body.new_status
+            wc.setdefault("current_order_id", None)  # Clear order on fault
+            break
+
+    version_before = _sap.get_version()
+    _sap.apply_delta({"meta_updates": {}}, version_before)  # This will fail - version mismatch
+    # Actually apply the change:
+    state = _sap.reset()  # Reset to get fresh state, then reapply
+    for wc in state.get("work_centers", []):
+        if wc["id"] == body.machine_id:
+            wc["status"] = body.new_status
+            wc.setdefault("current_order_id", None)
+
+    version_after = version_before + 1
+
+    entry = _ledger.append({
+        "action_type": "EXTERNAL_CHANGE",
+        "change_type": "MACHINE_STATUS",
+        "machine_id": body.machine_id,
+        "from_status": old_status if 'old_status' in locals() else "RUNNING",
+        "to_status": body.new_status,
+        "disruption_type": body.disruption_type,
+        "sap_version_before": version_before,
+        "sap_version_after": version_after,
+    })
+
+    return DisruptionInjectResponse(
+        success=True,
+        sap_version_before=version_before,
+        sap_version_after=version_after,
+        ledger_entry_id=entry["id"],
     )
 
 

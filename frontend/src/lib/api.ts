@@ -254,4 +254,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify(b),
     }),
+  injectDisruption: (b: { machine_id: string; new_status: string; disruption_type: string }) =>
+    req<{ success: boolean; sap_version_before: number; sap_version_after: number; ledger_entry_id: string }>("/api/disrupt/inject", {
+      method: "POST",
+      body: JSON.stringify(b),
+    }),
 };
