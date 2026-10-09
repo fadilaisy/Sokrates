@@ -16,3 +16,11 @@ Task 2: complete (commits 4b5b2a0..259139c, Phase 3 foundation: Skill Studio bac
 - Added /api/skills/approve endpoint for approve-and-save
 - Fallback templates when Gemini is not configured
 - Tier 1 rules cannot be relaxed (validation errors)
+
+Task 3: complete (commits 259139c..5452e54, Phase 3 frontend + Phase 4 failure drill)
+- SkillStudioFormData, SkillStudioDraft, SkillStudioLintResult types added
+- Skill Studio API endpoints: draftSkill, lintSkill, approveSkill
+- Skill Studio state added to CockpitValue
+- POST /api/disrupt/inject for Phase 4 failure drill
+- Inject endpoint sets machine FAULT/MAINTENANCE, bumps sap_version, logs EXTERNAL_CHANGE
+
