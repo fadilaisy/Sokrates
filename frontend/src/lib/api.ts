@@ -1,4 +1,47 @@
-export const API_BASE = "http://localhost:8000";
+export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "http://localhost:8000";
+export const WS_TELEMETRY = API_BASE.replace(/^http/, "ws") + "/ws/telemetry";
+
+/** Error with the HTTP status and parsed body, so callers can react to 409 drift etc. */
+export class ApiError extends Error {
+  status: number;
+  detail: unknown;
+  constructor(status: number, path: string, detail: unknown) {
+    super(`HTTP ${status} ${path}: ${JSON.stringify(detail).slice(0, 400)}`);
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+export interface DriftDetail {
+  error: "DriftError";
+  message: string;
+  expected_version: number;
+  actual_version: number;
+  receipt_id?: string;
+}
+
+export interface MaintenanceSlot {
+  id: string;
+  work_center_id: string;
+  type: string;
+  start: string;
+  end: string;
+  description: string;
+  status: string;
+}
+
+export interface TelemetryFrame {
+  event: "telemetry_analysis" | "safety_alert" | "error";
+  machine_id?: string;
+  metric?: string;
+  value?: number;
+  severity?: "OK" | "WARNING" | "CRITICAL";
+  rule_triggered?: string | null;
+  analysis?: string;
+  action_required?: string;
+  message?: string;
+  timestamp?: string;
+}
 
 export interface WorkCenter {
   id: string;
@@ -35,6 +78,8 @@ export interface SapState {
   _meta: { version: number; facility?: string; [k: string]: unknown };
   work_centers: WorkCenter[];
   production_orders: ProdOrder[];
+  maintenance_slots?: MaintenanceSlot[];
+  shop_floor_config?: { shift_start?: string; shift_end?: string; [k: string]: unknown };
   [k: string]: unknown;
 }
 
@@ -50,6 +95,13 @@ export interface GanttChange {
   changeover_cost_idr?: number;
 }
 
+export interface CostBreakdown {
+  sla: number;
+  overtime: number;
+  changeover: number;
+  freight: number;
+}
+
 export interface Scenario {
   id: string;
   name_en: string;
@@ -60,6 +112,7 @@ export interface Scenario {
   affected_orders: string[];
   gantt_changes: GanttChange[];
   rationale_template: string;
+  cost_breakdown?: CostBreakdown;
 }
 
 export interface DisruptResponse {
@@ -81,6 +134,44 @@ export interface LedgerEntry {
   sap_version_after: number;
   approved_by: string;
   [k: string]: unknown;
+}
+
+export interface ApproveReceipt {
+  receipt_id: string;
+  scenario_id: string;
+  sap_version_before: number;
+  sap_version_after: number;
+  timestamp: string;
+  sha256_hash: string;
+  message: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 3: Skill Studio types
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface SkillStudioFormData {
+  machine_type: string;
+  failure_mode: string;
+  sla_class_a_penalty_per_hour_idr: number;
+  sla_class_b_penalty_per_hour_idr: number;
+  sla_class_c_penalty_per_hour_idr: number;
+  overtime_cost_per_hour_idr: number;
+  changeover_cost_idr: number;
+  safety_thresholds: Record<string, number>;
+}
+
+export interface SkillStudioDraft {
+  skill_md: string;
+  sla_penalties: Record<string, any>;
+  hooks: Array<{ id: string; name: string; trigger_type: string; condition: string }>;
+  interlocks: Array<{ id: string; tier: number; name: string; condition: string; threshold_value: number | null }>;
+}
+
+export interface SkillStudioLintResult {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
 }
 
 export function formatIDR(n: number): string {
@@ -122,7 +213,9 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       /* keep text */
     }
-    throw new Error(`HTTP ${res.status} ${path}: ${JSON.stringify(detail).slice(0, 400)}`);
+    // FastAPI wraps errors as { detail: ... }
+    if (detail && typeof detail === "object" && "detail" in (detail as object)) detail = (detail as { detail: unknown }).detail;
+    throw new ApiError(res.status, path, detail);
   }
   return res.json() as Promise<T>;
 }
@@ -134,7 +227,7 @@ export const api = {
   disrupt: (b: { machine_id: string; disruption_type: string; start_hour: number; end_hour: number }) =>
     req<DisruptResponse>("/api/disrupt", { method: "POST", body: JSON.stringify(b) }),
   approve: (b: { scenario_id: string; scenario_data: unknown; expected_sap_version: number; approved_by: string }) =>
-    req<{ receipt_id: string; sap_version_before: number; sap_version_after: number; timestamp: string; sha256_hash: string; message: string }>(
+    req<ApproveReceipt>(
       "/api/approve",
       { method: "POST", body: JSON.stringify(b) },
     ),
@@ -144,5 +237,26 @@ export const api = {
     req<{ skill_md: string; model_used: string }>("/api/skills/generate", {
       method: "POST",
       body: JSON.stringify({ supervisor_description }),
+    }),
+  // Phase 3: Skill Studio
+  draftSkill: (b: SkillStudioFormData) =>
+    req<{ skill_md: string; sla_penalties: any; hooks: any[]; interlocks: any[]; validation_errors: string[] }>("/api/skills/draft", {
+      method: "POST",
+      body: JSON.stringify(b),
+    }),
+  lintSkill: (b: { skill_md: string; sla_penalties: any; hooks: any[]; interlocks: any[] }) =>
+    req<{ valid: boolean; errors: string[]; warnings: string[] }>("/api/skills/lint", {
+      method: "POST",
+      body: JSON.stringify(b),
+    }),
+  approveSkill: (b: { skill_id: string; skill_md: string; sla_penalties: any; hooks: any[]; interlocks: any[] }) =>
+    req<{ success: boolean; skill_id: string; version: string; ledger_entry_id: string }>("/api/skills/approve", {
+      method: "POST",
+      body: JSON.stringify(b),
+    }),
+  injectDisruption: (b: { machine_id: string; new_status: string; disruption_type: string }) =>
+    req<{ success: boolean; sap_version_before: number; sap_version_after: number; ledger_entry_id: string }>("/api/disrupt/inject", {
+      method: "POST",
+      body: JSON.stringify(b),
     }),
 };

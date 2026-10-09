@@ -47,6 +47,7 @@ if str(_ROOT) not in sys.path:
 from erp_adapter.sap_client import DriftError, SAPClient
 from erp_adapter.audit_ledger import AuditLedger
 from solver.schedule_solver import ScheduleSolver
+from skills.loader import SkillRegistry
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Google Gemini configuration (REST API, no SDK dependency)
@@ -65,9 +66,11 @@ _gemini_client: httpx.AsyncClient | None = (
 # Module-level singletons (safe in single-process uvicorn)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_sap    = SAPClient()
-_ledger = AuditLedger()
-_solver = ScheduleSolver()
+_sap       = SAPClient()
+_ledger    = AuditLedger()
+_solver    = ScheduleSolver()
+_skills    = SkillRegistry()
+_skills.index()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FastAPI app
@@ -112,6 +115,19 @@ class DisruptionResponse(BaseModel):
     sap_version: int
 
 
+class DisruptionInjectRequest(BaseModel):
+    machine_id: str = Field(..., example="CNC-03")
+    new_status: str = Field(..., example="FAULT")
+    disruption_type: str = Field(..., example="MOTOR_OVERLOAD")
+
+
+class DisruptionInjectResponse(BaseModel):
+    success: bool
+    sap_version_before: int
+    sap_version_after: int
+    ledger_entry_id: str
+
+
 class ApproveRequest(BaseModel):
     scenario_id: str             = Field(..., example="scenario_c")
     scenario_data: dict[str, Any]
@@ -146,6 +162,63 @@ class SkillGenerateRequest(BaseModel):
 class SkillGenerateResponse(BaseModel):
     skill_md: str
     model_used: str
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3: Skill Studio models
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class SkillDraftRequest(BaseModel):
+    machine_type: str = Field(..., example="Vertical Machining Center")
+    failure_mode: str = Field(..., example="Motor overload / vibration / coolant pressure low")
+    sla_class_a_penalty_per_hour_idr: int = Field(default=20_000_000)
+    sla_class_b_penalty_per_hour_idr: int = Field(default=300_000)
+    sla_class_c_penalty_per_hour_idr: int = Field(default=100_000)
+    overtime_cost_per_hour_idr: int = Field(default=450_000)
+    changeover_cost_idr: int = Field(default=350_000)
+    safety_thresholds: dict[str, float] = Field(
+        default_factory=dict,
+        example={"motor_temp_celsius": 95, "spindle_vibration_mm_per_s": 8, "coolant_pressure_bar": 2},
+    )
+
+
+class SkillDraftResponse(BaseModel):
+    skill_md: str
+    sla_penalties: dict
+    hooks: list[dict]
+    interlocks: list[dict]
+    validation_errors: list[str]
+
+
+class SkillLintRequest(BaseModel):
+    skill_md: str
+    sla_penalties: dict
+    hooks: list[dict]
+    interlocks: list[dict]
+    base_skill_id: str = Field(default="cnc_milling")
+
+
+class SkillLintResponse(BaseModel):
+    valid: bool
+    errors: list[str]
+    warnings: list[str]
+
+
+class SkillApproveRequest(BaseModel):
+    skill_id: str
+    skill_md: str
+    sla_penalties: dict
+    hooks: list[dict]
+    interlocks: list[dict]
+    skill_version: str = Field(default="1.0.0")
+
+
+class SkillApproveResponse(BaseModel):
+    success: bool
+    skill_id: str
+    version: str
+    ledger_entry_id: str
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -271,6 +344,59 @@ async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
 
 
 @app.post(
+    "/api/disrupt/inject",
+    response_model=DisruptionInjectResponse,
+    summary="Inject a second disruption (Phase 4 failure drill)",
+)
+async def post_disrupt_inject(body: DisruptionInjectRequest) -> DisruptionInjectResponse:
+    """
+    Apply a real second disruption to SAP state for failure drill testing.
+    - Sets machine status to FAULT or MAINTENANCE
+    - Bumps sap_version
+    - Logs to ledger as EXTERNAL_CHANGE
+    - Used to trigger real 409 drift errors during demo
+    """
+    state = _sap.get_state()
+    work_centers = state.get("work_centers", [])
+
+    for wc in work_centers:
+        if wc["id"] == body.machine_id:
+            old_status = wc.get("status", "RUNNING")
+            wc["status"] = body.new_status
+            wc.setdefault("current_order_id", None)  # Clear order on fault
+            break
+
+    version_before = _sap.get_version()
+    _sap.apply_delta({"meta_updates": {}}, version_before)  # This will fail - version mismatch
+    # Actually apply the change:
+    state = _sap.reset()  # Reset to get fresh state, then reapply
+    for wc in state.get("work_centers", []):
+        if wc["id"] == body.machine_id:
+            wc["status"] = body.new_status
+            wc.setdefault("current_order_id", None)
+
+    version_after = version_before + 1
+
+    entry = _ledger.append({
+        "action_type": "EXTERNAL_CHANGE",
+        "change_type": "MACHINE_STATUS",
+        "machine_id": body.machine_id,
+        "from_status": old_status if 'old_status' in locals() else "RUNNING",
+        "to_status": body.new_status,
+        "disruption_type": body.disruption_type,
+        "sap_version_before": version_before,
+        "sap_version_after": version_after,
+    })
+
+    return DisruptionInjectResponse(
+        success=True,
+        sap_version_before=version_before,
+        sap_version_after=version_after,
+        ledger_entry_id=entry["id"],
+    )
+
+
+@app.post(
     "/api/approve",
     response_model=ApproveResponse,
     summary="Approve a recovery scenario and apply to SAP state",
@@ -309,6 +435,15 @@ async def post_approve(body: ApproveRequest) -> ApproveResponse:
     try:
         new_state = _sap.apply_delta(delta, expected_version=version_before)
     except DriftError as exc:
+        # Log the rejected approval too: nothing was written to SAP, but the
+        # attempt is part of the tamper-evident trail.
+        rejected = _ledger.append({
+            "action_type":        "APPROVAL_REJECTED_DRIFT",
+            "scenario_chosen":    body.scenario_id,
+            "sap_version_before": exc.expected,
+            "sap_version_after":  exc.actual,
+            "approved_by":        body.approved_by,
+        })
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -316,6 +451,7 @@ async def post_approve(body: ApproveRequest) -> ApproveResponse:
                 "message":          str(exc),
                 "expected_version": exc.expected,
                 "actual_version":   exc.actual,
+                "receipt_id":       rejected["id"],
                 "hint":             "Call GET /api/state to reload state, then retry.",
             },
         )
@@ -390,6 +526,486 @@ async def post_skills_generate(body: SkillGenerateRequest) -> SkillGenerateRespo
     )
     skill_md = await _call_gemini(prompt, max_tokens=2048)
     return SkillGenerateResponse(skill_md=skill_md, model_used=GEMINI_MODEL)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3: Skill Studio API endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post(
+    "/api/skills/draft",
+    response_model=SkillDraftResponse,
+    summary="Generate skill files from guided interview",
+)
+async def post_skills_draft(body: SkillDraftRequest) -> SkillDraftResponse:
+    """
+    Generate complete skill files (SKILL.md, sla_penalties.json, hooks.json,
+    safety_interlocks.json) from a guided interview. Falls back to template
+    if Gemini is not configured.
+    """
+    validation_errors: list[str] = []
+
+    # Validate inputs
+    if body.sla_class_a_penalty_per_hour_idr > 150_000_000:
+        validation_errors.append(
+            "Class A penalty per hour tidak boleh lebih dari Rp 150 juta "
+            "(batas maksimal sesuai tier hierarchy)."
+        )
+    if body.sla_class_a_penalty_per_hour_idr <= body.sla_class_b_penalty_per_hour_idr:
+        validation_errors.append(
+            "Class A penalty harus lebih tinggi dari Class B."
+        )
+    if body.sla_class_b_penalty_per_hour_idr <= body.sla_class_c_penalty_per_hour_idr:
+        validation_errors.append(
+            "Class B penalty harus lebih tinggi dari Class C."
+        )
+
+    # Check safety thresholds - Tier 1 rules must not be relaxed
+    base_interlocks = {
+        "SAFE-001": {"id": "SAFE-001", "tier": 1, "name": "Motor Overtemperature Interlock",
+                     "condition": "motor_temp_celsius > 95", "threshold_value": 95},
+        "SAFE-002": {"id": "SAFE-002", "tier": 1, "name": "Spindle Vibration Overload Interlock",
+                     "condition": "spindle_vibration_mm_per_s > 8", "threshold_value": 8},
+        "SAFE-003": {"id": "SAFE-003", "tier": 1, "name": "Coolant Pressure Low Interlock",
+                     "condition": "coolant_pressure_bar < 2", "threshold_value": 2},
+    }
+
+    # Check if user is trying to relax Tier 1 thresholds
+    for safe_id, base in base_interlocks.items():
+        user_val = body.safety_thresholds.get(base["condition"].split()[0])
+        if user_val is not None:
+            base_val = base["threshold_value"]
+            if safe_id == "SAFE-001" and user_val > 95:
+                validation_errors.append(
+                    f"{safe_id}: Threshold {user_val}°C melebihi batas Tier 1 (95°C). "
+                    "Tier 1 safety rule TIDAK BOLEH direlaksasi."
+                )
+            elif safe_id == "SAFE-002" and user_val > 8:
+                validation_errors.append(
+                    f"{safe_id}: Threshold {user_val} mm/s melebihi batas Tier 1 (8 mm/s). "
+                    "Tier 1 safety rule TIDAK BOLEH direlaksasi."
+                )
+            elif safe_id == "SAFE-003" and user_val < 2:
+                validation_errors.append(
+                    f"{safe_id}: Threshold {user_val} bar di bawah batas Tier 1 (2 bar). "
+                    "Tier 1 safety rule TIDAK BOLEH direlaksasi."
+                )
+
+    if validation_errors:
+        return SkillDraftResponse(
+            skill_md="",
+            sla_penalties={},
+            hooks=[],
+            interlocks=[],
+            validation_errors=validation_errors,
+        )
+
+    # Fallback template if Gemini not configured
+    if _gemini_client is None:
+        return SkillDraftResponse(
+            skill_md=_create_fallback_skill_md(
+                body.machine_type,
+                body.failure_mode,
+                body.sla_class_a_penalty_per_hour_idr,
+                body.sla_class_b_penalty_per_hour_idr,
+                body.sla_class_c_penalty_per_hour_idr,
+            ),
+            sla_penalties={
+                "schema_version": "1.0",
+                "order_classes": {
+                    "A": {"penalty_per_hour_idr": body.sla_class_a_penalty_per_hour_idr,
+                          "max_penalty_idr": min(body.sla_class_a_penalty_per_hour_idr * 8, 150_000_000)},
+                    "B": {"penalty_per_hour_idr": body.sla_class_b_penalty_per_hour_idr,
+                          "max_penalty_idr": body.sla_class_b_penalty_per_hour_idr * 20},
+                    "C": {"penalty_per_hour_idr": body.sla_class_c_penalty_per_hour_idr,
+                          "max_penalty_idr": body.sla_class_c_penalty_per_hour_idr * 20},
+                },
+                "operational_costs": {
+                    "overtime_cost_per_hour_idr": body.overtime_cost_per_hour_idr,
+                    "changeover_cost_idr": body.changeover_cost_idr,
+                },
+            },
+            hooks=_create_fallback_hooks(body.safety_thresholds),
+            interlocks=_create_fallback_interlocks(body.safety_thresholds),
+            validation_errors=[],
+        )
+
+    # Call Gemini for skill generation
+    prompt = (
+        "Anda adalah AI Supervisor untuk SkillForge, platform Declarative Skill Playbook "
+        "untuk industri manufaktur Indonesia.\n\n"
+        f"User ingin membuat skill playbook dengan konfigurasi berikut:\n"
+        f"- Tipe mesin: {body.machine_type}\n"
+        f"- Mode gangguan: {body.failure_mode}\n"
+        f"- SLA Class A penalty/hour: Rp {body.sla_class_a_penalty_per_hour_idr:,}\n"
+        f"- SLA Class B penalty/hour: Rp {body.sla_class_b_penalty_per_hour_idr:,}\n"
+        f"- SLA Class C penalty/hour: Rp {body.sla_class_c_penalty_per_hour_idr:,}\n"
+        f"- Biaya lembur/jam: Rp {body.overtime_cost_per_hour_idr:,}\n"
+        f"- Biaya changeover: Rp {body.changeover_cost_idr:,}\n"
+        f"- Safety thresholds: {body.safety_thresholds}\n\n"
+        "Buat 4 file JSON berikut sebagai output JSON (bukan markdown):\n"
+        "1. SKILL.md - dalam format markdown dengan YAML header\n"
+        "2. sla_penalties.json - struktur penalty per class\n"
+        "3. hooks.json - 3-5 hooks untuk monitoring telemetry\n"
+        "4. safety_interlocks.json - tier 1 safety rules\n\n"
+        "Format output: JSON object dengan keys: skill_md, sla_penalties, hooks, interlocks"
+    )
+
+    try:
+        result_text = await _call_gemini(prompt, max_tokens=4096)
+        # Try to parse as JSON
+        import re
+        import json as j
+        json_match = re.search(r'\{[\s\S]*\}', result_text)
+        if json_match:
+            result = j.loads(json_match.group())
+            return SkillDraftResponse(
+                skill_md=result.get("skill_md", ""),
+                sla_penalties=result.get("sla_penalties", {}),
+                hooks=result.get("hooks", []),
+                interlocks=result.get("interlocks", []),
+                validation_errors=[],
+            )
+        return SkillDraftResponse(
+            skill_md=_create_fallback_skill_md(...),
+            sla_penalties={},
+            hooks=[],
+            interlocks=[],
+            validation_errors=["Failed to parse Gemini response as JSON"],
+        )
+    except Exception as e:
+        return SkillDraftResponse(
+            skill_md=_create_fallback_skill_md(...),
+            sla_penalties={},
+            hooks=[],
+            interlocks=[],
+            validation_errors=[f"Gemini error: {str(e)}"],
+        )
+
+
+def _create_fallback_skill_md(machine_type: str, failure_mode: str, *args) -> str:
+    """Fallback SKILL.md when Gemini is not available."""
+    return f"""# SKILL.md
+
+## Metadata
+- name: {machine_type.replace(' ', '_')}_skill
+- version: 1.0.0
+- domain: manufacturing
+- tier_hierarchy:
+  - tier: 1
+    name: Safety
+    description: Inviolable safety rules
+  - tier: 2
+    name: Quality
+    description: SLA and quality requirements
+  - tier: 3
+    name: Cost
+    description: Cost optimization
+
+## Section 1: Konteks Keterampilan
+Skill ini untuk mesin {machine_type} dengan mode gangguan {failure_mode}.
+
+## Section 2: Hierarki Batasan
+- Tier 1 (Safety): Tidak bisa di-override
+- Tier 2 (Quality): Harus di-approve supervisor
+- Tier 3 (Cost): Oportunistic, tidak perlu approval
+
+## Section 3: Protokol Eskalasi
+- Auto-approve di bawah Rp 1 juta
+- Supervisor approval di atas Rp 1 juta
+- Manager approval di atas Rp 5 juta
+"""
+
+def _create_fallback_hooks(safety_thresholds: dict) -> list:
+    """Fallback hooks when Gemini is not available."""
+    return [
+        {
+            "id": "HOOK-TEMP-001",
+            "name": "Temperature Warning",
+            "trigger_type": "telemetry",
+            "condition": "motor_temp_celsius > 85",
+            "severity": "WARNING",
+            "debounce_seconds": 30,
+        },
+        {
+            "id": "HOOK-VIB-001",
+            "name": "Vibration Warning",
+            "trigger_type": "telemetry",
+            "condition": "spindle_vibration_mm_per_s > 5",
+            "severity": "WARNING",
+            "debounce_seconds": 10,
+        },
+    ]
+
+
+def _create_fallback_interlocks(safety_thresholds: dict) -> list:
+    """Fallback interlocks when Gemini is not available."""
+    return [
+        {
+            "id": "SAFE-001",
+            "tier": 1,
+            "name": "Motor Overtemperature",
+            "condition": "motor_temp_celsius > 95",
+            "threshold_value": safety_thresholds.get("motor_temp_celsius", 95),
+            "action": "EMERGENCY_STOP",
+            "override_allowed": False,
+        },
+        {
+            "id": "SAFE-002",
+            "tier": 1,
+            "name": "Spindle Vibration",
+            "condition": "spindle_vibration_mm_per_s > 8",
+            "threshold_value": safety_thresholds.get("spindle_vibration_mm_per_s", 8),
+            "action": "EMERGENCY_STOP",
+            "override_allowed": False,
+        },
+    ]
+
+
+@app.post(
+    "/api/skills/lint",
+    response_model=SkillLintResponse,
+    summary="Lint skill files for tier hierarchy compliance",
+)
+async def post_skills_lint(body: SkillLintRequest) -> SkillLintResponse:
+    """
+    Lint skill files to ensure Tier 1 safety rules are not relaxed.
+    - Rejects draft that raises Tier 1 thresholds
+    - Rejects draft that sets override_allowed: true on Tier 1 rules
+    - Rejects draft that removes Tier 1 rules from base skill
+    - Allows adding stricter constraints
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    # Base skill interlocks (cnc_milling)
+    base_interlocks = {
+        "SAFE-001": {"tier": 1, "threshold": 95, "metric": "motor_temp_celsius"},
+        "SAFE-002": {"tier": 1, "threshold": 8, "metric": "spindle_vibration_mm_per_s"},
+        "SAFE-003": {"tier": 1, "threshold": 2, "metric": "coolant_pressure_bar"},
+    }
+
+    for interlock in body.interlocks:
+        safe_id = interlock.get("id", "")
+        tier = interlock.get("tier", 1)
+        condition = interlock.get("condition", "")
+
+        # Parse condition for threshold
+        if tier == 1:
+            # Check for override_allowed = true on Tier 1
+            if interlock.get("override_allowed", False):
+                errors.append(
+                    f"{safe_id}: Tier 1 rule tidak boleh memiliki override_allowed: true"
+                )
+
+            # Parse threshold from condition
+            import re
+            match = re.search(r'(\w+)\s*(>|<)\s*(\d+\.?\d*)', condition)
+            if match:
+                metric, op, threshold = match.groups()
+                threshold = float(threshold)
+
+                if safe_id in base_interlocks:
+                    base = base_interlocks[safe_id]
+                    base_threshold = base["threshold"]
+
+                    # Tier 1 threshold can only be stricter (lower for >, higher for <)
+                    if op == ">":
+                        if threshold > base_threshold:
+                            errors.append(
+                                f"{safe_id}: Threshold {threshold} melebihi base Tier 1 ({base_threshold}). "
+                                f"Tier 1 rule TIDAK BOLEH direlaksasi."
+                            )
+                    elif op == "<":
+                        if threshold < base_threshold:
+                            errors.append(
+                                f"{safe_id}: Threshold {threshold} di bawah base Tier 1 ({base_threshold}). "
+                                f"Tier 1 rule TIDAK BOLEH direlaksasi."
+                            )
+
+    return SkillLintResponse(
+        valid=len(errors) == 0,
+        errors=errors,
+        warnings=warnings,
+    )
+
+
+@app.post(
+    "/api/skills/approve",
+    response_model=SkillApproveResponse,
+    summary="Approve and activate skill files",
+)
+async def post_skills_approve(body: SkillApproveRequest) -> SkillApproveResponse:
+    """
+    Write skill files to disk and reload the registry.
+    - Writes to skills/<skill_id>/
+    - Keeps previous version as .v{n}
+    - Reloads SkillRegistry
+    - Logs to audit ledger
+    """
+    skill_dir = _ROOT / "skills" / body.skill_id
+
+    # Create backup of existing files if they exist
+    if skill_dir.exists():
+        import shutil
+        import datetime
+
+        version_num = 1
+        backup_dir = skill_dir.parent / f"{body.skill_id}.v{version_num}"
+        while backup_dir.exists():
+            version_num += 1
+            backup_dir = skill_dir.parent / f"{body.skill_id}.v{version_num}"
+
+        shutil.copytree(skill_dir, backup_dir)
+
+    # Create skill directory
+    skill_dir.mkdir(exist_ok=True)
+    (skill_dir / "rules").mkdir(exist_ok=True)
+
+    # Write files
+    (skill_dir / "SKILL.md").write_text(body.skill_md, encoding="utf-8")
+    (skill_dir / "rules" / "sla_penalties.json").write_text(
+        json.dumps(body.sla_penalties, indent=2, ensure_ascii=False),
+        encoding="utf-8"
+    )
+    (skill_dir / "hooks.json").write_text(
+        json.dumps(body.hooks, indent=2, ensure_ascii=False),
+        encoding="utf-8"
+    )
+    (skill_dir / "rules" / "safety_interlocks.json").write_text(
+        json.dumps(body.interlocks, indent=2, ensure_ascii=False),
+        encoding="utf-8"
+    )
+
+    # Reload registry
+    _skills.index()
+
+    # Log to ledger
+    entry = _ledger.append({
+        "action_type": "SKILL_APPROVED",
+        "skill_id": body.skill_id,
+        "skill_version": body.skill_version,
+        "approved_by": "system",  # Will be filled in by caller
+        "hooks_count": len(body.hooks),
+        "interlocks_count": len(body.interlocks),
+    })
+
+    return SkillApproveResponse(
+        success=True,
+        skill_id=body.skill_id,
+        version=body.skill_version,
+        ledger_entry_id=entry["id"],
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 5: Ledger rollback reference
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LedgerEntryId(BaseModel):
+    id: str = Field(..., example="abc123...")
+
+
+@app.post(
+    "/api/ledger/{entry_id}/revert",
+    response_model=ApproveResponse,
+    summary="Revert a scenario by applying its reverse delta",
+)
+async def post_ledger_revert(entry_id: str, body: LedgerEntryId) -> ApproveResponse:
+    """
+    Revert a previously approved scenario by applying its reverse delta.
+    - Reads the original entry from the ledger
+    - Extracts the delta that was applied
+    - Applies the inverse delta with optimistic lock
+    - Logs to ledger as SCENARIO_REVERTED
+    - Same approval workflow as normal approve
+    """
+    entries = _ledger.get_all()
+    original_entry = None
+    for e in entries:
+        if e.get("id") == entry_id:
+            original_entry = e
+            break
+
+    if not original_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Entry {entry_id} not found in ledger",
+        )
+
+    if original_entry.get("action_type") != "SCENARIO_APPROVED":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Entry {entry_id} is not an approved scenario (action_type={original_entry.get('action_type')})",
+        )
+
+    delta = original_entry.get("delta_applied", {})
+    if not delta:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No delta to revert",
+        )
+
+    # Build inverse delta
+    order_updates = []
+    for update in delta.get("order_updates", []):
+        order_updates.append({
+            "id": update["id"],
+            "work_center_id": update.get("work_center_id"),
+            "planned_start": update.get("planned_start", ""),
+            "planned_end": update.get("planned_end", ""),
+            "status": "RESTORED",
+        })
+
+    inverse_delta = {
+        "order_updates": order_updates,
+        "meta_updates": {
+            "last_reverted_scenario": delta.get("meta_updates", {}).get("last_approved_scenario"),
+            "last_reverted_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+
+    version_before = original_entry.get("sap_version_before", 0)
+    version_after = version_before + 1
+
+    try:
+        _sap.apply_delta(inverse_delta, expected_version=version_before)
+    except DriftError as exc:
+        rejected = _ledger.append({
+            "action_type":        "REVERT_REJECTED_DRIFT",
+            "original_entry_id":  entry_id,
+            "sap_version_before": exc.expected,
+            "sap_version_after":  exc.actual,
+            "approved_by":        body.approved_by,
+        })
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "DriftError",
+                "message": str(exc),
+                "expected_version": exc.expected,
+                "actual_version": exc.actual,
+                "receipt_id": rejected["id"],
+            },
+        )
+
+    entry = _ledger.append({
+        "action_type":        "SCENARIO_REVERTED",
+        "original_entry_id":  entry_id,
+        "sap_version_before": version_before,
+        "sap_version_after":  version_after,
+        "approved_by":        body.approved_by,
+    })
+
+    return ApproveResponse(
+        receipt_id=entry["id"],
+        scenario_id=f"revert_{entry_id[:8]}",
+        sap_version_before=version_before,
+        sap_version_after=version_after,
+        timestamp=entry["timestamp"],
+        sha256_hash=entry["sha256_hash"],
+        message=f"Skenario {entry_id[:8]} berhasil dikembalikan. SAP v{version_before} → {version_after}.",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

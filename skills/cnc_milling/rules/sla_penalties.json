@@ -8,8 +8,8 @@
       "name": "OEM Automotive — Highest Priority",
       "name_id": "OEM Otomotif — Prioritas Tertinggi",
       "description_id": "Pesanan dari pelanggan OEM otomotif dengan SLA ketat. Keterlambatan langsung berdampak pada lini perakitan pelanggan.",
-      "penalty_per_hour_idr": 750000,
-      "max_penalty_idr": 15000000,
+      "penalty_per_hour_idr": 20000000,
+      "max_penalty_idr": 150000000,
       "escalation_threshold_idr": 1000000,
       "priority_weight": 10,
       "grace_period_minutes": 0

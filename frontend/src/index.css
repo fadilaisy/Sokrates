@@ -4,115 +4,99 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/*
+ * SkillForge Supervisor Cockpit — design tokens (from the Figma file "skills-forge-alt").
+ * Light, industrial, soft. Every status colour is paired with a text label, never colour alone.
+ * Minimum text size is 14px so status and numbers stay readable from ~2 m on a factory floor.
+ */
 @theme inline {
-    --font-heading: 'Inter', sans-serif;
-    --font-sans: 'Inter', sans-serif;
-    --font-mono: 'JetBrains Mono', monospace;
-    --color-sidebar-ring: var(--sidebar-ring);
-    --color-sidebar-border: var(--sidebar-border);
-    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-    --color-sidebar-accent: var(--sidebar-accent);
-    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-    --color-sidebar-primary: var(--sidebar-primary);
-    --color-sidebar-foreground: var(--sidebar-foreground);
-    --color-sidebar: var(--sidebar);
-    --color-chart-5: var(--chart-5);
-    --color-chart-4: var(--chart-4);
-    --color-chart-3: var(--chart-3);
-    --color-chart-2: var(--chart-2);
-    --color-chart-1: var(--chart-1);
-    --color-ring: var(--ring);
-    --color-input: var(--input);
-    --color-border: var(--border);
-    --color-destructive: var(--destructive);
-    --color-accent-foreground: var(--accent-foreground);
-    --color-accent: var(--accent);
-    --color-muted-foreground: var(--muted-foreground);
-    --color-muted: var(--muted);
-    --color-secondary-foreground: var(--secondary-foreground);
-    --color-secondary: var(--secondary);
-    --color-primary-foreground: var(--primary-foreground);
-    --color-primary: var(--primary);
-    --color-popover-foreground: var(--popover-foreground);
-    --color-popover: var(--popover);
-    --color-card-foreground: var(--card-foreground);
-    --color-card: var(--card);
-    --color-foreground: var(--foreground);
-    --color-background: var(--background);
-    --radius-sm: 6px;
-    --radius-md: 10px;
-    --radius-lg: 16px;
-    --radius-xl: 20px;
-    --radius-2xl: 24px;
-    --radius-3xl: 28px;
+  --font-heading: "Inter Variable", "Inter", system-ui, sans-serif;
+  --font-sans: "Inter Variable", "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --color-navy: var(--sf-navy);
+  --color-page: var(--sf-page);
+  --color-surface: var(--sf-surface);
+  --color-line: var(--sf-line);
+  --color-accent-blue: var(--sf-accent);
+  --color-muted-ink: var(--sf-muted);
+  --color-disabled: var(--sf-disabled);
+
+  --color-running: var(--sf-running);
+  --color-fault: var(--sf-fault);
+  --color-idle: var(--sf-idle);
+  --color-maint: var(--sf-maint);
+  --color-warn: var(--sf-warn);
+  --color-ok-line: var(--sf-ok-line);
+  --color-ok-bg: var(--sf-ok-bg);
+  --color-danger-line: var(--sf-danger-line);
+  --color-danger-bg: var(--sf-danger-bg);
+  --color-warn-bg: var(--sf-warn-bg);
+
+  /* shadcn aliases so existing ui/ components keep working */
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
 }
 
 :root {
-    --background: #22223B;
-    --foreground: #F9F7F7;
-    --card: #2A2A40;
-    --card-foreground: #F9F7F7;
-    --popover: #2A2A40;
-    --popover-foreground: #F9F7F7;
-    --primary: #F2A900;
-    --primary-foreground: #F9F7F7;
-    --secondary: #4A4E69;
-    --secondary-foreground: #F9F7F7;
-    --muted: #353A50;
-    --muted-foreground: #9A8C98;
-    --accent: #4A4E69;
-    --accent-foreground: #F9F7F7;
-    --destructive: #E76F51;
-    --border: #353A50;
-    --input: #353A50;
-    --ring: #F2A900;
-    --chart-1: #F2A900;
-    --chart-2: #E76F51;
-    --chart-3: #9A8C98;
-    --chart-4: #8BC6EC;
-    --chart-5: #CBF3F0;
-    --sidebar: #22223B;
-    --sidebar-foreground: #F9F7F7;
-    --sidebar-primary: #F2A900;
-    --sidebar-primary-foreground: #F9F7F7;
-    --sidebar-accent: #353A50;
-    --sidebar-accent-foreground: #F9F7F7;
-    --sidebar-border: #353A50;
-    --sidebar-ring: #F2A900;
-}
+  --sf-navy: #18324f;
+  --sf-page: #eff2f6;
+  --sf-surface: #ffffff;
+  --sf-line: #dee5ed;
+  --sf-accent: #486284;
+  --sf-muted: #5a6a80;
+  --sf-disabled: #cbd5e1;
 
-.dark {
-    --background: #22223B;
-    --foreground: #F9F7F7;
-    --card: #2A2A40;
-    --card-foreground: #F9F7F7;
-    --popover: #2A2A40;
-    --popover-foreground: #F9F7F7;
-    --primary: #F2A900;
-    --primary-foreground: #F9F7F7;
-    --secondary: #4A4E69;
-    --secondary-foreground: #F9F7F7;
-    --muted: #353A50;
-    --muted-foreground: #9A8C98;
-    --accent: #4A4E69;
-    --accent-foreground: #F9F7F7;
-    --destructive: #E76F51;
-    --border: #353A50;
-    --input: #353A50;
-    --ring: #F2A900;
-    --chart-1: #F2A900;
-    --chart-2: #E76F51;
-    --chart-3: #9A8C98;
-    --chart-4: #8BC6EC;
-    --chart-5: #CBF3F0;
-    --sidebar: #22223B;
-    --sidebar-foreground: #F9F7F7;
-    --sidebar-primary: #F2A900;
-    --sidebar-primary-foreground: #F9F7F7;
-    --sidebar-accent: #353A50;
-    --sidebar-accent-foreground: #F9F7F7;
-    --sidebar-border: #353A50;
-    --sidebar-ring: #F2A900;
+  --sf-running: #00623f;
+  --sf-fault: #a71920;
+  --sf-idle: #334155;
+  --sf-maint: #8a4b00;
+  --sf-warn: #b45309;
+  --sf-ok-line: #10b981;
+  --sf-ok-bg: #ecfdf5;
+  --sf-danger-line: #ef4444;
+  --sf-danger-bg: #fef2f2;
+  --sf-warn-bg: #fff7ed;
+
+  --background: var(--sf-page);
+  --foreground: var(--sf-navy);
+  --card: var(--sf-surface);
+  --card-foreground: var(--sf-navy);
+  --popover: var(--sf-surface);
+  --popover-foreground: var(--sf-navy);
+  --primary: var(--sf-navy);
+  --primary-foreground: #ffffff;
+  --secondary: var(--sf-page);
+  --secondary-foreground: var(--sf-navy);
+  --muted: var(--sf-page);
+  --muted-foreground: var(--sf-muted);
+  --accent: var(--sf-page);
+  --accent-foreground: var(--sf-navy);
+  --destructive: var(--sf-fault);
+  --border: var(--sf-line);
+  --input: var(--sf-line);
+  --ring: var(--sf-accent);
 }
 
 @layer base {
@@ -120,10 +104,82 @@
     border-color: var(--border);
     outline-color: var(--ring);
   }
+  html {
+    font-size: 16px;
+  }
   body {
-    background-color: var(--background);
-    color: var(--foreground);
+    background-color: var(--sf-page);
+    color: var(--sf-navy);
     font-family: var(--font-sans);
-    line-height: 1.6;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    font-feature-settings: "tnum" 1;
+  }
+  button,
+  select,
+  input,
+  textarea {
+    font: inherit;
+  }
+  :focus-visible {
+    outline: 3px solid var(--sf-accent);
+    outline-offset: 2px;
+  }
+}
+
+@keyframes sf-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes sf-pulse-ring {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgb(239 68 68 / 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgb(239 68 68 / 0);
+  }
+}
+@keyframes sf-slide-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+@keyframes sf-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@layer utilities {
+  .sf-spin {
+    animation: sf-spin 0.9s linear infinite;
+  }
+  .sf-pulse {
+    animation: sf-pulse-ring 1.6s ease-in-out infinite;
+  }
+  .sf-slide-in {
+    animation: sf-slide-in 0.25s ease-out both;
+  }
+  .sf-fade-in {
+    animation: sf-fade-in 0.2s ease-out both;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sf-spin,
+  .sf-pulse,
+  .sf-slide-in,
+  .sf-fade-in {
+    animation: none;
   }
 }
