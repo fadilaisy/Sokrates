@@ -24,3 +24,8 @@ Task 3: complete (commits 259139c..5452e54, Phase 3 frontend + Phase 4 failure d
 - POST /api/disrupt/inject for Phase 4 failure drill
 - Inject endpoint sets machine FAULT/MAINTENANCE, bumps sap_version, logs EXTERNAL_CHANGE
 
+Task 4: complete (commits 1030793..f4e225e, Phase 5: complete audit trail)
+- Added SCENARIO_REVERTED action type to audit ledger
+- POST /api/ledger/{entry_id}/revert endpoint for rollback
+- Ledger supports DISRUPTION_DETECTED, SKILLS_LOADED, SCENARIOS_GENERATED, HOOK_FIRED, EXTERNAL_CHANGE events
+

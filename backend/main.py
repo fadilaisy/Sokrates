@@ -899,6 +899,116 @@ async def post_skills_approve(body: SkillApproveRequest) -> SkillApproveResponse
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Phase 5: Ledger rollback reference
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LedgerEntryId(BaseModel):
+    id: str = Field(..., example="abc123...")
+
+
+@app.post(
+    "/api/ledger/{entry_id}/revert",
+    response_model=ApproveResponse,
+    summary="Revert a scenario by applying its reverse delta",
+)
+async def post_ledger_revert(entry_id: str, body: LedgerEntryId) -> ApproveResponse:
+    """
+    Revert a previously approved scenario by applying its reverse delta.
+    - Reads the original entry from the ledger
+    - Extracts the delta that was applied
+    - Applies the inverse delta with optimistic lock
+    - Logs to ledger as SCENARIO_REVERTED
+    - Same approval workflow as normal approve
+    """
+    entries = _ledger.get_all()
+    original_entry = None
+    for e in entries:
+        if e.get("id") == entry_id:
+            original_entry = e
+            break
+
+    if not original_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Entry {entry_id} not found in ledger",
+        )
+
+    if original_entry.get("action_type") != "SCENARIO_APPROVED":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Entry {entry_id} is not an approved scenario (action_type={original_entry.get('action_type')})",
+        )
+
+    delta = original_entry.get("delta_applied", {})
+    if not delta:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No delta to revert",
+        )
+
+    # Build inverse delta
+    order_updates = []
+    for update in delta.get("order_updates", []):
+        order_updates.append({
+            "id": update["id"],
+            "work_center_id": update.get("work_center_id"),
+            "planned_start": update.get("planned_start", ""),
+            "planned_end": update.get("planned_end", ""),
+            "status": "RESTORED",
+        })
+
+    inverse_delta = {
+        "order_updates": order_updates,
+        "meta_updates": {
+            "last_reverted_scenario": delta.get("meta_updates", {}).get("last_approved_scenario"),
+            "last_reverted_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+
+    version_before = original_entry.get("sap_version_before", 0)
+    version_after = version_before + 1
+
+    try:
+        _sap.apply_delta(inverse_delta, expected_version=version_before)
+    except DriftError as exc:
+        rejected = _ledger.append({
+            "action_type":        "REVERT_REJECTED_DRIFT",
+            "original_entry_id":  entry_id,
+            "sap_version_before": exc.expected,
+            "sap_version_after":  exc.actual,
+            "approved_by":        body.approved_by,
+        })
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "DriftError",
+                "message": str(exc),
+                "expected_version": exc.expected,
+                "actual_version": exc.actual,
+                "receipt_id": rejected["id"],
+            },
+        )
+
+    entry = _ledger.append({
+        "action_type":        "SCENARIO_REVERTED",
+        "original_entry_id":  entry_id,
+        "sap_version_before": version_before,
+        "sap_version_after":  version_after,
+        "approved_by":        body.approved_by,
+    })
+
+    return ApproveResponse(
+        receipt_id=entry["id"],
+        scenario_id=f"revert_{entry_id[:8]}",
+        sap_version_before=version_before,
+        sap_version_after=version_after,
+        timestamp=entry["timestamp"],
+        sha256_hash=entry["sha256_hash"],
+        message=f"Skenario {entry_id[:8]} berhasil dikembalikan. SAP v{version_before} → {version_after}.",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # WebSocket — Real-time telemetry analysis
 # ─────────────────────────────────────────────────────────────────────────────
 

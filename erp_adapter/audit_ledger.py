@@ -64,6 +64,11 @@ class AuditLedger:
         Recommended entry keys:
             action_type, scenario_chosen, delta_applied,
             sap_version_before, sap_version_after, approved_by
+
+        Valid action_types:
+            SCENARIO_APPROVED, APPROVAL_REJECTED_DRIFT
+            DISRUPTION_DETECTED, SKILLS_LOADED, SCENARIOS_GENERATED
+            HOOK_FIRED, EXTERNAL_CHANGE
         """
         with self._lock:
             entry.setdefault("id", str(uuid.uuid4()))
