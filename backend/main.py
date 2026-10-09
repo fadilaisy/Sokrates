@@ -47,6 +47,7 @@ if str(_ROOT) not in sys.path:
 from erp_adapter.sap_client import DriftError, SAPClient
 from erp_adapter.audit_ledger import AuditLedger
 from solver.schedule_solver import ScheduleSolver
+from skills.loader import SkillRegistry
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Google Gemini configuration (REST API, no SDK dependency)
@@ -65,9 +66,11 @@ _gemini_client: httpx.AsyncClient | None = (
 # Module-level singletons (safe in single-process uvicorn)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_sap    = SAPClient()
-_ledger = AuditLedger()
-_solver = ScheduleSolver()
+_sap       = SAPClient()
+_ledger    = AuditLedger()
+_solver    = ScheduleSolver()
+_skills    = SkillRegistry()
+_skills.index()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FastAPI app
