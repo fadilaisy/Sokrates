@@ -95,6 +95,13 @@ export interface GanttChange {
   changeover_cost_idr?: number;
 }
 
+export interface CostBreakdown {
+  sla: number;
+  overtime: number;
+  changeover: number;
+  freight: number;
+}
+
 export interface Scenario {
   id: string;
   name_en: string;
@@ -105,6 +112,7 @@ export interface Scenario {
   affected_orders: string[];
   gantt_changes: GanttChange[];
   rationale_template: string;
+  cost_breakdown?: CostBreakdown;
 }
 
 export interface DisruptResponse {

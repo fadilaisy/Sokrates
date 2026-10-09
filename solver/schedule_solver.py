@@ -17,8 +17,9 @@ from typing import Any
 from ortools.sat.python import cp_model
 
 # ── Cost constants (mirrors sla_penalties.json) ───────────────────────────────
-PENALTY_PER_HOUR = {"A": 750_000, "B": 300_000, "C": 100_000}
-MAX_PENALTY      = {"A": 15_000_000, "B": 6_000_000, "C": 2_000_000}
+# Phase 1: Rescaled to match proposal (Class A: ~Rp 20M/hour, capped at Rp 150M)
+PENALTY_PER_HOUR = {"A": 20_000_000, "B": 300_000, "C": 100_000}
+MAX_PENALTY      = {"A": 150_000_000, "B": 6_000_000, "C": 2_000_000}
 OVERTIME_COST_PER_HOUR = 450_000   # IDR / machine-hour
 CHANGEOVER_COST        = 350_000   # IDR / order moved to different machine
 
@@ -62,7 +63,9 @@ class ScheduleSolver:
             self._scenario_c(affected, orders, disruption_hours, machine_id, available),
         ]
 
-        best = max(range(3), key=lambda i: scenarios[i]["net_savings_idr"])
+        # Recommend by lowest total_cost_idr (best value), ties broken by net_savings (higher is better)
+        # net_savings can be negative now, so we don't use max(..., 0) anywhere
+        best = min(range(3), key=lambda i: scenarios[i]["total_cost_idr"])
         for i, s in enumerate(scenarios):
             s["recommended"] = (i == best)
         return scenarios
@@ -90,7 +93,9 @@ class ScheduleSolver:
             "id": "scenario_a", "name_en": "Status Quo — Accept Delay",
             "name_id": "Status Quo — Terima Keterlambatan",
             "recommended": False,
-            "total_cost_idr": total_penalty, "net_savings_idr": 0,
+            "total_cost_idr": total_penalty,
+            "net_savings_idr": -total_penalty,  # No action means paying full penalty
+            "cost_breakdown": {"sla": total_penalty, "overtime": 0, "changeover": 0, "freight": 0},
             "affected_orders": [o["id"] for o in affected],
             "gantt_changes": gantt_changes,
             "rationale_template": (
@@ -122,18 +127,21 @@ class ScheduleSolver:
                 "new_end_time":   f"{15 + int(dur):02d}:00 WIB (Lembur)",
                 "overtime_cost_idr": math.ceil(dur) * OVERTIME_COST_PER_HOUR,
             })
+        # Scenario B: OT cost only (no changeover, no SLA penalty since we avoid it)
         return {
             "id": "scenario_b", "name_en": "Overtime — Night Shift",
             "name_id": "Lembur — Shift Malam",
             "recommended": False,
-            "total_cost_idr": ot_cost, "net_savings_idr": max(net_savings, 0),
+            "total_cost_idr": ot_cost,
+            "net_savings_idr": net_savings,  # Can be negative
+            "cost_breakdown": {"sla": 0, "overtime": ot_cost, "changeover": 0, "freight": 0},
             "affected_orders": [o["id"] for o in affected],
             "gantt_changes": gantt_changes,
             "rationale_template": (
                 f"Pesanan dari {machine_id} dipindahkan ke shift lembur malam. "
                 f"Biaya lembur: Rp {ot_cost:,.0f}. "
                 f"Denda dihindari: Rp {avoided:,.0f}. "
-                f"Penghematan bersih: Rp {max(net_savings, 0):,.0f}. "
+                f"Penghematan bersih: Rp {net_savings:,.0f}. "
                 "Diperlukan persetujuan Production Manager."
             ),
         }
@@ -146,7 +154,9 @@ class ScheduleSolver:
             return {
                 "id": "scenario_c", "name_en": "Optimal Reroute",
                 "name_id": "Rerute Optimal", "recommended": False,
-                "total_cost_idr": penalty, "net_savings_idr": 0,
+                "total_cost_idr": penalty,
+                "net_savings_idr": -penalty,
+                "cost_breakdown": {"sla": penalty, "overtime": 0, "changeover": 0, "freight": 0},
                 "affected_orders": [o["id"] for o in affected],
                 "gantt_changes": [],
                 "rationale_template": "Tidak ada mesin alternatif tersedia. Identik dengan Status Quo.",
@@ -178,7 +188,7 @@ class ScheduleSolver:
         solver.parameters.max_time_in_seconds = 5.0
         status = solver.Solve(model)
 
-        gantt_changes, total_cost = [], 0
+        gantt_changes, total_cost, total_ot_cost = [], 0, 0
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             for i, order in enumerate(affected):
                 for j, mach_id in enumerate(avail_ids):
@@ -187,7 +197,13 @@ class ScheduleSolver:
                         start_h = disruption_hours if mach_id == machine_id else 0
                         end_h   = min(start_h + dur, SHIFT_END_H)
                         co_cost = CHANGEOVER_COST if mach_id != machine_id else 0
-                        total_cost += co_cost
+                        ot_cost = 0
+                        if mach_id != machine_id or start_h >= SHIFT_END_H:
+                            # Rerouted or starts after shift - may need OT
+                            ot_hours = max(0, end_h - SHIFT_END_H)
+                            ot_cost = math.ceil(ot_hours) * OVERTIME_COST_PER_HOUR if ot_hours > 0 else 0
+                        total_cost += co_cost + ot_cost
+                        total_ot_cost += ot_cost
                         gantt_changes.append({
                             "order_id":      order["id"],
                             "from_machine":  machine_id,
@@ -195,6 +211,7 @@ class ScheduleSolver:
                             "new_start_time": f"{7 + int(start_h):02d}:00 WIB",
                             "new_end_time":   f"{7 + int(end_h):02d}:00 WIB",
                             "changeover_cost_idr": co_cost,
+                            "overtime_cost_idr": ot_cost,
                         })
                         break
         else:
@@ -203,6 +220,7 @@ class ScheduleSolver:
                 dur     = self._duration_h(order)
                 ot_cost = math.ceil(dur) * OVERTIME_COST_PER_HOUR
                 total_cost += CHANGEOVER_COST + ot_cost
+                total_ot_cost += ot_cost
                 gantt_changes.append({
                     "order_id":      order["id"],
                     "from_machine":  machine_id,
@@ -218,14 +236,16 @@ class ScheduleSolver:
         return {
             "id": "scenario_c", "name_en": "Optimal Reroute",
             "name_id": "Rerute Optimal", "recommended": False,
-            "total_cost_idr": total_cost, "net_savings_idr": max(net_savings, 0),
+            "total_cost_idr": total_cost,
+            "net_savings_idr": net_savings,
+            "cost_breakdown": {"sla": 0, "overtime": total_ot_cost, "changeover": total_cost - total_ot_cost, "freight": 0},
             "affected_orders": [o["id"] for o in affected],
             "gantt_changes": gantt_changes,
             "rationale_template": (
                 f"CP-SAT menemukan alokasi optimal untuk {len(affected)} pesanan dari {machine_id}. "
                 f"Biaya rerute: Rp {total_cost:,.0f}. "
                 f"Denda dihindari: Rp {avoided:,.0f}. "
-                f"Penghematan bersih: Rp {max(net_savings, 0):,.0f}. "
+                f"Penghematan bersih: Rp {net_savings:,.0f}. "
                 "Pesanan diprioritaskan: Kelas A > B > C."
             ),
         }

@@ -1,8 +1,9 @@
 import { ChevronDown, TriangleAlert } from "lucide-react";
 import { useState } from "react";
 import type { ReactNode } from "react";
+import React from "react";
 import { formatIDR } from "../lib/api";
-import type { Scenario } from "../lib/api";
+import type { CostBreakdown, Scenario } from "../lib/api";
 import { cn } from "../lib/utils";
 import { affectedOrders, DISRUPTION_TYPES, fmt1, shortHash, windowLabel } from "../lib/shift";
 import { useCockpit } from "./store";
@@ -155,8 +156,25 @@ function ScenarioCard({ s }: { s: Scenario }) {
         <dt>Penalti SLA</dt>
         <dd className="text-right font-mono">{formatIDR(penalty)}</dd>
         <dt>Net hemat</dt>
-        <dd className={cn("text-right font-mono font-semibold", s.net_savings_idr > 0 && "text-running")}>{formatIDR(s.net_savings_idr)}</dd>
+        <dd className={cn("text-right font-mono font-semibold",
+          s.net_savings_idr > 0 && "text-running",
+          s.net_savings_idr < 0 && "text-danger"
+        )}>
+          {s.net_savings_idr < 0 ? "-" : "+"} {formatIDR(Math.abs(s.net_savings_idr))}
+        </dd>
       </dl>
+      {s.cost_breakdown && (
+        <div className="mt-2 rounded bg-page px-3 py-2">
+          <dl className="grid grid-cols-[1fr_1fr] gap-x-3 gap-y-0.5 text-[13px]">
+            {(Object.entries(s.cost_breakdown) as [keyof CostBreakdown, number][]).map(([k, v]) => (
+              <React.Fragment key={k}>
+                <dt className="text-muted-ink capitalize">{k.replace(/_/g, " ")}</dt>
+                <dd className="text-right font-mono">{formatIDR(v)}</dd>
+              </React.Fragment>
+            ))}
+          </dl>
+        </div>
+      )}
       <p className="flex-1 text-[15px]">{s.rationale_template}</p>
       <Btn size="lg" variant={s.recommended ? "primary" : "secondary"} disabled={empty} onClick={() => openApproval(s)}>
         Setujui skenario ini
