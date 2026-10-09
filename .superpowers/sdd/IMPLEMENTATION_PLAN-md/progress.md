@@ -9,3 +9,10 @@ Task 1: complete (commits 0063ca1..4b5b2a0, Phase 1: correct money and demo stor
 - Added CostBreakdown interface and cost_breakdown display
 - Created skills/loader.py with SkillRegistry, Hook, SafetyInterlock classes
 - Added safe condition parser (no eval()) for hooks.json and safety_interlocks.json
+
+Task 2: complete (commits 4b5b2a0..259139c, Phase 3 foundation: Skill Studio backend)
+- Added /api/skills/draft endpoint with guided interview
+- Added /api/skills/lint endpoint with tier hierarchy validation
+- Added /api/skills/approve endpoint for approve-and-save
+- Fallback templates when Gemini is not configured
+- Tier 1 rules cannot be relaxed (validation errors)
