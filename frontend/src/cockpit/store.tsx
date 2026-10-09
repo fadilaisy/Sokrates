@@ -4,6 +4,7 @@ import { api, ApiError, formatIDR, WS_TELEMETRY } from "../lib/api";
 import type { ApproveReceipt, DisruptResponse, DriftDetail, LedgerEntry, SapState, Scenario, TelemetryFrame } from "../lib/api";
 import { normalizeStatus, windowLabel } from "../lib/shift";
 import type { MachineStatus } from "../lib/shift";
+import type { SkillStudioFormData, SkillStudioDraft, SkillStudioLintResult } from "../lib/api";
 
 export type Page = "dashboard" | "cockpit" | "floor";
 export type Phase = "normal" | "detecting" | "proposing" | "resolved";
@@ -94,6 +95,17 @@ interface CockpitValue {
   toast: string | null;
   reset: () => Promise<void>;
   resetting: boolean;
+  // Phase 3: Skill Studio
+  skillStudioOpen: boolean;
+  setSkillStudioOpen: (v: boolean) => void;
+  skillStudioState: "interview" | "draft" | "lint" | "approved";
+  setSkillStudioState: (s: "interview" | "draft" | "lint" | "approved") => void;
+  skillStudioFormData: SkillStudioFormData;
+  setSkillStudioFormData: (f: SkillStudioFormData) => void;
+  skillStudioDraft: SkillStudioDraft | null;
+  setSkillStudioDraft: (d: SkillStudioDraft | null) => void;
+  skillStudioLintResult: SkillStudioLintResult | null;
+  setSkillStudioLintResult: (r: SkillStudioLintResult | null) => void;
 }
 
 const Ctx = createContext<CockpitValue | null>(null);
@@ -151,6 +163,22 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
 
   const [toast, setToast] = useState<string | null>(null);
   const [resetting, setResetting] = useState(false);
+
+  // Phase 3: Skill Studio
+  const [skillStudioOpen, setSkillStudioOpen] = useState(false);
+  const [skillStudioState, setSkillStudioState] = useState<"interview" | "draft" | "lint" | "approved">("interview");
+  const [skillStudioFormData, setSkillStudioFormData] = useState<SkillStudioFormData>({
+    machine_type: "Vertical Machining Center",
+    failure_mode: "Motor overload",
+    sla_class_a_penalty_per_hour_idr: 20_000_000,
+    sla_class_b_penalty_per_hour_idr: 300_000,
+    sla_class_c_penalty_per_hour_idr: 100_000,
+    overtime_cost_per_hour_idr: 450_000,
+    changeover_cost_idr: 350_000,
+    safety_thresholds: { motor_temp_celsius: 95, spindle_vibration_mm_per_s: 8, coolant_pressure_bar: 2 },
+  });
+  const [skillStudioDraft, setSkillStudioDraft] = useState<SkillStudioDraft | null>(null);
+  const [skillStudioLintResult, setSkillStudioLintResult] = useState<SkillStudioLintResult | null>(null);
 
   const showToast = useCallback((t: string) => {
     setToast(t);
@@ -502,12 +530,17 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       ledgerOpen, setLedgerOpen, verifying, verifyResult, verify,
       chatOpen, chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat,
       toast, reset, resetting,
+      // Phase 3: Skill Studio
+      skillStudioOpen, setSkillStudioOpen, skillStudioState, setSkillStudioState,
+      skillStudioFormData, setSkillStudioFormData, skillStudioDraft, setSkillStudioDraft,
+      skillStudioLintResult, setSkillStudioLintResult,
     }),
     [
       state, online, aiConfigured, error, ledger, sapVersion, page, phase, detectStep, params, result, receipt, runDisruption,
       approvalFor, approving, conflict, openApproval, closeApproval, confirmApproval, displayStatus, live, wsStatus,
       lastAnalysis, safety, sendTelemetry, runFullAnalysis, ledgerOpen, verifying, verifyResult, verify, chatOpen,
       chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat, toast, reset, resetting,
+      skillStudioOpen, skillStudioState, skillStudioFormData, skillStudioDraft, skillStudioLintResult,
     ],
   );
 

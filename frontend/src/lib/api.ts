@@ -146,6 +146,34 @@ export interface ApproveReceipt {
   message: string;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 3: Skill Studio types
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface SkillStudioFormData {
+  machine_type: string;
+  failure_mode: string;
+  sla_class_a_penalty_per_hour_idr: number;
+  sla_class_b_penalty_per_hour_idr: number;
+  sla_class_c_penalty_per_hour_idr: number;
+  overtime_cost_per_hour_idr: number;
+  changeover_cost_idr: number;
+  safety_thresholds: Record<string, number>;
+}
+
+export interface SkillStudioDraft {
+  skill_md: string;
+  sla_penalties: Record<string, any>;
+  hooks: Array<{ id: string; name: string; trigger_type: string; condition: string }>;
+  interlocks: Array<{ id: string; tier: number; name: string; condition: string; threshold_value: number | null }>;
+}
+
+export interface SkillStudioLintResult {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
 export function formatIDR(n: number): string {
   return "Rp " + Number(n || 0).toLocaleString("id-ID");
 }
@@ -209,5 +237,21 @@ export const api = {
     req<{ skill_md: string; model_used: string }>("/api/skills/generate", {
       method: "POST",
       body: JSON.stringify({ supervisor_description }),
+    }),
+  // Phase 3: Skill Studio
+  draftSkill: (b: SkillStudioFormData) =>
+    req<{ skill_md: string; sla_penalties: any; hooks: any[]; interlocks: any[]; validation_errors: string[] }>("/api/skills/draft", {
+      method: "POST",
+      body: JSON.stringify(b),
+    }),
+  lintSkill: (b: { skill_md: string; sla_penalties: any; hooks: any[]; interlocks: any[] }) =>
+    req<{ valid: boolean; errors: string[]; warnings: string[] }>("/api/skills/lint", {
+      method: "POST",
+      body: JSON.stringify(b),
+    }),
+  approveSkill: (b: { skill_id: string; skill_md: string; sla_penalties: any; hooks: any[]; interlocks: any[] }) =>
+    req<{ success: boolean; skill_id: string; version: string; ledger_entry_id: string }>("/api/skills/approve", {
+      method: "POST",
+      body: JSON.stringify(b),
     }),
 };
