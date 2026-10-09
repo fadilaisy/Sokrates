@@ -309,6 +309,15 @@ async def post_approve(body: ApproveRequest) -> ApproveResponse:
     try:
         new_state = _sap.apply_delta(delta, expected_version=version_before)
     except DriftError as exc:
+        # Log the rejected approval too: nothing was written to SAP, but the
+        # attempt is part of the tamper-evident trail.
+        rejected = _ledger.append({
+            "action_type":        "APPROVAL_REJECTED_DRIFT",
+            "scenario_chosen":    body.scenario_id,
+            "sap_version_before": exc.expected,
+            "sap_version_after":  exc.actual,
+            "approved_by":        body.approved_by,
+        })
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -316,6 +325,7 @@ async def post_approve(body: ApproveRequest) -> ApproveResponse:
                 "message":          str(exc),
                 "expected_version": exc.expected,
                 "actual_version":   exc.actual,
+                "receipt_id":       rejected["id"],
                 "hint":             "Call GET /api/state to reload state, then retry.",
             },
         )

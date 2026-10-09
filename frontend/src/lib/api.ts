@@ -1,4 +1,47 @@
-export const API_BASE = "http://localhost:8000";
+export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "http://localhost:8000";
+export const WS_TELEMETRY = API_BASE.replace(/^http/, "ws") + "/ws/telemetry";
+
+/** Error with the HTTP status and parsed body, so callers can react to 409 drift etc. */
+export class ApiError extends Error {
+  status: number;
+  detail: unknown;
+  constructor(status: number, path: string, detail: unknown) {
+    super(`HTTP ${status} ${path}: ${JSON.stringify(detail).slice(0, 400)}`);
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+export interface DriftDetail {
+  error: "DriftError";
+  message: string;
+  expected_version: number;
+  actual_version: number;
+  receipt_id?: string;
+}
+
+export interface MaintenanceSlot {
+  id: string;
+  work_center_id: string;
+  type: string;
+  start: string;
+  end: string;
+  description: string;
+  status: string;
+}
+
+export interface TelemetryFrame {
+  event: "telemetry_analysis" | "safety_alert" | "error";
+  machine_id?: string;
+  metric?: string;
+  value?: number;
+  severity?: "OK" | "WARNING" | "CRITICAL";
+  rule_triggered?: string | null;
+  analysis?: string;
+  action_required?: string;
+  message?: string;
+  timestamp?: string;
+}
 
 export interface WorkCenter {
   id: string;
@@ -35,6 +78,8 @@ export interface SapState {
   _meta: { version: number; facility?: string; [k: string]: unknown };
   work_centers: WorkCenter[];
   production_orders: ProdOrder[];
+  maintenance_slots?: MaintenanceSlot[];
+  shop_floor_config?: { shift_start?: string; shift_end?: string; [k: string]: unknown };
   [k: string]: unknown;
 }
 
@@ -83,6 +128,16 @@ export interface LedgerEntry {
   [k: string]: unknown;
 }
 
+export interface ApproveReceipt {
+  receipt_id: string;
+  scenario_id: string;
+  sap_version_before: number;
+  sap_version_after: number;
+  timestamp: string;
+  sha256_hash: string;
+  message: string;
+}
+
 export function formatIDR(n: number): string {
   return "Rp " + Number(n || 0).toLocaleString("id-ID");
 }
@@ -122,7 +177,9 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       /* keep text */
     }
-    throw new Error(`HTTP ${res.status} ${path}: ${JSON.stringify(detail).slice(0, 400)}`);
+    // FastAPI wraps errors as { detail: ... }
+    if (detail && typeof detail === "object" && "detail" in (detail as object)) detail = (detail as { detail: unknown }).detail;
+    throw new ApiError(res.status, path, detail);
   }
   return res.json() as Promise<T>;
 }
@@ -134,7 +191,7 @@ export const api = {
   disrupt: (b: { machine_id: string; disruption_type: string; start_hour: number; end_hour: number }) =>
     req<DisruptResponse>("/api/disrupt", { method: "POST", body: JSON.stringify(b) }),
   approve: (b: { scenario_id: string; scenario_data: unknown; expected_sap_version: number; approved_by: string }) =>
-    req<{ receipt_id: string; sap_version_before: number; sap_version_after: number; timestamp: string; sha256_hash: string; message: string }>(
+    req<ApproveReceipt>(
       "/api/approve",
       { method: "POST", body: JSON.stringify(b) },
     ),
