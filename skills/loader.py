@@ -136,41 +136,39 @@ class SkillRegistry:
         return metadata
 
     def load_hooks(self, skill_id: str) -> list[Hook]:
-        """Load hooks for a specific skill"""
-        if skill_id not in self._hooks:
-            hooks_file = self._skills_dir / skill_id / "hooks.json"
-            if hooks_file.exists():
-                with hooks_file.open("r", encoding="utf-8") as f:
-                    hooks_data = json.load(f)
-                    self._hooks[skill_id] = [Hook(h) for h in hooks_data]
-                    # Update registry with hook IDs
-                    if skill_id in self._registry:
-                        self._registry[skill_id]["hook_ids"] = [h.id for h in self._hooks[skill_id]]
-            else:
-                self._hooks[skill_id] = []
+        """Load hooks for a specific skill — always read fresh from disk so
+        editing hooks.json takes effect without a restart."""
+        hooks_file = self._skills_dir / skill_id / "hooks.json"
+        if hooks_file.exists():
+            with hooks_file.open("r", encoding="utf-8") as f:
+                hooks_data = json.load(f)
+                self._hooks[skill_id] = [Hook(h) for h in hooks_data]
+                # Update registry with hook IDs
+                if skill_id in self._registry:
+                    self._registry[skill_id]["hook_ids"] = [h.id for h in self._hooks[skill_id]]
+        else:
+            self._hooks[skill_id] = []
         return self._hooks[skill_id]
 
     def load_interlocks(self, skill_id: str) -> list[SafetyInterlock]:
-        """Load safety interlocks for a specific skill"""
-        if skill_id not in self._interlocks:
-            interlocks_file = self._skills_dir / skill_id / "rules/safety_interlocks.json"
-            if interlocks_file.exists():
-                with interlocks_file.open("r", encoding="utf-8") as f:
-                    interlocks_data = json.load(f)
-                    self._interlocks[skill_id] = [SafetyInterlock(i) for i in interlocks_data]
-            else:
-                self._interlocks[skill_id] = []
+        """Load safety interlocks — always read fresh from disk."""
+        interlocks_file = self._skills_dir / skill_id / "rules/safety_interlocks.json"
+        if interlocks_file.exists():
+            with interlocks_file.open("r", encoding="utf-8") as f:
+                interlocks_data = json.load(f)
+                self._interlocks[skill_id] = [SafetyInterlock(i) for i in interlocks_data]
+        else:
+            self._interlocks[skill_id] = []
         return self._interlocks[skill_id]
 
     def load_sla_penalties(self, skill_id: str) -> dict[str, Any]:
-        """Load SLA penalties for a specific skill"""
-        if skill_id not in self._sla_penalties:
-            penalties_file = self._skills_dir / skill_id / "rules/sla_penalties.json"
-            if penalties_file.exists():
-                with penalties_file.open("r", encoding="utf-8") as f:
-                    self._sla_penalties[skill_id] = json.load(f)
-            else:
-                self._sla_penalties[skill_id] = {}
+        """Load SLA penalties — always read fresh from disk."""
+        penalties_file = self._skills_dir / skill_id / "rules/sla_penalties.json"
+        if penalties_file.exists():
+            with penalties_file.open("r", encoding="utf-8") as f:
+                self._sla_penalties[skill_id] = json.load(f)
+        else:
+            self._sla_penalties[skill_id] = {}
         return self._sla_penalties[skill_id]
 
     def get_hooks_for_machine(self, skill_id: str, machine_id: str) -> list[Hook]:

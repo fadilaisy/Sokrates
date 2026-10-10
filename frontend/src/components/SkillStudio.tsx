@@ -1,229 +1,313 @@
 import { useState } from "react";
-import { api } from "../lib/api";
+import { api, API_BASE } from "../lib/api";
+import { useCockpit } from "../cockpit/store";
+import { Btn, Mono, Spinner } from "../cockpit/ui";
+import { cn } from "../lib/utils";
 
-const PRESETS = [
-  {
-    title: "Robot Las Chassis Otomotif",
-    desc: "Robot pengelasan chassis otomotif (welding robot) untuk lini perakitan PT Astra Honda Motor di Cikarang dengan pemantauan suhu elektroda dan integritas arus las.",
-  },
-  {
-    title: "Stamping Press High-Tonnage",
-    desc: "Mesin stamping press mekanis 1000 ton untuk pembentukan bodi mobil di PT Toyota Motor Karawang, mencakup batasan beban tonase hidrolik dan interlock optik tirai cahaya keselamatan.",
-  },
-  {
-    title: "CNC 5-Axis Komponen Dirgantara",
-    desc: "Pusat permesinan 5-sumbu untuk paduan titanium dan turbin mesin pesawat di PT Dirgantara Indonesia Bandung, dengan toleransi mikro-meter dan pemantauan aus pahat cryogenic.",
-  },
-  {
-    title: "High-Speed Bottling FMCG",
-    desc: "Lini pengisian dan pengemasan botol minuman berkecepatan tinggi di Cikarang, fokus pada sinkronisasi konveyor, deteksi sumbatan tutup botol, dan denda keterlambatan ritel modern.",
-  },
-];
+function NumField({
+  label, value, onChange, min, step,
+}: {
+  label: string; value: number; onChange: (v: number) => void; min?: number; step?: number;
+}) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-[14px] font-medium text-muted-ink">{label}</span>
+      <input
+        type="number"
+        value={value}
+        min={min}
+        step={step ?? 1000}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="min-h-12 rounded-md border border-line bg-surface px-3 font-mono text-[15px]"
+      />
+    </label>
+  );
+}
 
-const ACTIVE_PLAYBOOK_SNIPPET = `# SKILL.md — CNC Milling Supervisor Playbook
-Metadata:
-  name: CNC Milling Production Supervisor
-  facility: PT Karawang Precision Manufacturing
-  domain: discrete_manufacturing
-  tier_hierarchy:
-    Tier 1: Safety (Inviolable — E-Stop, Spindle Vibration > 8mm/s, Temp > 95°C)
-    Tier 2: Quality & SLA (Hard — Toyota, Honda, Pertamina OEM Penalti)
-    Tier 3: Cost & Efficiency (Soft — Diminimalkan oleh OR-Tools Solver)
-
-[Tier 1 Safety Interlocks]
-- SAFE-001: Motor temp > 95°C → Emergency stop seketika
-- SAFE-002: Spindle vibration > 8 mm/s → Emergency stop seketika
-- SAFE-003: Coolant pressure < 2 bar → Hentikan siklus pemotongan
-- SAFE-004: E-Stop ditekan → Penghentian penuh mesin
-- SAFE-005: ≥2 gangguan sumbu serentak → E-Stop + Hubungi OEM
-
-[Tier 2 SLA Penalty Hierarchy]
-- Kelas A (OEM Otomotif - Toyota/Honda): Denda Rp 750.000 / jam keterlambatan (Maks Rp 15 jt)
-- Kelas B (Industri Umum - Pertamina/Astra): Denda Rp 300.000 / jam (Maks Rp 6 jt)
-- Kelas C (Internal MRO / Spare Parts): Denda Rp 100.000 / jam (Maks Rp 2 jt)
-
-[Protokol Otorisasi Supervisor]
-- Denda perkiraan < Rp 1.000.000: Auto-resolusi dapat diizinkan
-- Denda perkiraan ≥ Rp 1.000.000: Wajib persetujuan 1-klik Supervisor Lantai
-- Denda perkiraan ≥ Rp 5.000.000: Wajib eskalasi Plant Manager`;
-
+/**
+ * Skill Studio — guided interview → draft → lint → approve overlay.
+ * Uses the Phase 3 backend (/api/skills/draft, /lint, /approve) via the
+ * store's skillStudio* state. Mounted globally in Shell; opened from sidebar.
+ */
 export default function SkillStudio() {
-  const [activeTab, setActiveTab] = useState<"generator" | "active">("generator");
-  const [prompt, setPrompt] = useState(PRESETS[0].desc);
-  const [loading, setLoading] = useState(false);
-  const [generatedMd, setGeneratedMd] = useState<string | null>(null);
+  const {
+    skillStudioOpen, setSkillStudioOpen,
+    skillStudioState, setSkillStudioState,
+    skillStudioFormData, setSkillStudioFormData,
+    skillStudioDraft, setSkillStudioDraft,
+    skillStudioLintResult, setSkillStudioLintResult,
+  } = useCockpit();
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [draftErrors, setDraftErrors] = useState<string[]>([]);
+  const [skillId, setSkillId] = useState("cnc_milling_v2");
+  const [approveResult, setApproveResult] = useState<{ version: string; ledger_entry_id: string } | null>(null);
 
-  async function handleGenerate() {
-    if (!prompt.trim()) return;
-    setLoading(true);
+  if (!skillStudioOpen) return null;
+  const f = skillStudioFormData;
+  const set = (patch: Partial<typeof f>) => setSkillStudioFormData({ ...f, ...patch });
+
+  const close = () => setSkillStudioOpen(false);
+  const resetAll = () => {
+    setSkillStudioDraft(null);
+    setSkillStudioLintResult(null);
+    setApproveResult(null);
+    setDraftErrors([]);
     setError(null);
+    setSkillStudioState("interview");
+  };
+
+  async function runDraft() {
+    setBusy(true);
+    setError(null);
+    setDraftErrors([]);
     try {
-      const res = await api.generateSkill(prompt);
-      setGeneratedMd(res.skill_md);
+      const r = await api.draftSkill(f);
+      if (r.validation_errors.length > 0) {
+        setDraftErrors(r.validation_errors);
+        return; // stay in interview, show Tier 1 / hierarchy errors
+      }
+      setSkillStudioDraft({
+        skill_md: r.skill_md,
+        sla_penalties: r.sla_penalties,
+        hooks: r.hooks,
+        interlocks: r.interlocks,
+      });
+      setSkillStudioState("draft");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
   }
 
-  function handleCopy(text: string) {
-    navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  async function runLint() {
+    if (!skillStudioDraft) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.lintSkill({
+        skill_md: skillStudioDraft.skill_md,
+        sla_penalties: skillStudioDraft.sla_penalties,
+        hooks: skillStudioDraft.hooks,
+        interlocks: skillStudioDraft.interlocks,
+      });
+      setSkillStudioLintResult(r);
+      setSkillStudioState("lint");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
+  async function runApprove() {
+    if (!skillStudioDraft || !skillId.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.approveSkill({
+        skill_id: skillId.trim(),
+        skill_md: skillStudioDraft.skill_md,
+        sla_penalties: skillStudioDraft.sla_penalties,
+        hooks: skillStudioDraft.hooks,
+        interlocks: skillStudioDraft.interlocks,
+      });
+      setApproveResult({ version: r.version, ledger_entry_id: r.ledger_entry_id });
+      setSkillStudioState("approved");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const steps = ["interview", "draft", "lint", "approved"] as const;
+  const stepIdx = steps.indexOf(skillStudioState);
+
   return (
-    <div className="overflow-hidden rounded-2xl border border-[#353A50] bg-[#2A2A40] shadow-xl shadow-black/30">
-      {/* Header bar */}
-      <div className="flex flex-wrap items-center justify-between border-b border-[#353A50] bg-[#22223B]/50 px-6 py-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className="text-base font-semibold text-[#F9F7F7]">Skill Studio</span>
-            <span className="rounded bg-[#F2A900]/20 px-2 py-0.5 text-[10px] font-bold text-[#F2A900]">
-              DECLARATIVE AGENT SOP
-            </span>
+    <>
+      <div
+        className="sf-fade-in fixed inset-0 z-40"
+        style={{ background: "rgb(24 50 79 / 0.3)" }}
+        onClick={close}
+        aria-hidden
+      />
+      <aside
+        role="dialog"
+        aria-modal="true"
+        aria-label="Skill Studio"
+        className="sf-slide-in fixed inset-y-0 right-0 z-50 flex flex-col gap-4 overflow-y-auto bg-surface p-6 shadow-[-8px_0_24px_rgba(0,0,0,.2)]"
+        style={{ width: "min(640px, 100vw)" }}
+        onKeyDown={(e) => e.key === "Escape" && close()}
+      >
+        <div className="flex items-center gap-3">
+          <div className="flex-1">
+            <h2 className="text-[24px] font-bold">Skill Studio</h2>
+            <Mono className="text-[14px] text-muted-ink">
+              Wawancara → draft → lint Tier 1 → approve
+            </Mono>
           </div>
-          <p className="mt-1 text-xs text-[#9A8C98]">
-            Playbook berbasis deklaratif (`SKILL.md`) dengan hierarki Tier 1 (Keselamatan), Tier 2 (SLA Denda IDR), dan Tier 3 (Biaya).
+          <button
+            type="button"
+            onClick={close}
+            aria-label="Tutup"
+            className="grid size-14 shrink-0 place-items-center rounded-md border border-line hover:bg-page"
+          >
+            ✕
+          </button>
+        </div>
+
+        <ol className="flex gap-2 text-[14px]" aria-label="Langkah">
+          {["Wawancara", "Draft", "Lint", "Aktif"].map((label, i) => (
+            <li
+              key={label}
+              className={cn(
+                "flex-1 rounded-md px-2 py-1.5 text-center font-semibold",
+                i < stepIdx && "bg-ok-bg text-running",
+                i === stepIdx && "bg-navy text-white",
+                i > stepIdx && "bg-page text-muted-ink",
+              )}
+            >
+              {i + 1}. {label}
+            </li>
+          ))}
+        </ol>
+
+        {error && (
+          <p role="alert" className="rounded-md border border-danger-line bg-danger-bg px-3 py-2 text-[15px] text-fault">
+            {error}
           </p>
-        </div>
+        )}
 
-        <div className="mt-2 flex rounded-lg bg-[#22223B] p-1 sm:mt-0">
-          <button
-            onClick={() => setActiveTab("generator")}
-            className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${
-              activeTab === "generator"
-                ? "bg-[#F2A900] text-[#22223B] shadow"
-                : "text-[#9A8C98] hover:text-[#F9F7F7]"
-            }`}
-          >
-            Hasilkan Playbook Baru
-          </button>
-          <button
-            onClick={() => setActiveTab("active")}
-            className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${
-              activeTab === "active"
-                ? "bg-[#F2A900] text-[#22223B] shadow"
-                : "text-[#9A8C98] hover:text-[#F9F7F7]"
-            }`}
-          >
-            Playbook Aktif (CNC Milling)
-          </button>
-        </div>
-      </div>
-
-      <div className="p-6">
-        {activeTab === "generator" ? (
-          <div className="space-y-5">
-            {/* Presets */}
-            <div>
-              <p className="mb-2 text-xs font-medium text-[#9A8C98]">Pilih Templat Cepat Pabrik / Kasus:</p>
-              <div className="flex flex-wrap gap-2">
-                {PRESETS.map((p, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => setPrompt(p.desc)}
-                    className="rounded-lg border border-[#353A50] bg-[#22223B] px-3 py-1.5 text-xs text-[#F9F7F7] transition-all hover:border-[#F2A900] hover:text-[#F2A900] active:scale-95"
-                  >
-                    {p.title}
-                  </button>
-                ))}
+        {skillStudioState === "interview" && (
+          <div className="flex flex-col gap-3">
+            {draftErrors.length > 0 && (
+              <div role="alert" className="rounded-md border border-danger-line bg-danger-bg px-3 py-2 text-[15px] text-fault">
+                <p className="font-bold">Draft ditolak (hierarki Tier tidak boleh dilonggarkan):</p>
+                <ul className="list-disc pl-5">
+                  {draftErrors.map((e) => <li key={e}>{e}</li>)}
+                </ul>
               </div>
-            </div>
-
-            {/* Input prompt */}
-            <div>
-              <label className="block text-xs font-medium text-[#9A8C98]">
-                Deskripsi Kebutuhan AI Supervisor (Natural Language):
-              </label>
-              <textarea
-                rows={3}
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                placeholder="Jelaskan jenis mesin, lokasi pabrik, dan fokus keselamatan/SLA..."
-                className="mt-2 w-full rounded-xl border border-[#353A50] bg-[#22223B] p-3 text-xs text-[#F9F7F7] placeholder-[#9A8C98]/50 transition-all focus:border-[#F2A900] focus:outline-none focus:ring-1 focus:ring-[#F2A900]"
+            )}
+            <label className="flex flex-col gap-1">
+              <span className="text-[14px] font-medium text-muted-ink">Tipe mesin</span>
+              <input
+                value={f.machine_type}
+                onChange={(e) => set({ machine_type: e.target.value })}
+                className="min-h-12 rounded-md border border-line bg-surface px-3 text-[16px]"
               />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[14px] font-medium text-muted-ink">Mode gangguan</span>
+              <input
+                value={f.failure_mode}
+                onChange={(e) => set({ failure_mode: e.target.value })}
+                className="min-h-12 rounded-md border border-line bg-surface px-3 text-[16px]"
+              />
+            </label>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <NumField label="SLA A / jam (Rp)" value={f.sla_class_a_penalty_per_hour_idr} onChange={(v) => set({ sla_class_a_penalty_per_hour_idr: v })} />
+              <NumField label="SLA B / jam (Rp)" value={f.sla_class_b_penalty_per_hour_idr} onChange={(v) => set({ sla_class_b_penalty_per_hour_idr: v })} />
+              <NumField label="SLA C / jam (Rp)" value={f.sla_class_c_penalty_per_hour_idr} onChange={(v) => set({ sla_class_c_penalty_per_hour_idr: v })} />
             </div>
-
-            {/* Action button */}
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] text-[#9A8C98]">
-                Model AI: <span className="font-mono text-[#F9F7F7]">Gemini 3.5 Flash</span> · Output: SKILL.md
-              </span>
-              <button
-                onClick={handleGenerate}
-                disabled={loading || !prompt.trim()}
-                className="flex items-center gap-2 rounded-lg bg-[#F2A900] px-5 py-2.5 text-xs font-bold text-[#22223B] shadow-lg shadow-[#F2A900]/20 transition-all hover:bg-[#E29B00] active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {loading ? (
-                  <>
-                    <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-[#22223B] border-t-transparent" />
-                    <span>Gemini Merancang SOP…</span>
-                  </>
-                ) : (
-                  <>
-                    <span>⚡ Hasilkan SKILL.md Playbook</span>
-                  </>
-                )}
-              </button>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <NumField label="Lembur / jam (Rp)" value={f.overtime_cost_per_hour_idr} onChange={(v) => set({ overtime_cost_per_hour_idr: v })} />
+              <NumField label="Changeover (Rp)" value={f.changeover_cost_idr} onChange={(v) => set({ changeover_cost_idr: v })} />
             </div>
-
-            {error && (
-              <div className="rounded-xl border border-[#E76F51]/30 bg-[#E76F51]/10 p-3 text-xs text-[#E76F51]">
-                <p className="font-semibold">Gagal merancang playbook: {error}</p>
-                <p className="mt-1 text-[11px] text-[#E76F51]/80">
-                  Pastikan backend aktif dan GEMINI_API_KEY terkonfigurasi.
-                </p>
+            <fieldset className="rounded-md border border-line p-3">
+              <legend className="px-1 text-[14px] font-semibold text-muted-ink">
+                Ambang keselamatan (Tier 1 — tidak boleh dilonggarkan)
+              </legend>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <NumField label="Suhu motor (°C)" value={f.safety_thresholds.motor_temp_celsius ?? 95} step={1} min={0}
+                  onChange={(v) => set({ safety_thresholds: { ...f.safety_thresholds, motor_temp_celsius: v } })} />
+                <NumField label="Getaran (mm/s)" value={f.safety_thresholds.spindle_vibration_mm_per_s ?? 8} step={0.5} min={0}
+                  onChange={(v) => set({ safety_thresholds: { ...f.safety_thresholds, spindle_vibration_mm_per_s: v } })} />
+                <NumField label="Tekanan coolant (bar)" value={f.safety_thresholds.coolant_pressure_bar ?? 2} step={0.5} min={0}
+                  onChange={(v) => set({ safety_thresholds: { ...f.safety_thresholds, coolant_pressure_bar: v } })} />
               </div>
-            )}
-
-            {/* Output display */}
-            {generatedMd && (
-              <div className="mt-4 rounded-xl border border-[#F2A900]/30 bg-[#22223B] p-4">
-                <div className="mb-3 flex items-center justify-between border-b border-[#353A50] pb-2">
-                  <div className="flex items-center gap-2">
-                    <span className="h-2 w-2 rounded-full bg-[#CBF3F0]" />
-                    <span className="text-xs font-semibold text-[#CBF3F0]">
-                      SKILL.md Berhasil Dibuat Secara Deklaratif
-                    </span>
-                  </div>
-                  <button
-                    onClick={() => handleCopy(generatedMd)}
-                    className="rounded bg-[#353A50] px-3 py-1 text-[11px] font-medium text-[#F9F7F7] hover:bg-[#4A4E69]"
-                  >
-                    {copied ? "Tersalin!" : "Salin Markdown"}
-                  </button>
-                </div>
-                <pre className="max-h-96 overflow-y-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-[#F9F7F7]">
-                  {generatedMd}
-                </pre>
-              </div>
-            )}
-          </div>
-        ) : (
-          /* Active CNC Milling Playbook */
-          <div className="space-y-4">
-            <div className="flex items-center justify-between border-b border-[#353A50] pb-2">
-              <span className="text-xs font-semibold text-[#CBF3F0]">
-                Playbook Aktif: skills/cnc_milling/SKILL.md
-              </span>
-              <button
-                onClick={() => handleCopy(ACTIVE_PLAYBOOK_SNIPPET)}
-                className="rounded bg-[#353A50] px-3 py-1 text-[11px] font-medium text-[#F9F7F7] hover:bg-[#4A4E69]"
-              >
-                {copied ? "Tersalin!" : "Salin"}
-              </button>
-            </div>
-            <pre className="max-h-96 overflow-y-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-[#F9F7F7]">
-              {ACTIVE_PLAYBOOK_SNIPPET}
-            </pre>
+            </fieldset>
+            <Btn size="lg" onClick={runDraft} disabled={busy}>
+              {busy && <Spinner className="size-5" />} Buat draft skill
+            </Btn>
           </div>
         )}
-      </div>
-    </div>
+
+        {skillStudioState === "draft" && skillStudioDraft && (
+          <div className="flex flex-col gap-3">
+            <p className="text-[15px]">
+              Draft siap: {skillStudioDraft.hooks.length} hooks · {skillStudioDraft.interlocks.length} interlock.
+              Periksa SKILL.md lalu jalankan lint Tier 1.
+            </p>
+            <pre className="max-h-72 overflow-y-auto rounded-md bg-page p-3 font-mono text-[12px] whitespace-pre-wrap">
+              {skillStudioDraft.skill_md}
+            </pre>
+            <div className="flex flex-wrap gap-2">
+              <Btn variant="secondary" onClick={() => setSkillStudioState("interview")} disabled={busy}>Kembali</Btn>
+              <Btn size="lg" onClick={runLint} disabled={busy}>
+                {busy && <Spinner className="size-5" />} Jalankan lint Tier 1
+              </Btn>
+            </div>
+          </div>
+        )}
+
+        {skillStudioState === "lint" && skillStudioLintResult && (
+          <div className="flex flex-col gap-3">
+            <p className={cn(
+              "rounded-md border px-3 py-2 text-[15px] font-semibold",
+              skillStudioLintResult.valid ? "border-ok-line bg-ok-bg text-running" : "border-danger-line bg-danger-bg text-fault",
+            )}>
+              {skillStudioLintResult.valid ? "Lint lolos — Tier 1 aman." : "Lint gagal — Tier 1 dilanggar."}
+            </p>
+            {skillStudioLintResult.errors.map((e) => (
+              <p key={e} className="rounded-md bg-danger-bg px-3 py-2 text-[14px] text-fault">{e}</p>
+            ))}
+            {skillStudioLintResult.warnings.map((w) => (
+              <p key={w} className="rounded-md bg-warn-bg px-3 py-2 text-[14px] text-warn">{w}</p>
+            ))}
+            {skillStudioLintResult.valid && (
+              <label className="flex flex-col gap-1">
+                <span className="text-[14px] font-medium text-muted-ink">ID skill (folder di skills/)</span>
+                <input
+                  value={skillId}
+                  onChange={(e) => setSkillId(e.target.value)}
+                  className="min-h-12 rounded-md border border-line bg-surface px-3 font-mono text-[15px]"
+                />
+              </label>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <Btn variant="secondary" onClick={() => setSkillStudioState("draft")} disabled={busy}>Kembali</Btn>
+              {!skillStudioLintResult.valid && (
+                <Btn variant="secondary" onClick={() => setSkillStudioState("interview")} disabled={busy}>
+                  Perbaiki di wawancara
+                </Btn>
+              )}
+              {skillStudioLintResult.valid && (
+                <Btn size="lg" onClick={runApprove} disabled={busy || !skillId.trim()}>
+                  {busy && <Spinner className="size-5" />} Setujui &amp; aktifkan
+                </Btn>
+              )}
+            </div>
+          </div>
+        )}
+
+        {skillStudioState === "approved" && approveResult && (
+          <div className="flex flex-col gap-3">
+            <p className="rounded-md border border-ok-line bg-ok-bg px-3 py-2 text-[15px] font-semibold text-running">
+              Skill {skillId} v{approveResult.version} aktif. Registry dimuat ulang, entri audit dicatat.
+            </p>
+            <Mono className="text-[14px]">ledger: {approveResult.ledger_entry_id.slice(0, 8)}</Mono>
+            <p className="text-[14px] text-muted-ink">
+              Lihat dokumentasi endpoint di <a className="underline" href={`${API_BASE}/docs`} target="_blank" rel="noreferrer">{API_BASE}/docs</a>.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Btn variant="secondary" onClick={resetAll}>Buat skill baru</Btn>
+              <Btn onClick={close}>Tutup</Btn>
+            </div>
+          </div>
+        )}
+      </aside>
+    </>
   );
 }

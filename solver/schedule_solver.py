@@ -16,12 +16,53 @@ from typing import Any
 
 from ortools.sat.python import cp_model
 
-# ── Cost constants (mirrors sla_penalties.json) ───────────────────────────────
-# Phase 1: Rescaled to match proposal (Class A: ~Rp 20M/hour, capped at Rp 150M)
+import json
+from pathlib import Path
+
+# Skill cost source — read fresh from disk on every solve so edits take effect.
+_SKILL_SLA_PATH = Path(__file__).parent.parent / "skills" / "cnc_milling" / "rules" / "sla_penalties.json"
+
+
+def _load_skill_costs() -> tuple[dict, dict, int, int]:
+    """Load (penalty_per_hour, max_penalty, overtime, changeover) from skill file.
+
+    Falls back to module defaults when the file is missing/unparseable, so the
+    solver (and its unit tests) still work without skill files on disk.
+    """
+    try:
+        data = json.loads(_SKILL_SLA_PATH.read_text(encoding="utf-8"))
+        classes = data.get("order_classes", {})
+        ops = data.get("operational_costs", {})
+        pph = {
+            cls: int(classes[cls]["penalty_per_hour_idr"])
+            for cls in ("A", "B", "C") if cls in classes
+        } or dict(PENALTY_PER_HOUR)
+        mp = {
+            cls: int(classes[cls]["max_penalty_idr"])
+            for cls in ("A", "B", "C") if cls in classes
+        } or dict(MAX_PENALTY)
+        ot = int(ops.get("overtime_cost_per_hour_idr", OVERTIME_COST_PER_HOUR))
+        co = int(ops.get("changeover_cost_idr", CHANGEOVER_COST))
+        # Ensure all three classes present even if file is partial.
+        for cls in ("A", "B", "C"):
+            pph.setdefault(cls, PENALTY_PER_HOUR[cls])
+            mp.setdefault(cls, MAX_PENALTY[cls])
+        return pph, mp, ot, co
+    except Exception:
+        return dict(PENALTY_PER_HOUR), dict(MAX_PENALTY), OVERTIME_COST_PER_HOUR, CHANGEOVER_COST
+
+# ── Cost defaults (fallback when skill files are missing) ───────────────────
+# Live values are loaded from skills/cnc_milling/rules/sla_penalties.json on
+# every solve() — editing the skill file changes solver behaviour, no restart.
 PENALTY_PER_HOUR = {"A": 20_000_000, "B": 300_000, "C": 100_000}
 MAX_PENALTY      = {"A": 150_000_000, "B": 6_000_000, "C": 2_000_000}
 OVERTIME_COST_PER_HOUR = 450_000   # IDR / machine-hour
 CHANGEOVER_COST        = 350_000   # IDR / order moved to different machine
+
+# ── Tier 1 safety: statuses a solver must NEVER route work to ────────────────
+# Mirrors the inviolable Tier 1 hierarchy in skills/cnc_milling/SKILL.md.
+# MAINTENANCE = machine offline; FAULT = safety interlock tripped.
+TIER1_BLOCKED_STATUSES = ("MAINTENANCE", "FAULT")
 
 SHIFT_START_H  = 0   # 07:00 WIB
 SHIFT_END_H    = 8   # 15:00 WIB
@@ -44,6 +85,11 @@ class ScheduleSolver:
         machine_id       = disruption["machine_id"]
         disruption_hours = int(disruption["end_hour"]) - int(disruption["start_hour"])
 
+        # Phase 2: costs come from the skill file, read fresh every solve.
+        pph, mp, ot_cost, co_cost = _load_skill_costs()
+        self._pph, self._mp = pph, mp
+        self._ot, self._co = ot_cost, co_cost
+
         orders        = shop_floor_state.get("production_orders", [])
         work_centers  = shop_floor_state.get("work_centers", [])
 
@@ -52,9 +98,12 @@ class ScheduleSolver:
             if o.get("work_center_id") == machine_id
             and o.get("status") in ("IN_PROGRESS", "QUEUED", "PLANNED")
         ]
+        # Tier 1 safety rule (inviolable): never route work to a machine that is
+        # in a blocked safety status. Driven by the Tier 1 hierarchy — the
+        # solver treats MAINTENANCE/FAULT as unsafe regardless of cost.
         available = [
             wc for wc in work_centers
-            if wc["id"] != machine_id and wc.get("status") not in ("MAINTENANCE",)
+            if wc["id"] != machine_id and wc.get("status") not in TIER1_BLOCKED_STATUSES
         ]
 
         scenarios = [
@@ -70,6 +119,31 @@ class ScheduleSolver:
             s["recommended"] = (i == best)
         return scenarios
 
+    # ── Skill-driven cost accessors (fresh per solve, defaults otherwise) ──────
+
+    @property
+    def _cost_pph(self):
+        return getattr(self, "_pph", PENALTY_PER_HOUR)
+
+    @property
+    def _cost_mp(self):
+        return getattr(self, "_mp", MAX_PENALTY)
+
+    @property
+    def _cost_ot(self):
+        return getattr(self, "_ot", OVERTIME_COST_PER_HOUR)
+
+    @property
+    def _cost_co(self):
+        return getattr(self, "_co", CHANGEOVER_COST)
+
+    def _total_penalty(self, orders, delay_hours):
+        total = 0
+        for o in orders:
+            cls = o.get("order_class", "C")
+            total += min(delay_hours * self._cost_pph[cls], self._cost_mp[cls])
+        return total
+
     # ── Scenario A ────────────────────────────────────────────────────────────
 
     def _scenario_a(self, affected, disruption_hours, machine_id):
@@ -77,7 +151,7 @@ class ScheduleSolver:
         gantt_changes = []
         for order in affected:
             cls     = order.get("order_class", "C")
-            penalty = min(disruption_hours * PENALTY_PER_HOUR[cls], MAX_PENALTY[cls])
+            penalty = min(disruption_hours * self._cost_pph[cls], self._cost_mp[cls])
             total_penalty += penalty
             dur = self._duration_h(order)
             gantt_changes.append({
@@ -110,7 +184,7 @@ class ScheduleSolver:
 
     def _scenario_b(self, affected, disruption_hours, machine_id, available):
         total_work  = sum(self._duration_h(o) for o in affected)
-        ot_cost     = math.ceil(total_work) * OVERTIME_COST_PER_HOUR
+        ot_cost     = math.ceil(total_work) * self._cost_ot
         avoided     = self._total_penalty(affected, disruption_hours)
         net_savings = avoided - ot_cost
 
@@ -125,7 +199,7 @@ class ScheduleSolver:
                 "to_machine":    target,
                 "new_start_time": "15:00 WIB (Lembur)",
                 "new_end_time":   f"{15 + int(dur):02d}:00 WIB (Lembur)",
-                "overtime_cost_idr": math.ceil(dur) * OVERTIME_COST_PER_HOUR,
+                "overtime_cost_idr": math.ceil(dur) * self._cost_ot,
             })
         # Scenario B: OT cost only (no changeover, no SLA penalty since we avoid it)
         return {
@@ -179,7 +253,7 @@ class ScheduleSolver:
             )
 
         cost_expr = sum(
-            assign[i][j] * (int(CHANGEOVER_COST * 10) if avail_ids[j] != machine_id else 0)
+            assign[i][j] * (int(self._cost_co * 10) if avail_ids[j] != machine_id else 0)
             for i in range(n_o) for j in range(n_m)
         )
         model.Minimize(cost_expr)
@@ -196,12 +270,12 @@ class ScheduleSolver:
                         dur     = self._duration_h(order)
                         start_h = disruption_hours if mach_id == machine_id else 0
                         end_h   = min(start_h + dur, SHIFT_END_H)
-                        co_cost = CHANGEOVER_COST if mach_id != machine_id else 0
+                        co_cost = self._cost_co if mach_id != machine_id else 0
                         ot_cost = 0
                         if mach_id != machine_id or start_h >= SHIFT_END_H:
                             # Rerouted or starts after shift - may need OT
                             ot_hours = max(0, end_h - SHIFT_END_H)
-                            ot_cost = math.ceil(ot_hours) * OVERTIME_COST_PER_HOUR if ot_hours > 0 else 0
+                            ot_cost = math.ceil(ot_hours) * self._cost_ot if ot_hours > 0 else 0
                         total_cost += co_cost + ot_cost
                         total_ot_cost += ot_cost
                         gantt_changes.append({
@@ -218,8 +292,8 @@ class ScheduleSolver:
             for i, order in enumerate(affected):
                 mach_id = avail_ids[i % n_m]
                 dur     = self._duration_h(order)
-                ot_cost = math.ceil(dur) * OVERTIME_COST_PER_HOUR
-                total_cost += CHANGEOVER_COST + ot_cost
+                ot_cost = math.ceil(dur) * self._cost_ot
+                total_cost += self._cost_co + ot_cost
                 total_ot_cost += ot_cost
                 gantt_changes.append({
                     "order_id":      order["id"],
@@ -227,7 +301,7 @@ class ScheduleSolver:
                     "to_machine":    mach_id,
                     "new_start_time": "15:00 WIB (Overtime)",
                     "new_end_time":   f"{15 + int(dur):02d}:00 WIB (Overtime)",
-                    "changeover_cost_idr": CHANGEOVER_COST,
+                    "changeover_cost_idr": self._cost_co,
                     "overtime_cost_idr":   ot_cost,
                 })
 
@@ -261,11 +335,3 @@ class ScheduleSolver:
             return max((e - s).total_seconds() / 3600, 0.5)
         except Exception:
             return 2.0
-
-    @staticmethod
-    def _total_penalty(orders, delay_hours):
-        total = 0
-        for o in orders:
-            cls = o.get("order_class", "C")
-            total += min(delay_hours * PENALTY_PER_HOUR[cls], MAX_PENALTY[cls])
-        return total

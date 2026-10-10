@@ -1,7 +1,7 @@
 import { ArrowRight, ShieldCheck, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { formatIDR } from "../lib/api";
+import { api, formatIDR } from "../lib/api";
 import { cn } from "../lib/utils";
 import { changeKind, shortHash, timeRange, wibTime } from "../lib/shift";
 import { useCockpit } from "./store";
@@ -22,7 +22,7 @@ function Scrim({ onClick, tone = 0.45 }: { onClick: () => void; tone?: number })
 
 /* ── Approval modal (field-level diff + optimistic lock) ─────────────────── */
 export function ApprovalModal() {
-  const { approvalFor, conflict, approving, sapVersion, closeApproval, confirmApproval, openChat, setLedgerOpen, verify } = useCockpit();
+  const { approvalFor, conflict, approving, sapVersion, approver, setApprover, closeApproval, confirmApproval, openChat, setLedgerOpen, verify } = useCockpit();
   useEscape(closeApproval, !!approvalFor && !approving);
   if (!approvalFor) return null;
   const c = conflict;
@@ -97,6 +97,17 @@ export function ApprovalModal() {
             </div>
           )}
 
+          <label className="flex flex-col gap-1">
+            <span className="text-[15px] font-medium text-muted-ink">Disetujui oleh (nama approver — tercatat di audit ledger)</span>
+            <input
+              value={approver}
+              onChange={(e) => setApprover(e.target.value)}
+              disabled={approving || !!c}
+              placeholder="Production Supervisor — Nama Anda"
+              className="min-h-12 rounded-md border border-line bg-surface px-4 text-[16px] disabled:opacity-60"
+            />
+          </label>
+
           <div className="flex flex-wrap justify-end gap-3">
             <Btn variant="secondary" onClick={closeApproval} disabled={approving}>
               Batal
@@ -125,6 +136,13 @@ export function ApprovalModal() {
 const ACTION_LABEL: Record<string, string> = {
   SCENARIO_APPROVED: "Skenario disetujui",
   APPROVAL_REJECTED_DRIFT: "Persetujuan ditolak · drift SAP",
+  DISRUPTION_DETECTED: "Gangguan terdeteksi",
+  SCENARIOS_GENERATED: "Skenario dibuat",
+  EXTERNAL_CHANGE: "Perubahan eksternal",
+  SCENARIO_REVERTED: "Skenario dikembalikan",
+  REVERT_REJECTED_DRIFT: "Revert ditolak · drift SAP",
+  SKILLS_LOADED: "Skill dimuat",
+  SKILL_APPROVED: "Skill disetujui",
 };
 
 export function LedgerBar() {
@@ -181,11 +199,29 @@ function CloseBtn({ onClick }: { onClick: () => void }) {
 }
 
 export function LedgerDrawer() {
-  const { ledgerOpen, setLedgerOpen, ledger, verify, verifying, verifyResult } = useCockpit();
+  const { ledgerOpen, setLedgerOpen, ledger, verify, verifying, verifyResult, approver } = useCockpit();
+  const [filter, setFilter] = useState("ALL");
+  const [reverting, setReverting] = useState<string | null>(null);
+  const [revertError, setRevertError] = useState<string | null>(null);
   const close = () => setLedgerOpen(false);
-  const entries = [...ledger].reverse();
+  const types = [...new Set(ledger.map((e) => e.action_type))].sort();
+  const entries = [...ledger].reverse().filter((e) => filter === "ALL" || e.action_type === filter);
+
+  async function revert(entryId: string) {
+    setReverting(entryId);
+    setRevertError(null);
+    try {
+      await api.revertLedger(entryId, approver);
+      await verify();
+    } catch (e) {
+      setRevertError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setReverting(null);
+    }
+  }
+
   return (
-    <Drawer open={ledgerOpen} onClose={close} width={520} label="Audit ledger">
+    <Drawer open={ledgerOpen} onClose={close} width={560} label="Audit ledger">
       <div className="flex items-center gap-3">
         <div className="flex-1">
           <h2 className="text-[24px] font-bold">Audit ledger</h2>
@@ -193,17 +229,38 @@ export function LedgerDrawer() {
         </div>
         <CloseBtn onClick={close} />
       </div>
+      <label className="flex items-center gap-2 text-[15px]">
+        <span className="font-semibold">Filter:</span>
+        <select
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          className="min-h-12 flex-1 rounded-md border border-line bg-surface px-3 text-[15px]"
+        >
+          <option value="ALL">Semua ({ledger.length})</option>
+          {types.map((t) => (
+            <option key={t} value={t}>
+              {ACTION_LABEL[t] ?? t} ({ledger.filter((e) => e.action_type === t).length})
+            </option>
+          ))}
+        </select>
+      </label>
+      {revertError && (
+        <p role="alert" className="rounded-md border border-danger-line bg-danger-bg px-3 py-2 text-[14px] text-fault">
+          Revert gagal: {revertError}
+        </p>
+      )}
       <ol className="flex flex-1 flex-col gap-2.5 overflow-y-auto">
-        {entries.length === 0 && <li className="text-[15px] text-muted-ink">Belum ada entri. Setujui sebuah skenario untuk membuat entri pertama.</li>}
+        {entries.length === 0 && <li className="text-[15px] text-muted-ink">Tidak ada entri untuk filter ini.</li>}
         {entries.map((e, i) => {
-          const rejected = e.action_type === "APPROVAL_REJECTED_DRIFT";
+          const rejected = e.action_type === "APPROVAL_REJECTED_DRIFT" || e.action_type === "REVERT_REJECTED_DRIFT";
+          const canRevert = e.action_type === "SCENARIO_APPROVED";
           return (
             <li
               key={e.id}
               className={cn("flex flex-col gap-1 rounded-md px-4 py-3", rejected ? "border border-danger-line bg-danger-bg" : i === 0 ? "border border-ok-line bg-ok-bg" : "bg-page")}
             >
               <span className={cn("text-[16px] font-semibold", rejected && "text-fault")}>
-                {ACTION_LABEL[e.action_type] ?? e.action_type} · {String(e.scenario_chosen ?? "").replace("scenario_", "Skenario ").toUpperCase().replace("SKENARIO", "Skenario")}
+                {ACTION_LABEL[e.action_type] ?? e.action_type} · {String(e.scenario_chosen ?? e.skill_id ?? "").replace("scenario_", "Skenario ").toUpperCase().replace("SKENARIO", "Skenario")}
               </span>
               <span className="text-[14px] text-muted-ink">
                 {wibTime(e.timestamp)} · {String(e.approved_by ?? "").replace("Production Supervisor — ", "")} · SAP v{e.sap_version_before}
@@ -211,6 +268,18 @@ export function LedgerDrawer() {
                 {rejected && " · tidak ada penulisan"}
               </span>
               <Mono className="text-[14px]">{shortHash(e.sha256_hash)}</Mono>
+              {canRevert && (
+                <span className="mt-1">
+                  <Btn
+                    variant="secondary"
+                    onClick={() => revert(e.id)}
+                    disabled={reverting !== null}
+                  >
+                    {reverting === e.id ? <Spinner className="size-5" /> : null}
+                    Kembalikan skenario ini
+                  </Btn>
+                </span>
+              )}
             </li>
           );
         })}
