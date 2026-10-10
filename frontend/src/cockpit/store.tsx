@@ -63,9 +63,14 @@ interface CockpitValue {
   approvalFor: Scenario | null;
   approving: boolean;
   conflict: DriftDetail | null;
+  approver: string;
+  setApprover: (v: string) => void;
   openApproval: (s: Scenario) => void;
   closeApproval: () => void;
   confirmApproval: () => Promise<void>;
+  // failure drill (Phase 4): inject a real second disruption via EXTERNAL_CHANGE
+  injecting: boolean;
+  injectDrill: () => Promise<void>;
   // machines
   displayStatus: (machineId: string, raw: string) => MachineStatus;
   live: Record<string, Record<string, number>>;
@@ -95,7 +100,6 @@ interface CockpitValue {
   toast: string | null;
   reset: () => Promise<void>;
   resetting: boolean;
-  // Phase 3: Skill Studio
   skillStudioOpen: boolean;
   setSkillStudioOpen: (v: boolean) => void;
   skillStudioState: "interview" | "draft" | "lint" | "approved";
@@ -116,8 +120,6 @@ export function useCockpit(): CockpitValue {
   if (!v) throw new Error("useCockpit must be used inside <CockpitProvider>");
   return v;
 }
-
-const SIMULATE_DRIFT = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("drift");
 
 let msgSeq = 1;
 
@@ -143,7 +145,8 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   const [approvalFor, setApprovalFor] = useState<Scenario | null>(null);
   const [approving, setApproving] = useState(false);
   const [conflict, setConflict] = useState<DriftDetail | null>(null);
-  const driftUsed = useRef(false);
+  const [approver, setApprover] = useState(APPROVER);
+  const [injecting, setInjecting] = useState(false);
 
   const [live, setLive] = useState<Record<string, Record<string, number>>>({});
   const [wsStatus, setWsStatus] = useState<WsStatus>("connecting");
@@ -327,22 +330,39 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   const confirmApproval = useCallback(async () => {
     if (!approvalFor) return;
     setApproving(true);
-    // ?drift in the URL sends one stale version, so the real 409 path can be demoed.
-    const stale = SIMULATE_DRIFT && !driftUsed.current;
-    const expected = stale ? sapVersion - 1 : sapVersion;
+    // Real optimistic lock: the expected version is the SAP version at
+    // analysis time. If a second disruption was injected since, this is
+    // stale and the backend returns 409 — no fake ?drift query param.
+    const expected = result?.sap_version ?? sapVersion;
     try {
-      const r = await api.approve({ scenario_id: approvalFor.id, scenario_data: approvalFor, expected_sap_version: expected, approved_by: APPROVER });
+      const r = await api.approve({ scenario_id: approvalFor.id, scenario_data: approvalFor, expected_sap_version: expected, approved_by: approver });
       setReceipt({ ...r, scenario: approvalFor });
       setSapVersion(r.sap_version_after);
       setApprovalFor(null);
+      setConflict(null);
       setPhase("resolved");
       showToast("Skenario diterapkan. Audit ledger diperbarui.");
       await load();
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
-        driftUsed.current = true;
-        setConflict(e.detail as DriftDetail);
+        const detail = e.detail as DriftDetail;
+        setConflict(detail);
+        setRecalcVersions({ from: detail.expected_version, to: detail.actual_version });
         await load();
+        // Automatic re-solve on 409: recompute scenarios against the newest
+        // SAP state so the supervisor sees fresh proposals immediately.
+        if (params) {
+          try {
+            const r = await api.disrupt(params);
+            setResult(r);
+            setSapVersion(r.sap_version);
+            setPhase("proposing");
+            setApprovalFor(null);
+            showToast(`SAP berubah (v${detail.expected_version} → v${detail.actual_version}). Skenario dihitung ulang otomatis.`);
+          } catch {
+            showToast("SAP berubah. Hitung ulang otomatis gagal — coba lagi manual.");
+          }
+        }
       } else {
         setError(e instanceof Error ? e.message : String(e));
         showToast("Persetujuan gagal dikirim. Tidak ada perubahan di SAP.");
@@ -350,7 +370,27 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     } finally {
       setApproving(false);
     }
-  }, [approvalFor, sapVersion, load, showToast]);
+  }, [approvalFor, result, sapVersion, params, approver, load, showToast]);
+
+  // ── failure drill: inject a real second disruption ───────────────────────
+  const injectDrill = useCallback(async () => {
+    setInjecting(true);
+    try {
+      const r = await api.injectDisruption({ machine_id: "CNC-03", new_status: "FAULT", disruption_type: "MOTOR_OVERLOAD" });
+      await load();
+      setConflict(null);
+      showToast(
+        result
+          ? `Gangguan susulan diinjeksikan: CNC-03 FAULT (SAP v${r.sap_version_before} → v${r.sap_version_after}). Skenario lama basi — setujui untuk melihat 409 + hitung ulang otomatis.`
+          : `Gangguan susulan diinjeksikan: CNC-03 FAULT (SAP v${r.sap_version_before} → v${r.sap_version_after}).`,
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      showToast("Injeksi gangguan gagal. Periksa koneksi ke backend.");
+    } finally {
+      setInjecting(false);
+    }
+  }, [load, result, showToast]);
 
   // ── machine status as the supervisor should see it right now ─────────────
   const displayStatus = useCallback(
@@ -401,16 +441,17 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
           },
         ]);
       } else if (messages.length === 0 || chatMode !== "general") {
+        const firstName = approver.split("—").pop()?.trim().split(" ")[0] ?? "Budi";
         setMessages([
           {
             id: msgSeq++,
             from: "ai",
-            text: "Halo, Budi. Saya bisa menjelaskan status mesin, jadwal shift, dan skenario. Saya tidak mengubah apa pun tanpa persetujuan Anda.",
+            text: `Halo, ${firstName}. Saya bisa menjelaskan status mesin, jadwal shift, dan skenario. Saya tidak mengubah apa pun tanpa persetujuan Anda.`,
           },
         ]);
       }
     },
-    [conflict, messages.length, chatMode],
+    [conflict, messages.length, chatMode, approver],
   );
   const closeChat = useCallback(() => setChatOpen(false), []);
 
@@ -485,10 +526,24 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
         setChatOpen(false);
         setLedgerOpen(true);
       } else {
-        push({
-          from: "ai",
-          text: "Chat bebas belum terhubung ke backend. Untuk sekarang saya bisa: status semua mesin, simulasi What-if, dan membuka audit ledger.",
-        });
+        // Hybrid fallback: free-form questions go to Gemini via /api/chat,
+        // grounded on live SAP state. Scripted fast paths above stay instant
+        // and key-free; the solver/SAP paths are never touched by the LLM.
+        setChatBusy(true);
+        const pid = push({ from: "ai", kind: "progress", text: "AI Supervisor meninjau data SAP terbaru…" });
+        try {
+          const r = await api.chat(t);
+          setMessages((cur) => cur.filter((m) => m.id !== pid));
+          push({ from: "ai", text: r.reply });
+        } catch {
+          setMessages((cur) => cur.filter((m) => m.id !== pid));
+          push({
+            from: "ai",
+            text: "AI tidak dapat dihubungi (periksa backend / GEMINI_API_KEY). Untuk sekarang saya bisa: status semua mesin, simulasi What-if, dan membuka audit ledger.",
+          });
+        } finally {
+          setChatBusy(false);
+        }
       }
     },
     [chatMode, recalc, machineSummary, runDisruption],
@@ -509,7 +564,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       setConflict(null);
       setSafety(null);
       setLive({});
-      driftUsed.current = false;
+      setRecalcVersions(null);
       showToast(`State dimuat ulang ke SAP v${s._meta.version}. Audit ledger tetap utuh.`);
       await load();
     } catch (e) {
@@ -524,7 +579,8 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       state, online, aiConfigured, error, ledger, sapVersion,
       page, setPage,
       phase, detectStep, params, result, receipt, runDisruption,
-      approvalFor, approving, conflict, openApproval, closeApproval, confirmApproval,
+      approvalFor, approving, conflict, approver, setApprover, openApproval, closeApproval, confirmApproval,
+      injecting, injectDrill,
       displayStatus, live,
       wsStatus, lastAnalysis, safety, sendTelemetry, runFullAnalysis,
       ledgerOpen, setLedgerOpen, verifying, verifyResult, verify,
@@ -537,7 +593,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     }),
     [
       state, online, aiConfigured, error, ledger, sapVersion, page, phase, detectStep, params, result, receipt, runDisruption,
-      approvalFor, approving, conflict, openApproval, closeApproval, confirmApproval, displayStatus, live, wsStatus,
+      approvalFor, approving, conflict, approver, openApproval, closeApproval, confirmApproval, injecting, injectDrill, displayStatus, live, wsStatus,
       lastAnalysis, safety, sendTelemetry, runFullAnalysis, ledgerOpen, verifying, verifyResult, verify, chatOpen,
       chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat, toast, reset, resetting,
       skillStudioOpen, skillStudioState, skillStudioFormData, skillStudioDraft, skillStudioLintResult,

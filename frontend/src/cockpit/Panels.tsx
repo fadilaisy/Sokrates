@@ -93,7 +93,7 @@ export function TelemetryPanel() {
 }
 
 export function WhatIfPanel() {
-  const { runDisruption, phase } = useCockpit();
+  const { runDisruption, phase, injectDrill, injecting, result } = useCockpit();
   const busy = phase === "detecting";
   return (
     <Card className="flex flex-col gap-3 p-4">
@@ -109,7 +109,14 @@ export function WhatIfPanel() {
       <Btn size="lg" onClick={() => runDisruption(DEMO_DISRUPTION)} disabled={busy}>
         What-if: CNC-02 rusak 3 jam
       </Btn>
-      <p className="text-[14px] text-muted-ink">Mode bebas tersedia di area AI Supervisor di bawah.</p>
+      <Btn variant="secondary" onClick={injectDrill} disabled={busy || injecting}>
+        {injecting ? "Menginjeksikan…" : "Drill: gangguan susulan CNC-03 FAULT"}
+      </Btn>
+      <p className="text-[14px] text-muted-ink">
+        {result
+          ? "Drill membuat skenario di atas basi (SAP version naik). Setujui skenario lama untuk melihat 409 + hitung ulang otomatis."
+          : "Mode bebas tersedia di area AI Supervisor di bawah."}
+      </p>
     </Card>
   );
 }

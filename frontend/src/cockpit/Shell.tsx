@@ -1,6 +1,8 @@
 import { RefreshCw } from "lucide-react";
 import type { ReactNode } from "react";
+import SkillStudio from "../components/SkillStudio";
 import { cn } from "../lib/utils";
+import { API_BASE } from "../lib/api";
 import { SHIFT_END, SHIFT_START } from "../lib/shift";
 import { useCockpit } from "./store";
 import type { Page } from "./store";
@@ -13,7 +15,7 @@ const NAV: { page: Page; label: string }[] = [
 ];
 
 function Sidebar() {
-  const { page, setPage } = useCockpit();
+  const { page, setPage, setSkillStudioOpen, skillStudioOpen } = useCockpit();
   return (
     <aside className="sticky top-0 hidden h-screen w-[280px] shrink-0 flex-col justify-between overflow-y-auto bg-page px-8 py-10 lg:flex">
       <div className="flex flex-col gap-8">
@@ -49,11 +51,26 @@ function Sidebar() {
 
         <div className="flex flex-col gap-3">
           <p className="text-[15px] font-bold text-navy">BANTUAN</p>
-          {["Tab 1", "Tab 2", "Tab 3"].map((t) => (
-            <span key={t} className="flex min-h-12 items-center px-5 text-[17px] text-navy/80">
-              {t}
-            </span>
-          ))}
+          <button
+            type="button"
+            onClick={() => setSkillStudioOpen(true)}
+            aria-current={skillStudioOpen ? "page" : undefined}
+            className={cn(
+              "flex min-h-12 items-center gap-3 rounded-r-md border-l-4 px-4 text-left text-[17px] transition-colors",
+              skillStudioOpen ? "border-accent-blue font-bold text-navy" : "border-transparent text-navy hover:bg-white/70",
+            )}
+          >
+            <span className={cn("size-2.5 rounded-full", skillStudioOpen ? "bg-accent-blue" : "bg-disabled")} aria-hidden />
+            Skill Studio
+          </button>
+          <a
+            href={`${API_BASE}/docs`}
+            target="_blank"
+            rel="noreferrer"
+            className="flex min-h-12 items-center px-5 text-[17px] text-navy/80 hover:underline"
+          >
+            Dokumen API
+          </a>
         </div>
       </div>
 
@@ -68,7 +85,7 @@ function Sidebar() {
 
 /** Compact top nav for screens narrower than the sidebar layout. */
 function MobileNav() {
-  const { page, setPage } = useCockpit();
+  const { page, setPage, setSkillStudioOpen } = useCockpit();
   return (
     <nav aria-label="Menu utama" className="flex gap-2 overflow-x-auto border-b border-line bg-page px-4 py-2 lg:hidden">
       {NAV.map((n) => (
@@ -84,6 +101,13 @@ function MobileNav() {
           {n.label}
         </button>
       ))}
+      <button
+        type="button"
+        onClick={() => setSkillStudioOpen(true)}
+        className="min-h-12 shrink-0 rounded-md bg-surface px-4 text-[16px] text-navy"
+      >
+        Skill Studio
+      </button>
     </nav>
   );
 }
@@ -161,6 +185,7 @@ export function Shell({ children }: { children: ReactNode }) {
       </div>
       <Toast />
       <ChatFab />
+      <SkillStudio />
     </div>
   );
 }

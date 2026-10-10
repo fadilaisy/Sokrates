@@ -49,4 +49,7 @@ async def test():
     await client.aclose()
     print("\nAll tests passed!")
 
-asyncio.run(test())
+
+if __name__ == "__main__":
+    # Manual script — needs a live server on :8000. Not collected by pytest.
+    asyncio.run(test())

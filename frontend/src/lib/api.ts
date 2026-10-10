@@ -238,6 +238,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ supervisor_description }),
     }),
+  chat: (message: string) =>
+    req<{ reply: string; model_used: string }>("/api/chat", {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    }),
   // Phase 3: Skill Studio
   draftSkill: (b: SkillStudioFormData) =>
     req<{ skill_md: string; sla_penalties: any; hooks: any[]; interlocks: any[]; validation_errors: string[] }>("/api/skills/draft", {
@@ -249,10 +254,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify(b),
     }),
-  approveSkill: (b: { skill_id: string; skill_md: string; sla_penalties: any; hooks: any[]; interlocks: any[] }) =>
+  approveSkill: (b: { skill_id: string; skill_md: string; sla_penalties: any; hooks: any[]; interlocks: any[]; approved_by?: string }) =>
     req<{ success: boolean; skill_id: string; version: string; ledger_entry_id: string }>("/api/skills/approve", {
       method: "POST",
       body: JSON.stringify(b),
+    }),
+  revertLedger: (entry_id: string, approved_by: string) =>
+    req<ApproveReceipt>(`/api/ledger/${entry_id}/revert`, {
+      method: "POST",
+      body: JSON.stringify({ id: entry_id, approved_by }),
     }),
   injectDisruption: (b: { machine_id: string; new_status: string; disruption_type: string }) =>
     req<{ success: boolean; sap_version_before: number; sap_version_after: number; ledger_entry_id: string }>("/api/disrupt/inject", {

@@ -72,9 +72,14 @@ _solver    = ScheduleSolver()
 _skills    = SkillRegistry()
 _skills.index()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FastAPI app
-# ─────────────────────────────────────────────────────────────────────────────
+# Log startup skill load once so the ledger shows what the solver runs on.
+try:
+    _ledger.append({
+        "action_type": "SKILLS_LOADED",
+        "skill_ids": sorted(_skills.skills.keys()),
+    })
+except Exception:
+    pass
 
 app = FastAPI(
     title="SkillForge — Agentic AI Supervisor for Indonesian Manufacturers",
@@ -164,6 +169,15 @@ class SkillGenerateResponse(BaseModel):
     model_used: str
 
 
+class ChatRequest(BaseModel):
+    message: str = Field(..., max_length=2000, example="Mesin mana yang butuh perhatian?")
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    model_used: str
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 3: Skill Studio models
 # ─────────────────────────────────────────────────────────────────────────────
@@ -212,6 +226,7 @@ class SkillApproveRequest(BaseModel):
     hooks: list[dict]
     interlocks: list[dict]
     skill_version: str = Field(default="1.0.0")
+    approved_by: str = Field(default="Production Supervisor — Budi Santoso")
 
 
 class SkillApproveResponse(BaseModel):
@@ -318,6 +333,24 @@ async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
 
     disruption_hours = body.end_hour - body.start_hour
 
+    # Phase 5: audit the analysis itself, not just approvals.
+    recommended_id = next((s["id"] for s in scenarios if s.get("recommended")), None)
+    _ledger.append({
+        "action_type": "DISRUPTION_DETECTED",
+        "machine_id": body.machine_id,
+        "disruption_type": body.disruption_type,
+        "disruption_hours": disruption_hours,
+        "sap_version": _sap.get_version(),
+    })
+    _ledger.append({
+        "action_type": "SCENARIOS_GENERATED",
+        "machine_id": body.machine_id,
+        "scenario_ids": [s["id"] for s in scenarios],
+        "recommended_scenario": recommended_id,
+        "total_costs_idr": {s["id"]: s.get("total_cost_idr") for s in scenarios},
+        "sap_version": _sap.get_version(),
+    })
+
     # ── Gemini 3.5 Flash: Bahasa Indonesia executive summary ──────────────────
     prompt = (
         f"Anda adalah AI Supervisor lantai produksi di PT Karawang Precision Manufacturing.\n"
@@ -351,37 +384,36 @@ async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
 async def post_disrupt_inject(body: DisruptionInjectRequest) -> DisruptionInjectResponse:
     """
     Apply a real second disruption to SAP state for failure drill testing.
-    - Sets machine status to FAULT or MAINTENANCE
-    - Bumps sap_version
+    - Sets machine status (e.g. FAULT) via apply_delta with optimistic lock
+    - Bumps sap_version by exactly 1
     - Logs to ledger as EXTERNAL_CHANGE
-    - Used to trigger real 409 drift errors during demo
+    - Used to trigger real 409 drift errors during demo: any scenario
+      analysed before this call carries a stale sap_version.
     """
-    state = _sap.get_state()
-    work_centers = state.get("work_centers", [])
-
-    for wc in work_centers:
-        if wc["id"] == body.machine_id:
-            old_status = wc.get("status", "RUNNING")
-            wc["status"] = body.new_status
-            wc.setdefault("current_order_id", None)  # Clear order on fault
-            break
-
     version_before = _sap.get_version()
-    _sap.apply_delta({"meta_updates": {}}, version_before)  # This will fail - version mismatch
-    # Actually apply the change:
-    state = _sap.reset()  # Reset to get fresh state, then reapply
-    for wc in state.get("work_centers", []):
-        if wc["id"] == body.machine_id:
-            wc["status"] = body.new_status
-            wc.setdefault("current_order_id", None)
+    state = _sap.get_state()
+    target = next((wc for wc in state.get("work_centers", []) if wc["id"] == body.machine_id), None)
+    if target is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown machine_id: {body.machine_id}",
+        )
+    old_status = target.get("status", "RUNNING")
 
-    version_after = version_before + 1
+    new_state = _sap.apply_delta(
+        {
+            "work_center_updates": [{"id": body.machine_id, "status": body.new_status}],
+            "meta_updates": {"last_external_change": body.disruption_type},
+        },
+        expected_version=version_before,
+    )
+    version_after = new_state["_meta"]["version"]
 
     entry = _ledger.append({
         "action_type": "EXTERNAL_CHANGE",
         "change_type": "MACHINE_STATUS",
         "machine_id": body.machine_id,
-        "from_status": old_status if 'old_status' in locals() else "RUNNING",
+        "from_status": old_status,
         "to_status": body.new_status,
         "disruption_type": body.disruption_type,
         "sap_version_before": version_before,
@@ -528,6 +560,42 @@ async def post_skills_generate(body: SkillGenerateRequest) -> SkillGenerateRespo
     return SkillGenerateResponse(skill_md=skill_md, model_used=GEMINI_MODEL)
 
 
+@app.post(
+    "/api/chat",
+    response_model=ChatResponse,
+    summary="Ask the AI Supervisor (grounded on live SAP state, read-only)",
+)
+async def post_chat(body: ChatRequest) -> ChatResponse:
+    """
+    Hybrid-chat fallback: scripted fast paths live in the frontend; anything
+    else comes here. Gemini answers in Bahasa Indonesia, grounded on a live
+    SAP snapshot embedded in the prompt. It is text-only: it cannot approve,
+    reroute, or write anything — the reply must direct the user to the
+    approval buttons for actions.
+    """
+    state = _sap.get_state()
+    machines = ", ".join(
+        f"{w.get('id')} ({w.get('status')})" for w in state.get("work_centers", [])
+    )
+    orders = state.get("production_orders", [])
+    by_status: dict[str, int] = {}
+    for o in orders:
+        by_status[o.get("status", "?")] = by_status.get(o.get("status", "?"), 0) + 1
+    prompt = (
+        "Anda adalah AI Supervisor lantai produksi PT Karawang Precision Manufacturing. "
+        "Jawab dalam Bahasa Indonesia, singkat (maks 3 kalimat), hanya berdasarkan data berikut. "
+        "Anda HANYA memberi informasi/teks — Anda tidak bisa menyetujui skenario, mengubah jadwal, "
+        "atau menulis ke SAP. Jika user meminta perubahan, arahkan ke tombol persetujuan di dasbor.\n\n"
+        f"Status mesin: {machines}.\n"
+        f"Order (total {len(orders)}, per status {by_status}).\n"
+        f"SAP version: {state.get('_meta', {}).get('version')}.\n\n"
+        f"Pertanyaan supervisor: {body.message}\n\n"
+        "Jawab HANYA jawabannya, tanpa kata pengantar."
+    )
+    reply = await _call_gemini(prompt, max_tokens=300)
+    return ChatResponse(reply=reply, model_used=GEMINI_MODEL)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 3: Skill Studio API endpoints
 # ─────────────────────────────────────────────────────────────────────────────
@@ -659,15 +727,23 @@ async def post_skills_draft(body: SkillDraftRequest) -> SkillDraftResponse:
         json_match = re.search(r'\{[\s\S]*\}', result_text)
         if json_match:
             result = j.loads(json_match.group())
-            return SkillDraftResponse(
-                skill_md=result.get("skill_md", ""),
-                sla_penalties=result.get("sla_penalties", {}),
-                hooks=result.get("hooks", []),
-                interlocks=result.get("interlocks", []),
-                validation_errors=[],
-            )
+            skill_md = result.get("skill_md", "")
+            sla = result.get("sla_penalties", {})
+            hooks = result.get("hooks", [])
+            interlocks = result.get("interlocks", [])
+            # Gemini often returns wrong shapes — fall back to the template
+            # rather than 500ing on response validation.
+            if isinstance(skill_md, str) and isinstance(sla, dict) \
+                    and isinstance(hooks, list) and isinstance(interlocks, list):
+                return SkillDraftResponse(
+                    skill_md=skill_md,
+                    sla_penalties=sla,
+                    hooks=hooks,
+                    interlocks=interlocks,
+                    validation_errors=[],
+                )
         return SkillDraftResponse(
-            skill_md=_create_fallback_skill_md(...),
+            skill_md=_create_fallback_skill_md(body.machine_type, body.failure_mode),
             sla_penalties={},
             hooks=[],
             interlocks=[],
@@ -675,7 +751,7 @@ async def post_skills_draft(body: SkillDraftRequest) -> SkillDraftResponse:
         )
     except Exception as e:
         return SkillDraftResponse(
-            skill_md=_create_fallback_skill_md(...),
+            skill_md=_create_fallback_skill_md(body.machine_type, body.failure_mode),
             sla_penalties={},
             hooks=[],
             interlocks=[],
@@ -885,7 +961,7 @@ async def post_skills_approve(body: SkillApproveRequest) -> SkillApproveResponse
         "action_type": "SKILL_APPROVED",
         "skill_id": body.skill_id,
         "skill_version": body.skill_version,
-        "approved_by": "system",  # Will be filled in by caller
+        "approved_by": body.approved_by,
         "hooks_count": len(body.hooks),
         "interlocks_count": len(body.interlocks),
     })
@@ -904,6 +980,7 @@ async def post_skills_approve(body: SkillApproveRequest) -> SkillApproveResponse
 
 class LedgerEntryId(BaseModel):
     id: str = Field(..., example="abc123...")
+    approved_by: str = Field(default="Production Supervisor — Budi Santoso")
 
 
 @app.post(
@@ -965,11 +1042,10 @@ async def post_ledger_revert(entry_id: str, body: LedgerEntryId) -> ApproveRespo
         },
     }
 
-    version_before = original_entry.get("sap_version_before", 0)
-    version_after = version_before + 1
-
+    version_before = _sap.get_version()
+    new_state = None
     try:
-        _sap.apply_delta(inverse_delta, expected_version=version_before)
+        new_state = _sap.apply_delta(inverse_delta, expected_version=version_before)
     except DriftError as exc:
         rejected = _ledger.append({
             "action_type":        "REVERT_REJECTED_DRIFT",
@@ -989,6 +1065,7 @@ async def post_ledger_revert(entry_id: str, body: LedgerEntryId) -> ApproveRespo
             },
         )
 
+    version_after = new_state["_meta"]["version"] if new_state else version_before + 1
     entry = _ledger.append({
         "action_type":        "SCENARIO_REVERTED",
         "original_entry_id":  entry_id,
@@ -1103,8 +1180,25 @@ async def ws_telemetry(websocket: WebSocket) -> None:
 def _classify_telemetry(metric: str, value: float) -> tuple[str, str | None]:
     """
     Map telemetry metric + value → (severity, safety_rule_id | None).
-    Mirrors threshold values in safety_interlocks.json.
+
+    Phase 2: driven by skill files via SkillRegistry — Tier 1 interlocks from
+    rules/safety_interlocks.json decide CRITICAL, WARNING hooks from
+    hooks.json decide WARNING. Editing either JSON changes classification
+    without a code change or restart. Hardcoded table below is fallback only
+    when the skill files are missing/unreadable.
     """
+    telemetry = {metric: value}
+    try:
+        interlock = _skills.evaluate_interlock("cnc_milling", telemetry)
+        if interlock is not None:
+            return "CRITICAL", interlock.id
+        for hook in _skills.evaluate_telemetry("cnc_milling", telemetry):
+            sev = str(getattr(hook, "severity", "WARNING")).upper()
+            if sev in ("CRITICAL", "WARNING"):
+                return sev, None
+    except Exception:
+        pass
+    # ── Fallback: mirrors shipped skill files ─────────────────────────────────
     if metric == "coolant_pressure_bar":
         if value < 2.0:
             return "CRITICAL", "SAFE-003"

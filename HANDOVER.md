@@ -3,7 +3,7 @@
 > **Project:** SkillForge — Agentic AI Supervisor for Indonesian Manufacturers  
 > **Hackathon:** Sokrates Hackathon  
 > **Repo:** https://github.com/fadilaisy/Sokrates  
-> **Handover Date:** 04 October 2026  
+> **Handover Date:** 10 October 2026 (Phases 1–6 verified complete)  
 > **Stack:** Python 3.9 · FastAPI · OR-Tools CP-SAT · Gemini 3.5 Flash (Google) · SAP S/4HANA Mock  
 
 ---
@@ -28,6 +28,7 @@ When a machine breaks down, it automatically:
 sokrates hackathon/
 │
 ├── .env.example                  ← Copy to .env and fill in your API key
+├── .github/workflows/ci.yml      ← Backend pytest + frontend tsc/build
 ├── .gitignore                    ← .env, __pycache__, audit_ledger.jsonl excluded
 ├── requirements.txt              ← All Python dependencies
 ├── README.md                     ← Project overview
@@ -41,14 +42,25 @@ sokrates hackathon/
 │   └── mock_sap_state.json       ← PT Karawang shop floor data (5 machines, 8 orders)
 │
 ├── solver/
-│   └── schedule_solver.py        ← OR-Tools CP-SAT — generates Scenarios A / B / C
+│   └── schedule_solver.py        ← OR-Tools CP-SAT — generates Scenarios A / B / C (skill-driven costs)
 │
-└── skills/cnc_milling/
-    ├── SKILL.md                  ← Bilingual EN/ID AI Supervisor playbook
-    ├── hooks.json                ← Telemetry trigger hooks (5 hooks)
-    └── rules/
-        ├── safety_interlocks.json  ← Tier 1 safety rules (5 rules, never overridable)
-        └── sla_penalties.json      ← SLA penalty matrix in IDR (Classes A / B / C)
+├── skills/
+│   ├── loader.py                 ← SkillRegistry + safe condition parser (no eval)
+│   └── cnc_milling/
+│       ├── SKILL.md              ← Bilingual EN/ID AI Supervisor playbook
+│       ├── hooks.json            ← Telemetry trigger hooks (5 hooks)
+│       └── rules/
+│           ├── safety_interlocks.json  ← Tier 1 safety rules (5 rules, never overridable)
+│           └── sla_penalties.json      ← SLA penalty matrix in IDR (Classes A / B / C)
+│
+├── tests/
+│   ├── test_solver.py            ← Solver cost/breakdown/constraint tests
+│   ├── test_skills_loader.py     ← Registry + safe condition parser tests
+│   ├── test_skill_driven.py      ← Skill-file-drives-system regression tests (Phase 2)
+│   └── test_api.py               ← REST contract tests via TestClient (Phase 6)
+│
+└── scripts/
+    └── manual_api_check.py       ← Manual live-server check (not collected by pytest)
 ```
 
 ---
@@ -98,12 +110,19 @@ Open **http://localhost:8000/docs** for the interactive Swagger UI.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/state` | Full SAP mock state (machines, orders, maintenance) |
-| `POST` | `/api/disrupt` | Trigger disruption → CP-SAT solver → Gemini summary |
-| `POST` | `/api/approve` | Approve scenario, apply to SAP, write audit entry |
+| `POST` | `/api/state/reset` | Reset SAP mock to baseline (ledger is kept) |
+| `POST` | `/api/disrupt` | Trigger disruption → CP-SAT solver → Gemini summary. Logs `DISRUPTION_DETECTED` + `SCENARIOS_GENERATED` |
+| `POST` | `/api/disrupt/inject` | Inject a real second disruption (sets machine status, bumps version, logs `EXTERNAL_CHANGE`) — failure-drill trigger for real 409s |
+| `POST` | `/api/approve` | Approve scenario, apply to SAP, write audit entry (409 on stale `expected_sap_version`) |
 | `GET` | `/api/ledger` | Full tamper-evident audit ledger |
 | `GET` | `/api/ledger/verify` | SHA-256 hash-chain integrity check |
-| `POST` | `/api/skills/generate` | Generate a new SKILL.md from natural language |
-| `WS` | `/ws/telemetry` | Real-time telemetry stream + AI analysis |
+| `POST` | `/api/ledger/{entry_id}/revert` | Revert an approved scenario via inverse delta, logs `SCENARIO_REVERTED` |
+| `POST` | `/api/skills/generate` | Generate a SKILL.md playbook from natural language |
+| `POST` | `/api/chat` | Hybrid-chat fallback: free-form Q&A grounded on live SAP state, text-only (never approves/writes) |
+| `POST` | `/api/skills/draft` | Skill Studio: build skill files from guided interview (rejects Tier 1 relaxation) |
+| `POST` | `/api/skills/lint` | Skill Studio: lint skill files — Tier 1 rules can only get stricter, never `override_allowed` |
+| `POST` | `/api/skills/approve` | Skill Studio: write skill to `skills/<id>/`, reload registry, log `SKILL_APPROVED` |
+| `WS` | `/ws/telemetry` | Real-time telemetry stream + AI analysis (severity from skill files) |
 | `GET` | `/health` | Health check (Gemini configured? SAP version?) |
 
 ### Example: Trigger a disruption
@@ -146,15 +165,22 @@ Every disruption produces exactly 3 scenarios from the CP-SAT solver:
 | `scenario_b` | **Lembur (Overtime)** | Move orders to night shift | Rp 450.000/hr/machine |
 | `scenario_c` | **Rerute Optimal** | CP-SAT reroutes to free machines | Changeover (Rp 350.000) + optional overtime |
 
-The solver recommends whichever scenario has the **highest `net_savings_idr`**.
+The solver recommends whichever scenario has the **lowest `total_cost_idr`**.
+
+Costs are **not hardcoded**: every `solve()` reads `skills/cnc_milling/rules/sla_penalties.json`
+fresh from disk (module constants are fallback defaults only), so editing the skill file
+changes solver output with no code change or restart.
+
+Tier 1 safety rule (inviolable): the solver never routes work to a machine whose status is
+`MAINTENANCE` or `FAULT` (`TIER1_BLOCKED_STATUSES` in `solver/schedule_solver.py`).
 
 ---
 
-## 6. SLA Penalty Matrix
+## 6. SLA Penalty Matrix (live from `skills/cnc_milling/rules/sla_penalties.json`)
 
 | Order Class | Customer Type | Penalty/Hour | Max Penalty | Auto-resolve below |
 |-------------|--------------|-------------|------------|-------------------|
-| **A** | OEM Automotive (Toyota, Honda) | Rp 750.000 | Rp 15.000.000 | Rp 500.000 |
+| **A** | OEM Automotive (Toyota, Honda) | Rp 20.000.000 | Rp 150.000.000 | Rp 500.000 |
 | **B** | General Industry (Pertamina, Astra) | Rp 300.000 | Rp 6.000.000 | Rp 500.000 |
 | **C** | MRO / Internal Spare Parts | Rp 100.000 | Rp 2.000.000 | Rp 500.000 |
 
@@ -226,11 +252,22 @@ Connect to `ws://localhost:8000/ws/telemetry` and send JSON frames:
 
 The server streams back real-time AI analysis + safety alerts.
 
-**Supported metrics:**
-- `motor_temp_celsius` — warning >85°C, critical >95°C
-- `spindle_vibration_mm_per_s` — warning >5, critical >8
-- `coolant_pressure_bar` — warning <2.5, critical <2.0
-- `concurrent_axis_faults` — critical ≥2
+**Supported metrics (severity driven by skill files, not hardcoded):**
+- `motor_temp_celsius` — WARNING via `hooks.json` HOOK-001 (>85°C), CRITICAL via `safety_interlocks.json` SAFE-001 (>95°C)
+- `spindle_vibration_mm_per_s` — WARNING via HOOK-002 (>5), CRITICAL via SAFE-002 (>8)
+- `coolant_pressure_bar` — WARNING via HOOK-003 (<2.5), CRITICAL via SAFE-003 (<2.0)
+- `concurrent_axis_faults` — CRITICAL via SAFE-005 (≥2)
+- `emergency_stop_activated` — CRITICAL via SAFE-004 (= true)
+
+`_classify_telemetry` in `backend/main.py` evaluates Tier 1 interlocks first, then WARNING
+hooks, both re-read from disk per event — editing either JSON changes classification live.
+A hardcoded table remains as fallback only when skill files are unreadable.
+
+### Skill Studio (frontend overlay)
+Sidebar **BANTUAN → Skill Studio** (also in mobile nav) opens a guided
+interview → draft → lint → approve drawer backed by `/api/skills/*`.
+`SkillStudio.tsx` is mounted globally in `Shell` and driven by the store's
+`skillStudio*` state. Tier 1 relaxation is rejected at draft time and again at lint.
 
 ---
 
@@ -244,6 +281,9 @@ The server streams back real-time AI analysis + safety alerts.
 | **`run_in_executor` for Gemini** | Gemini SDK is synchronous; executor prevents blocking the async FastAPI event loop |
 | **Three-tier constraint hierarchy** | Mirrors real industrial ISA-95 / safety engineering practice |
 | **SKILL.md as declarative playbook** | Domain knowledge is separated from solver code — skills are swappable without changing Python |
+| **Skill-driven costs + telemetry** | Solver and WebSocket classifier read `sla_penalties.json` / `safety_interlocks.json` / `hooks.json` fresh from disk; Tier 1 statuses are never routed to |
+| **Real failure drill** | `/api/disrupt/inject` truly mutates SAP (+1 version, `EXTERNAL_CHANGE`); approval sends the analysis-time version, so a post-analysis inject yields a real 409 followed by automatic re-solve |
+| **Audited analysis** | `/api/disrupt` logs `DISRUPTION_DETECTED` + `SCENARIOS_GENERATED`; startup logs `SKILLS_LOADED`; approver name is an editable field written to every entry; ledger drawer has type filters + per-entry revert |
 
 ---
 
@@ -251,6 +291,7 @@ The server streams back real-time AI analysis + safety alerts.
 
 | Item | Notes |
 |------|-------|
+| Frontend | `frontend/` is a SkillForge cockpit (Dasbor / Cockpit / Lantai Pabrik + Skill Studio overlay). Downtime & OEE cards are labelled "data contoh" until the backend exposes them. |
 | Mock SAP state resets on server restart | No persistent DB — wire to a real SAP OData API or PostgreSQL for production |
 | Gemini model name | `gemini-3.5-flash` — verify latest model ID at aistudio.google.com if errors occur |
 | Single-machine solver | CP-SAT currently solves one disruption at a time — extend for multi-disruption scenarios |
