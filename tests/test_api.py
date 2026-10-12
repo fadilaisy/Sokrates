@@ -150,3 +150,43 @@ def test_skill_approve_writes_files_and_reloads_registry():
             shutil.rmtree(target)
         for backup in Path("skills").glob(f"{skill_id}.v*"):
             shutil.rmtree(backup, ignore_errors=True)
+
+
+def test_chat_prompt_includes_maintenance_reason(monkeypatch):
+    """The chat prompt must carry the maintenance log, so 'why is CNC-05 in maintenance?' is answerable."""
+    import backend.main as m
+
+    captured = {}
+
+    async def fake_gemini(prompt, max_tokens=512):
+        captured["prompt"] = prompt
+        captured["max_tokens"] = max_tokens
+        return "CNC-05 sedang penggantian turret servo motor."
+
+    monkeypatch.setattr(m, "_call_gemini", fake_gemini)
+    r = client.post("/api/chat", json={"message": "CNC-05 lagi maintenance karena masalah apa?"})
+    assert r.status_code == 200
+    p = captured["prompt"]
+    assert "CNC-05 [PM-003] CORRECTIVE" in p
+    assert "Turret servo motor replacement" in p
+    assert "07:00-15:00" in p
+    assert "Bambang Susilo" in p
+    assert captured["max_tokens"] >= 1024
+
+
+def test_maintenance_context_falls_back_to_work_center_windows():
+    from backend.main import _maintenance_context
+
+    state = {
+        "work_centers": [{
+            "id": "CNC-09",
+            "planned_maintenance_windows": [{
+                "id": "PM-X", "type": "PREVENTIVE",
+                "start": "2025-01-16T08:00:00", "end": "2025-01-16T09:30:00",
+                "description": "Ganti filter coolant",
+            }],
+        }],
+    }
+    ctx = _maintenance_context(state)
+    assert "CNC-09 [PM-X] PREVENTIVE, 2025-01-16 08:00-09:30: Ganti filter coolant" in ctx
+    assert _maintenance_context({}) == "- (tidak ada jadwal maintenance)"
