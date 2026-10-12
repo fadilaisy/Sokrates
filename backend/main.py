@@ -560,6 +560,35 @@ async def post_skills_generate(body: SkillGenerateRequest) -> SkillGenerateRespo
     return SkillGenerateResponse(skill_md=skill_md, model_used=GEMINI_MODEL)
 
 
+def _hhmm(ts: Any) -> str:
+    """'2025-01-15T07:00:00' -> '07:00'; anything else is passed through."""
+    t = str(ts or "")
+    return t[11:16] if len(t) >= 16 and t[10] == "T" else (t or "?")
+
+
+def _maintenance_context(state: dict[str, Any]) -> str:
+    """
+    Maintenance log for the chat prompt: one line per slot with machine, type,
+    window, reason, technician and status. Prefers `maintenance_slots` (richer);
+    falls back to each work center's `planned_maintenance_windows`.
+    """
+    slots = list(state.get("maintenance_slots") or [])
+    if not slots:
+        for w in state.get("work_centers", []):
+            for m in w.get("planned_maintenance_windows") or []:
+                slots.append({**m, "work_center_id": w.get("id")})
+    lines = []
+    for m in slots:
+        date = str(m.get("start") or "")[:10]
+        lines.append(
+            f"- {m.get('work_center_id', '?')} [{m.get('id', '-')}] {m.get('type', '-')}, "
+            f"{date} {_hhmm(m.get('start'))}-{_hhmm(m.get('end'))}: "
+            f"{m.get('description', '-')} "
+            f"(teknisi: {m.get('technician') or '-'}, status: {m.get('status') or '-'})"
+        )
+    return "\n".join(lines) if lines else "- (tidak ada jadwal maintenance)"
+
+
 @app.post(
     "/api/chat",
     response_model=ChatResponse,
@@ -577,6 +606,7 @@ async def post_chat(body: ChatRequest) -> ChatResponse:
     machines = ", ".join(
         f"{w.get('id')} ({w.get('status')})" for w in state.get("work_centers", [])
     )
+    maintenance = _maintenance_context(state)
     orders = state.get("production_orders", [])
     by_status: dict[str, int] = {}
     for o in orders:
@@ -587,12 +617,16 @@ async def post_chat(body: ChatRequest) -> ChatResponse:
         "Anda HANYA memberi informasi/teks — Anda tidak bisa menyetujui skenario, mengubah jadwal, "
         "atau menulis ke SAP. Jika user meminta perubahan, arahkan ke tombol persetujuan di dasbor.\n\n"
         f"Status mesin: {machines}.\n"
+        "Jadwal/log maintenance (gunakan ini untuk menjawab alasan sebuah mesin maintenance):\n"
+        f"{maintenance}\n"
         f"Order (total {len(orders)}, per status {by_status}).\n"
         f"SAP version: {state.get('_meta', {}).get('version')}.\n\n"
         f"Pertanyaan supervisor: {body.message}\n\n"
         "Jawab HANYA jawabannya, tanpa kata pengantar."
     )
-    reply = await _call_gemini(prompt, max_tokens=300)
+    # Gemini 3.x thinking tokens count against maxOutputTokens; 300 cut replies
+    # mid-sentence ("...dalam status"). 1024 leaves room for a 3-sentence answer.
+    reply = await _call_gemini(prompt, max_tokens=1024)
     return ChatResponse(reply=reply, model_used=GEMINI_MODEL)
 
 
