@@ -40,6 +40,8 @@
     "overtime_description_id": "Biaya lembur malam per jam per mesin CNC (termasuk upah operator, utilitas, dan overhead)",
     "changeover_cost_idr": 350000,
     "changeover_description_id": "Biaya setup ulang per perpindahan pesanan antar work center (termasuk waktu setup, tooling check, dan first-article inspection)",
+    "changeover_minutes": 30,
+    "changeover_minutes_description_id": "Waktu setup rata-rata per perpindahan pesanan antar work center (dipakai untuk downtime/OEE)",
     "emergency_maintenance_call_idr": 1500000,
     "preventive_maintenance_per_session_idr": 500000
   },

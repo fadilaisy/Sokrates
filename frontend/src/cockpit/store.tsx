@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { api, ApiError, formatIDR, WS_TELEMETRY } from "../lib/api";
-import type { ApproveReceipt, DisruptResponse, DriftDetail, LedgerEntry, SapState, Scenario, TelemetryFrame } from "../lib/api";
+import type { ApproveReceipt, DisruptResponse, DriftDetail, LedgerEntry, SapState, Scenario, ShiftMetrics, TelemetryFrame } from "../lib/api";
 import { normalizeStatus, windowLabel } from "../lib/shift";
 import type { MachineStatus } from "../lib/shift";
 import type { SkillStudioFormData, SkillStudioDraft, SkillStudioLintResult } from "../lib/api";
@@ -43,6 +43,8 @@ type WsStatus = "connecting" | "open" | "closed";
 interface CockpitValue {
   // data
   state: SapState | null;
+  /** Shift downtime + OEE from /api/metrics; null while loading or if the backend lacks the endpoint. */
+  metrics: ShiftMetrics | null;
   online: boolean;
   aiConfigured: boolean;
   error: string | null;
@@ -125,6 +127,7 @@ let msgSeq = 1;
 
 export function CockpitProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<SapState | null>(null);
+  const [metrics, setMetrics] = useState<ShiftMetrics | null>(null);
   const [online, setOnline] = useState(false);
   const [aiConfigured, setAiConfigured] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -190,8 +193,14 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
 
   const load = useCallback(async () => {
     try {
-      const [s, h, l] = await Promise.all([api.state(), api.health(), api.ledger().catch(() => [] as LedgerEntry[])]);
+      const [s, h, l, m] = await Promise.all([
+        api.state(),
+        api.health(),
+        api.ledger().catch(() => [] as LedgerEntry[]),
+        api.metrics().catch(() => null),
+      ]);
       setState(s);
+      setMetrics(m);
       setSapVersion(s._meta.version);
       setLedger(l);
       setOnline(h.status === "ok");
@@ -576,7 +585,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<CockpitValue>(
     () => ({
-      state, online, aiConfigured, error, ledger, sapVersion,
+      state, metrics, online, aiConfigured, error, ledger, sapVersion,
       page, setPage,
       phase, detectStep, params, result, receipt, runDisruption,
       approvalFor, approving, conflict, approver, setApprover, openApproval, closeApproval, confirmApproval,
@@ -592,7 +601,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       skillStudioLintResult, setSkillStudioLintResult,
     }),
     [
-      state, online, aiConfigured, error, ledger, sapVersion, page, phase, detectStep, params, result, receipt, runDisruption,
+      state, metrics, online, aiConfigured, error, ledger, sapVersion, page, phase, detectStep, params, result, receipt, runDisruption,
       approvalFor, approving, conflict, approver, openApproval, closeApproval, confirmApproval, injecting, injectDrill, displayStatus, live, wsStatus,
       lastAnalysis, safety, sendTelemetry, runFullAnalysis, ledgerOpen, verifying, verifyResult, verify, chatOpen,
       chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat, toast, reset, resetting,

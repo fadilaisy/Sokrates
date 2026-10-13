@@ -58,6 +58,7 @@ from fastapi.concurrency import run_in_threadpool
 from rag.api import router as rag_router
 from rag.retrieve import Retriever
 from rag.generate import sanitize as rag_sanitize
+from backend.metrics import compute_metrics, events_for_approval
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Google Gemini configuration (REST API, no SDK dependency)
@@ -347,6 +348,11 @@ async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
             detail=f"Solver error: {exc}",
         )
 
+    # Carry the disruption window on every scenario so /api/approve can record the
+    # confirmed downtime (used by /api/metrics) without trusting extra client fields.
+    for s in scenarios:
+        s["disruption"] = dict(disruption)
+
     disruption_hours = body.end_hour - body.start_hour
 
     # Phase 5: audit the analysis itself, not just approvals.
@@ -506,13 +512,27 @@ async def post_approve(body: ApproveRequest) -> ApproveResponse:
         for change in gantt_changes
     ]
 
+    approved_at = datetime.now(timezone.utc).isoformat()
+    current_state = _sap.get_state()
+    new_events = events_for_approval(
+        current_state, {**body.scenario_data, "id": body.scenario_id}, approved_at
+    )
+    meta_updates: dict[str, Any] = {
+        "last_approved_scenario": body.scenario_id,
+        "last_approved_by":       body.approved_by,
+        "last_approved_at":       approved_at,
+    }
+    if new_events:
+        # Downtime confirmed by this approval (breakdown window + changeovers).
+        # Stored in SAP _meta so it resets with /api/state/reset; a stale read here
+        # is caught by the same optimistic lock below.
+        meta_updates["downtime_events"] = (
+            list(current_state.get("_meta", {}).get("downtime_events") or []) + new_events
+        )
+
     delta = {
         "order_updates": order_updates,
-        "meta_updates": {
-            "last_approved_scenario": body.scenario_id,
-            "last_approved_by":       body.approved_by,
-            "last_approved_at":       datetime.now(timezone.utc).isoformat(),
-        },
+        "meta_updates": meta_updates,
     }
 
     version_before = body.expected_sap_version
@@ -565,6 +585,18 @@ async def post_approve(body: ApproveRequest) -> ApproveResponse:
             f"Audit receipt ID: {entry['id']}."
         ),
     )
+
+
+@app.get("/api/metrics", summary="Shift downtime and OEE computed from live SAP state")
+async def get_metrics() -> dict[str, Any]:
+    """
+    Downtime (changeover / planned maintenance / unplanned) and OEE for the current
+    shift. Availability comes from SAP state (maintenance slots, machine status and
+    approved disruptions), performance from machine telemetry (feed rate), and
+    quality is a flagged assumption because the mock has no scrap data.
+    See backend/metrics.py for the exact rules.
+    """
+    return compute_metrics(_sap.get_state())
 
 
 @app.get("/api/ledger", summary="Get the full audit ledger")
@@ -1121,12 +1153,23 @@ async def post_ledger_revert(entry_id: str, body: LedgerEntryId) -> ApproveRespo
             "status": "RESTORED",
         })
 
+    inverse_meta: dict[str, Any] = {
+        "last_reverted_scenario": delta.get("meta_updates", {}).get("last_approved_scenario"),
+        "last_reverted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    # Undo the changeovers this approval caused; the breakdown itself still happened.
+    approved_at = delta.get("meta_updates", {}).get("last_approved_at")
+    events = list(_sap.get_state().get("_meta", {}).get("downtime_events") or [])
+    kept = [
+        e for e in events
+        if not (e.get("category") == "changeover" and approved_at and e.get("approved_at") == approved_at)
+    ]
+    if len(kept) != len(events):
+        inverse_meta["downtime_events"] = kept
+
     inverse_delta = {
         "order_updates": order_updates,
-        "meta_updates": {
-            "last_reverted_scenario": delta.get("meta_updates", {}).get("last_approved_scenario"),
-            "last_reverted_at": datetime.now(timezone.utc).isoformat(),
-        },
+        "meta_updates": inverse_meta,
     }
 
     version_before = _sap.get_version()

@@ -12,11 +12,23 @@ import { DEMO_DISRUPTION, useCockpit } from "./store";
 import { Btn, Card, Mono, StatusBadge } from "./ui";
 
 /*
- * Downtime and OEE have no backend endpoint yet. These are sample figures so the dashboard
- * layout can be reviewed; replace them with real values once the backend exposes them.
+ * Downtime and OEE come from GET /api/metrics (backend/metrics.py): maintenance slots,
+ * machine status and supervisor-approved disruptions for availability, feed-rate telemetry
+ * for performance. Quality is the one assumed figure (the mock has no scrap data).
  */
-const SAMPLE_DOWNTIME = { total: "1J 12M", pct: "5,3%", rows: [["Changeover", "42M", 58], ["Perawatan", "18M", 25], ["Tak terencana", "12M", 17]] as const };
-const SAMPLE_OEE = { target: 85, availability: 95, performance: 85, quality: 98 };
+
+/** Hours → "1J 12M" / "30M" / "0M". */
+function fmtDuration(hours: number): string {
+  const total = Math.round(hours * 60);
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return h ? `${h}J ${String(m).padStart(2, "0")}M` : `${m}M`;
+}
+
+/** 25 → "25,0%" (Indonesian decimal comma). */
+function fmtPct(v: number): string {
+  return `${v.toFixed(1).replace(".", ",")}%`;
+}
 
 function Donut({ pct, label }: { pct: number; label: string }) {
   const r = 46;
@@ -47,7 +59,7 @@ function Pill({ children, tone = "neutral" }: { children: ReactNode; tone?: "neu
 }
 
 function DashboardPage() {
-  const { state, displayStatus, setPage, runDisruption } = useCockpit();
+  const { state, metrics, displayStatus, setPage, runDisruption } = useCockpit();
   const machines = state?.work_centers ?? [];
   const bucket = (s: MachineStatus): MachineStatus => (s === "DISRUPTED" ? "FAULT" : s === "RECOVERING" ? "MAINTENANCE" : s);
   const counts: Record<string, number> = { RUNNING: 0, FAULT: 0, IDLE: 0, MAINTENANCE: 0 };
@@ -58,7 +70,9 @@ function DashboardPage() {
   const made = Math.round(today.reduce((a, o) => a + ((Number(o.quantity) || 0) * (Number(o.progress_percent) || 0)) / 100, 0));
   const outPct = target ? Math.round((made / target) * 100) : 0;
   const unit = String(today[0]?.quantity_unit ?? "pcs").toLowerCase();
-  const oee = Math.round((SAMPLE_OEE.availability * SAMPLE_OEE.performance * SAMPLE_OEE.quality) / 10000);
+  const dt = metrics?.downtime ?? null;
+  const ox = metrics?.oee ?? null;
+  const oee = ox ? Math.round(ox.oee) : 0;
 
   return (
     <>
@@ -124,49 +138,71 @@ function DashboardPage() {
 
         <Card className="flex flex-col gap-3 bg-page p-4">
           <h3 className="border-b border-accent-blue/40 pb-2 text-[17px] font-semibold">
-            Downtime <span className="text-[14px] font-normal text-muted-ink">· data contoh</span>
+            Downtime{" "}
+            <span className="text-[14px] font-normal text-muted-ink">
+              · {metrics ? `${metrics.shift.machines} mesin × ${metrics.shift.hours_per_machine} jam` : "memuat…"}
+            </span>
           </h3>
-          <p className="flex items-center gap-2 text-[16px]">
-            {SAMPLE_DOWNTIME.total} <Pill>{SAMPLE_DOWNTIME.pct}</Pill>
-          </p>
-          <ul className="flex flex-col gap-3">
-            {SAMPLE_DOWNTIME.rows.map(([label, dur, w]) => (
-              <li key={label} className="flex flex-col gap-1 text-[15px]">
-                <span className="flex justify-between">
-                  {label} <span>{dur}</span>
-                </span>
-                <span className="h-3.5 rounded-sm bg-[#9cb0c9]" style={{ width: `${w}%` }} />
-              </li>
-            ))}
-          </ul>
+          {dt ? (
+            <>
+              <p className="flex items-center gap-2 text-[16px]">
+                {fmtDuration(dt.total_hours)} <Pill>{fmtPct(dt.percent_of_shift)}</Pill>
+              </p>
+              <ul className="flex flex-col gap-3">
+                {dt.by_category.map((c) => {
+                  const share = dt.total_hours > 0 ? (c.hours / dt.total_hours) * 100 : 0;
+                  const machines = dt.by_machine
+                    .filter((m) => (c.key === "changeover" ? m.changeover_hours : c.key === "maintenance" ? m.maintenance_hours : m.unplanned_hours) > 0)
+                    .map((m) => m.machine_id);
+                  return (
+                    <li key={c.key} className="flex flex-col gap-1 text-[15px]" title={machines.join(", ") || undefined}>
+                      <span className="flex justify-between">
+                        {c.label} <span>{fmtDuration(c.hours)}</span>
+                      </span>
+                      <span className="h-3.5 rounded-sm bg-[#9cb0c9]" style={{ width: `${share}%` }} />
+                      {machines.length > 0 && <span className="text-[13px] text-muted-ink">{machines.join(", ")}</span>}
+                    </li>
+                  );
+                })}
+              </ul>
+            </>
+          ) : (
+            <p className="text-[15px] text-muted-ink">Data downtime belum tersedia dari backend.</p>
+          )}
         </Card>
 
         <Card className="flex flex-col gap-3 bg-page p-4">
           <h3 className="flex items-center justify-between border-b border-accent-blue/40 pb-2 text-[17px] font-semibold">
             <span>
-              OEE <span className="text-[14px] font-normal text-muted-ink">· data contoh</span>
+              OEE <span className="text-[14px] font-normal text-muted-ink">· shift {metrics ? `${metrics.shift.start}–${metrics.shift.end}` : "memuat…"}</span>
             </span>
           </h3>
-          <p className="text-[16px]">Target OEE {SAMPLE_OEE.target}%</p>
-          <div className="flex items-center gap-4">
-            <Donut pct={oee} label={`${oee}%`} />
-            <dl className="grid flex-1 grid-cols-[1fr_auto] items-center gap-y-2 text-[15px]">
-              {(
-                [
-                  ["Ketersediaan", SAMPLE_OEE.availability],
-                  ["Performa", SAMPLE_OEE.performance],
-                  ["Kualitas", SAMPLE_OEE.quality],
-                ] as const
-              ).map(([l, v]) => (
-                <div key={l} className="contents">
-                  <dt>{l}</dt>
-                  <dd>
-                    <Pill tone={v >= SAMPLE_OEE.target ? "ok" : "warn"}>{v}%</Pill>
-                  </dd>
-                </div>
-              ))}
-            </dl>
-          </div>
+          {ox ? (
+            <>
+              <p className="text-[16px]">Target OEE {ox.target}%</p>
+              <div className="flex items-center gap-4">
+                <Donut pct={oee} label={`${oee}%`} />
+                <dl className="grid flex-1 grid-cols-[1fr_auto] items-center gap-y-2 text-[15px]">
+                  {(
+                    [
+                      ["Ketersediaan", ox.availability, "dari status mesin & jadwal perawatan"],
+                      ["Performa", ox.performance, "rata-rata feed rate mesin RUNNING"],
+                      [ox.sources.quality === "assumption" ? "Kualitas (asumsi)" : "Kualitas", ox.quality, "belum ada data scrap di SAP"],
+                    ] as const
+                  ).map(([l, v, hint]) => (
+                    <div key={l} className="contents">
+                      <dt title={hint}>{l}</dt>
+                      <dd>
+                        <Pill tone={v >= ox.target ? "ok" : "warn"}>{Math.round(v)}%</Pill>
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
+            </>
+          ) : (
+            <p className="text-[15px] text-muted-ink">Data OEE belum tersedia dari backend.</p>
+          )}
         </Card>
       </div>
     </>

@@ -264,6 +264,33 @@ export function ragPageUrl(docId: string, page: number, chunkId?: string): strin
   return `${API_BASE}/api/documents/${encodeURIComponent(docId)}/pages/${page}.png?${q}`;
 }
 
+/** GET /api/metrics — shift downtime + OEE computed by backend/metrics.py. */
+export interface ShiftMetrics {
+  shift: { date: string | null; start: string; end: string; hours_per_machine: number; machines: number; total_hours: number };
+  downtime: {
+    total_hours: number;
+    percent_of_shift: number;
+    by_category: { key: "changeover" | "maintenance" | "unplanned"; label: string; hours: number }[];
+    by_machine: {
+      machine_id: string;
+      maintenance_hours: number;
+      unplanned_hours: number;
+      changeover_hours: number;
+      total_hours: number;
+      reasons: string[];
+    }[];
+  };
+  oee: {
+    target: number;
+    availability: number;
+    performance: number;
+    quality: number;
+    oee: number;
+    sources: { availability: string; performance: string; quality: string };
+  };
+  sap_version: number | null;
+}
+
 export interface LedgerEntry {
   id: string;
   timestamp: string;
@@ -364,6 +391,7 @@ export const api = {
   state: () => req<SapState>("/api/state"),
   resetState: () => req<SapState>("/api/state/reset", { method: "POST" }),
   health: () => req<Record<string, string>>("/health"),
+  metrics: () => req<ShiftMetrics>("/api/metrics"),
   disrupt: (b: { machine_id: string; disruption_type: string; start_hour: number; end_hour: number }) =>
     req<DisruptResponse>("/api/disrupt", { method: "POST", body: JSON.stringify(b) }),
   approve: (b: { scenario_id: string; scenario_data: unknown; expected_sap_version: number; approved_by: string }) =>
