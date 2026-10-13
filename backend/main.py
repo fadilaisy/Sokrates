@@ -66,7 +66,20 @@ from backend.metrics import compute_metrics, events_for_approval
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
-GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+# The key is sent in the x-goog-api-key header, never in the URL, so it can't
+# leak through exception messages, access logs or proxies.
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+
+
+def _safe_gemini_error(exc: Exception) -> str:
+    """Short error text for the UI. Never includes the URL or the API key."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        if code == 429:
+            return "HTTP 429: kuota Gemini terlampaui, coba lagi nanti"
+        return f"HTTP {code}"
+    msg = f"{type(exc).__name__}"
+    return msg.replace(GEMINI_API_KEY, "***") if GEMINI_API_KEY else msg
 
 # Async HTTP client for Gemini API
 _gemini_client: httpx.AsyncClient | None = (
@@ -283,7 +296,8 @@ async def _call_gemini(prompt: str, max_tokens: int = 512) -> str:
         response = await _gemini_client.post(
             GEMINI_API_URL,
             json=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json",
+                     "x-goog-api-key": GEMINI_API_KEY},
         )
         response.raise_for_status()
         result = response.json()
@@ -295,7 +309,7 @@ async def _call_gemini(prompt: str, max_tokens: int = 512) -> str:
                 return parts[0].get("text", "").strip()
         return "[Gemini: No content in response] Silakan tinjau skenario solver secara manual."
     except Exception as exc:
-        return f"[Gemini error: {exc}] Silakan tinjau skenario solver secara manual."
+        return f"[Gemini error: {_safe_gemini_error(exc)}] Silakan tinjau skenario solver secara manual."
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -874,7 +888,7 @@ async def post_skills_draft(body: SkillDraftRequest) -> SkillDraftResponse:
             sla_penalties={},
             hooks=[],
             interlocks=[],
-            validation_errors=[f"Gemini error: {str(e)}"],
+            validation_errors=[f"Gemini error: {_safe_gemini_error(e)}"],
         )
 
 
