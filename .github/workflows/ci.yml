@@ -12,6 +12,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Install Tesseract (OCR for the RAG tests, same as the Dockerfile)
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-ind tesseract-ocr-eng
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Run backend tests
