@@ -6,7 +6,7 @@ import { normalizeStatus, windowLabel } from "../lib/shift";
 import type { MachineStatus } from "../lib/shift";
 import type { SkillStudioFormData, SkillStudioDraft, SkillStudioLintResult } from "../lib/api";
 
-export type Page = "dashboard" | "cockpit" | "floor";
+export type Page = "dashboard" | "cockpit" | "floor" | "maintenance";
 export type Phase = "normal" | "detecting" | "proposing" | "resolved";
 
 export interface DisruptionParams {
@@ -136,7 +136,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
 
   const [page, setPage] = useState<Page>(() => {
     const h = window.location.hash.replace("#", "");
-    return h === "cockpit" || h === "floor" ? h : "dashboard";
+    return h === "cockpit" || h === "floor" || h === "maintenance" ? h : "dashboard";
   });
 
   const [phase, setPhase] = useState<Phase>("normal");

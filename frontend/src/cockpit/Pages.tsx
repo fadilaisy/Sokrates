@@ -5,6 +5,7 @@ import { fmt1, ordersToday, STATUS_STYLE, telemetryOf } from "../lib/shift";
 import type { MachineStatus } from "../lib/shift";
 import { AgentArea } from "./AgentArea";
 import { ApprovalModal, ChatDrawer, LedgerBar, LedgerDrawer } from "./Overlays";
+import { MaintenancePage } from "./MaintenancePage";
 import { MachineStrip, TelemetryPanel, WhatIfPanel } from "./Panels";
 import { Header } from "./Shell";
 import { ShiftGantt } from "./ShiftGantt";
@@ -344,7 +345,7 @@ export function CurrentPage() {
           Backend tidak terjangkau. Jalankan <Mono>python3 -m uvicorn backend.main:app --port 8000</Mono> lalu muat ulang halaman.
         </p>
       )}
-      {page === "dashboard" ? <DashboardPage /> : page === "cockpit" ? <CockpitPage /> : <FloorPage />}
+      {page === "dashboard" ? <DashboardPage /> : page === "cockpit" ? <CockpitPage /> : page === "maintenance" ? <MaintenancePage /> : <FloorPage />}
       <ChatDrawer />
     </>
   );

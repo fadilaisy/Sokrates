@@ -122,7 +122,15 @@ Open **http://localhost:8000/docs** for the interactive Swagger UI.
 | `POST` | `/api/skills/draft` | Skill Studio: build skill files from guided interview (rejects Tier 1 relaxation) |
 | `POST` | `/api/skills/lint` | Skill Studio: lint skill files — Tier 1 rules can only get stricter, never `override_allowed` |
 | `POST` | `/api/skills/approve` | Skill Studio: write skill to `skills/<id>/`, reload registry, log `SKILL_APPROVED` |
-| `WS` | `/ws/telemetry` | Real-time telemetry stream + AI analysis (severity from skill files) |
+| `POST` | `/api/maintenance/entries` | New maintenance ledger entry → proactive flow (similar cases → cited playbook → mechanic message) |
+| `GET` | `/api/maintenance/entries[/{id}]` | Cases / one ledger entry with its SHA-256 (citation target) |
+| `POST` | `/api/maintenance/entries/{id}/resolve` | Close a case (append-only) and index it into the RAG store |
+| `GET` | `/api/maintenance/search` | Similar-case search via `rag` (BM25 + exact codes + metadata filters `machine_id`, `language`, `cases_only`) |
+| `GET` | `/api/maintenance/code/{code}` | Exact fault-code / part-number lookup (OCR-tolerant) |
+| `GET` | `/api/maintenance/flows` | Playbooks sent to mechanics |
+| `POST` | `/api/maintenance/chat` | Secondary chat: `rag` cited answer, case citations mapped to ledger ids |
+| `GET` | `/api/maintenance/ledger/verify` | Hash-chain check for the maintenance ledger |
+| `WS` | `/ws/telemetry` | Real-time telemetry stream + AI analysis (severity from skill files). Abnormal readings also run the proactive flow (`maintenance_playbook` frame, debounced 5 min per machine+metric) |
 | `GET` | `/health` | Health check (Gemini configured? SAP version?) |
 
 ### Example: Trigger a disruption
@@ -287,6 +295,38 @@ interview → draft → lint → approve drawer backed by `/api/skills/*`.
 
 ---
 
+## 11b. Proactive Maintenance Flow (`knowledge/`, page **Perawatan**)
+
+New ledger entry (form, API, or abnormal telemetry) → similar-case search → repair playbook →
+message to the best-matched mechanic. Chat is a collapsed, secondary panel on the same page.
+
+| File | Role |
+|------|------|
+| `knowledge/maintenance_ledger.py` | Hash-chained case ledger (reuses `AuditLedger`) → `maintenance_ledger.jsonl` (gitignored, auto-seeded). Entry types `CASE`, `CASE_RESOLVED`, `PLAYBOOK` |
+| `knowledge/case_index.py` | Renders each RESOLVED case as Markdown and ingests it into `rag` as `maintenance_log`; doc *family* = case id. Startup sync is idempotent (SHA-256 dedupe) |
+| `knowledge/proactive_agent.py` | Flow: `rag` Retriever (doc_types `maintenance_log`, machine scope) + a no-machine pass for exact codes; deterministic playbook; mechanic routing; LLM message with citation check |
+| `knowledge/maintenance_seed.json` | 28 synthetic cases (15 EN, 10 ID, 3 mixed; 9 scanned with OCR noise). Regenerate: `python3 scripts/generate_maintenance_seed.py`. Codes align with `rag/samples.py` (Haas Alarm 108/970, parts 59-0112, 93-1000; Robodrill SV0401/SP1241) |
+| `knowledge/mechanics.json` | Synthetic mechanic roster |
+| `tests/test_maintenance.py` | Offline tests (own Store instance, no LLM) |
+
+**Citations.** Every step/warning/part carries `source_case_ids`; each resolves to the ledger entry + `sha256_hash`
+and to the indexed chunk (`doc_id#p1`). The LLM only phrases the mechanic message and is rejected (template fallback)
+if it cites a case outside the retrieved set. Telemetry-triggered flows use the template (keeps Gemini quota).
+
+**Additions to `rag/` for exact codes** (all existing tests still pass):
+- `metadata.py`: OCR-tolerant fault codes (`SVO401`→`SV0401`, `ALM-I62`→`ALM162`), controller codes `PREFIX-NNNN`
+  (`ATC-2031`, `CELOS-2305`), SV/SP patterns no longer fire inside part numbers, unlabelled multi-segment part
+  numbers (`HSK-A63-SP-0042`), `part_key()` for OCR-tolerant part comparison.
+- `retrieve.py`: fault/part codes typed in the query are used as exact lookups; part-number candidates + metadata
+  credit; a query term that *is* a matched code counts as covered (bare-code queries no longer abstain); results
+  carry `exact_match`.
+- `text.py`: shop-floor ID↔EN lexicon pairs (`spindel`/spindle, `bunyi`/noise, `bocor`/leak …).
+
+**Side effect to know:** case documents are `maintenance_log` docs in the shared store, so `/api/disrupt`
+grounding and `/api/answer` may now cite repair history too (authority 0.6, below manuals/SOPs).
+
+---
+
 ## 12. Known Limitations & Future Work
 
 | Item | Notes |
@@ -296,6 +336,7 @@ interview → draft → lint → approve drawer backed by `/api/skills/*`.
 | Gemini model name | `gemini-3.5-flash` — verify latest model ID at aistudio.google.com if errors occur |
 | Single-machine solver | CP-SAT currently solves one disruption at a time — extend for multi-disruption scenarios |
 | No authentication | Add OAuth2 / API key middleware before production deployment |
+| No vector retrieval | `rag` is BM25 + metadata + lexicon (no embeddings). The mentor asked for hybrid vector+keyword; cross-language paraphrases ("dinginkan spindel" vs "let the spindle cool") are still missed. Add an embedding score as another R feature in `rag/scoring.py` |
 | Frontend | The `frontend/` directory exists but is separate — connect it to the API using the Swagger docs |
 
 ---
