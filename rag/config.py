@@ -109,7 +109,7 @@ def load_scoring_config() -> ScoringConfig:
 
 
 # ── Generation ──────────────────────────────────────────────────────────────
-GEN_PROVIDER = os.getenv("RAG_GEN_PROVIDER", "auto")    # auto | gemini | claude
+GEN_PROVIDER = os.getenv("RAG_GEN_PROVIDER", "auto")    # auto | aicore | gemini | claude
 CONTEXT_TOKEN_BUDGET = int(os.getenv("RAG_CONTEXT_TOKENS", "4000"))
 
 

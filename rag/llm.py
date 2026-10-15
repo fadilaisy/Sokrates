@@ -6,11 +6,13 @@ how backend/main.py already calls Gemini (no SDK dependency).
 
 Providers
 ---------
+aicore   SAP AI Core GPT-5.4 deployment (AICORE_* + AI_API_URL; see rag/aicore.py)
 gemini   Google Gemini (GEMINI_API_KEY, GEMINI_MODEL; default gemini-3.5-flash)
 claude   Anthropic Claude Haiku 4.5 (ANTHROPIC_API_KEY, CLAUDE_MODEL; default claude-haiku-4-5)
 
-RAG_GEN_PROVIDER=auto (default) tries Gemini first and falls back to Claude,
-so the demo keeps working if one key is missing or one API errors.
+RAG_GEN_PROVIDER=auto (default) tries AI Core first, then Gemini, then Claude,
+skipping any that are not configured, so the demo keeps working if one key is
+missing or one API errors.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from typing import Any, List, Optional, Tuple
 
 import httpx
 
-from . import config
+from . import aicore, config
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
@@ -41,6 +43,8 @@ class LLMResult:
 
 def available_providers() -> List[str]:
     out = []
+    if aicore.configured():
+        out.append("aicore")
     if config.gemini_key():
         out.append("gemini")
     if config.anthropic_key():
@@ -51,10 +55,20 @@ def available_providers() -> List[str]:
 def _provider_order(provider: Optional[str]) -> List[str]:
     p = (provider or config.GEN_PROVIDER or "auto").lower()
     avail = available_providers()
-    if p in ("gemini", "claude"):
+    if p in ("aicore", "gemini", "claude"):
         # Honour the choice, but still fall back so a single outage doesn't kill the answer.
         return [p] + [x for x in avail if x != p] if p in avail else [x for x in avail if x != p]
     return avail
+
+
+def _call_aicore(system: str, user: str, max_tokens: int, json_mode: bool, timeout: float) -> LLMResult:
+    model = aicore.model_label()
+    try:
+        # GPT-5.x counts hidden reasoning against max_completion_tokens, so give it headroom.
+        text = aicore.ask(user, system=system, max_tokens=max(max_tokens, 2048), timeout=timeout)
+        return LLMResult(True, text=text, provider="aicore", model=model)
+    except Exception as exc:
+        return LLMResult(False, provider="aicore", model=model, error=str(exc)[:400])
 
 
 def _call_gemini(system: str, user: str, max_tokens: int, json_mode: bool, timeout: float) -> LLMResult:
@@ -158,9 +172,9 @@ def complete(system: str, user: str, *, max_tokens: int = 1200, json_mode: bool 
     errors: List[str] = []
     order = _provider_order(provider)
     if not order:
-        return LLMResult(False, error="Tidak ada LLM yang dikonfigurasi (set GEMINI_API_KEY atau ANTHROPIC_API_KEY)."), errors
+        return LLMResult(False, error="Tidak ada LLM yang dikonfigurasi (set AICORE_*, GEMINI_API_KEY atau ANTHROPIC_API_KEY)."), errors
     for p in order:
-        fn = _call_gemini if p == "gemini" else _call_claude
+        fn = {"aicore": _call_aicore, "gemini": _call_gemini}.get(p, _call_claude)
         res = fn(system, user, max_tokens, json_mode, timeout)
         if res.ok and json_mode:
             res.data = parse_json_loose(res.text)
