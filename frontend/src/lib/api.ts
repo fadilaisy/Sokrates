@@ -478,3 +478,143 @@ export const rag = {
     return body as { doc_id: string; status: string; duplicate: boolean; version: number; message?: string };
   },
 };
+
+// ── Proactive maintenance (knowledge/ + /api/maintenance/*) ─────────────────
+
+export interface CaseCitation {
+  case_id: string;
+  ledger_hash: string | null;
+  logged_at: string;
+  machine_id: string;
+  machine_model: string;
+  language: string;
+  source: string;
+  ocr_confidence: number | null;
+  outcome: string;
+  excerpt: string;
+  url: string;
+  rag_doc_id: string | null;
+  rag_citation: string | null;
+  exact_match: string[];
+  score: number | null;
+}
+
+export interface MaintCase {
+  id: string;
+  status: string;
+  logged_at: string;
+  machine_id: string;
+  machine_model: string;
+  category: string | null;
+  language: string;
+  source: string;
+  symptom: string;
+  text: string;
+  error_codes: string[];
+  part_codes: string[];
+  root_cause?: string;
+  fix_steps?: string[];
+  safety_notes?: string;
+  downtime_hours?: number;
+  mechanic_id?: string;
+  outcome?: string;
+  ocr_confidence?: number;
+  ledger_hash: string;
+}
+
+export interface PlaybookStep {
+  n: number;
+  text: string;
+  source_case_ids: string[];
+  support: number;
+  also_from_other_cases: boolean;
+  scan_confidence: number | null;
+}
+
+export interface Playbook {
+  steps: PlaybookStep[];
+  safety: { text: string; source_case_ids: string[] }[];
+  warnings: { text: string; source_case_ids: string[] }[];
+  parts: { code: string; source_case_ids: string[] }[];
+  est_downtime_hours: number | null;
+  confidence: "high" | "medium" | "low" | "none";
+  supporting_cases: string[];
+  note?: string;
+}
+
+export interface DocRef {
+  doc_id: string;
+  doc_title: string;
+  doc_type: string;
+  page: number;
+  citation: string;
+  constraint_tier: string;
+  forced_safety: boolean;
+  score: number | null;
+  excerpt: string;
+}
+
+export interface CaseHit {
+  case_id: string;
+  score: number | null;
+  exact_match: string[];
+  reasons: string[];
+  rag_citation: string;
+  cross_machine?: boolean;
+  citation: CaseCitation;
+  case?: MaintCase;
+}
+
+export interface MaintFlow {
+  trigger_entry_id: string;
+  machine_id: string;
+  retrieval: { filters: string[]; fault_code: string | null; abstained: boolean; hits: CaseHit[] };
+  references: DocRef[];
+  playbook: Playbook;
+  mechanic: { id: string; name: string; role: string; whatsapp: string; shift: string; reasons: string[] };
+  message: string;
+  message_source: "llm" | "template";
+  timings_ms: Record<string, number>;
+  playbook_ledger_id: string;
+  playbook_ledger_hash: string;
+}
+
+export interface MaintSearch {
+  abstained: boolean;
+  message: string | null;
+  fault_code: string | null;
+  part_keys: string[];
+  filters: string[];
+  latency_ms: number;
+  cases: (CaseHit & { case: MaintCase })[];
+  documents: DocRef[];
+}
+
+export interface MaintChat {
+  status: string;
+  answer: string | null;
+  message?: string;
+  sources?: (RagSource & { case_id?: string; ledger_hash?: string })[];
+}
+
+export const maintApi = {
+  cases: () => req<MaintCase[]>("/api/maintenance/entries?limit=300"),
+  entry: (id: string) => req<MaintCase>(`/api/maintenance/entries/${encodeURIComponent(id)}`),
+  create: (b: { machine_id: string; symptom: string; reported_by?: string }) =>
+    req<{ entry: MaintCase; flow: MaintFlow }>("/api/maintenance/entries", { method: "POST", body: JSON.stringify(b) }),
+  search: (q: string, f: { machine_id?: string; language?: string; cases_only?: boolean } = {}) => {
+    const p = new URLSearchParams({ q });
+    if (f.machine_id) p.set("machine_id", f.machine_id);
+    if (f.language) p.set("language", f.language);
+    if (f.cases_only) p.set("cases_only", "true");
+    return req<MaintSearch>(`/api/maintenance/search?${p}`);
+  },
+  flows: () =>
+    req<{ id: string; case_id: string; message: string; message_source: string; playbook: Playbook; logged_at: string;
+          ledger_hash: string; case: MaintCase | null; mechanic: { name: string; role: string } | null }[]>(
+      "/api/maintenance/flows",
+    ),
+  chat: (question: string, machine_id?: string) =>
+    req<MaintChat>("/api/maintenance/chat", { method: "POST", body: JSON.stringify({ question, machine_id }) }),
+  verify: () => req<{ valid: boolean; message: string }>("/api/maintenance/ledger/verify"),
+};

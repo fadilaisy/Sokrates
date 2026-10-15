@@ -28,7 +28,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import config
 from .config import ScoringConfig, load_scoring_config
-from .metadata import Machine, build_machine_catalog, normalize_fault_code, resolve_machine
+from .metadata import (Machine, build_machine_catalog, extract_fault_codes, extract_part_numbers,
+                       normalize_fault_code, part_key, resolve_machine)
 from .scoring import Features, score
 from .store import Store, get_store
 from .text import expand_term, fts_quote, tokens
@@ -65,6 +66,7 @@ class IncidentContext:
     role: str = "agent"
     language: Optional[str] = None          # restrict to id/en when set
     doc_types: Optional[List[str]] = None
+    part_numbers: Optional[List[str]] = None  # exact part lookup (OCR-tolerant via part_key)
 
     @classmethod
     def from_dict(cls, d: Optional[Dict[str, Any]]) -> "IncidentContext":
@@ -227,6 +229,12 @@ class Retriever:
         top_k = top_k or cfg.top_k
         machine = resolve_machine(ctx.machine_id, self.catalog)
         fault = normalize_fault_code(ctx.fault_code) if ctx.fault_code else None
+        if not fault:
+            # A code typed into the question ("cara atasi SV0401") is an exact lookup too.
+            q_faults = extract_fault_codes(query or "")
+            fault = q_faults[0] if q_faults else None
+        part_keys = {part_key(p) for p in (ctx.part_numbers or []) + extract_part_numbers(query or "")}
+        part_keys.discard("")
 
         where, params, applied = self._filters(ctx, machine, mode, include_superseded)
         groups, _ = _concepts(ctx, query)
@@ -248,6 +256,11 @@ class Retriever:
                 for row in self._meta_candidates(
                         "EXISTS (SELECT 1 FROM json_each(c.fault_codes) WHERE value = ?)", [fault], where, params):
                     cands.setdefault(row["chunk_id"], {"row": row, "bm25": 0.0})
+            if part_keys:
+                # Part numbers are compared by key in Python so OCR look-alikes still match.
+                for row in self._meta_candidates("c.part_numbers != '[]'", [], where, params, limit=500):
+                    if part_keys & {part_key(p) for p in json.loads(row["part_numbers"] or "[]")}:
+                        cands.setdefault(row["chunk_id"], {"row": row, "bm25": 0.0})
             if machine:
                 for row in self._meta_candidates("c.constraint_tier = 'Safety'", [], where, params):
                     cands.setdefault(row["chunk_id"], {"row": row, "bm25": 0.0})
@@ -268,16 +281,27 @@ class Retriever:
         bm = [v for v in topical.values() if v > 0]
         lo, hi = (min(bm), max(bm)) if bm else (0.0, 0.0)
         idf = self._idf(topical_terms) if topical_terms else {}
+        exact_by_chunk: Dict[str, List[str]] = {}
         scored = []
         for cid, c in cands.items():
             row = c["row"]
             ctoks = set(tokens((row["header"] or "") + " " + row["text"], drop_stopwords=False))
+            fault_codes = json.loads(row["fault_codes"] or "[]")
+            chunk_parts = json.loads(row["part_numbers"] or "[]")
+            part_hits = [p for p in chunk_parts if part_key(p) in part_keys]
+            # Query terms that *are* a code this chunk carries count as covered, so a bare
+            # code query ("SVO401", "HSK-A63-SP-0042") isn't dropped by the relevance floor.
+            code_terms = set()
+            if fault and fault in fault_codes:
+                code_terms |= {t for _, syn in groups for t in syn if normalize_fault_code(t) == fault}
+            if part_hits:
+                code_terms |= {t for _, syn in groups for t in syn if part_key(t) in part_keys}
             covered_w, total_w, matched = 0.0, 0.0, []
             for label, syn in groups:
                 is_disruption_group = label.startswith("[")
                 w = 1.5 if is_disruption_group else max(idf.get(t, 1.0) for t in syn)
                 total_w += w
-                hit = next((t for t in syn if _term_hits(t, ctoks)), None)
+                hit = next((t for t in syn if t in code_terms or _term_hits(t, ctoks)), None)
                 if hit:
                     covered_w += w
                     matched.append(hit)
@@ -291,7 +315,9 @@ class Retriever:
                 bm25_norm = 1.0
             chunk_machines = json.loads(row["machine_ids"] or "[]")
             doc_machines = json.loads(row["doc_machine_ids"] or "[]")
-            fault_codes = json.loads(row["fault_codes"] or "[]")
+            exact = ([fault] if fault and fault in fault_codes else []) + part_hits
+            if exact:
+                exact_by_chunk[cid] = exact
             f = Features(
                 coverage=coverage, bm25_norm=bm25_norm,
                 fault_hit=bool(fault and fault in fault_codes),
@@ -302,6 +328,7 @@ class Retriever:
                 superseded=row["doc_status"] == "superseded",
                 effective_date=row["effective_date"], doc_type=row["doc_type"] or "other",
                 ocr_confidence=row["ocr_confidence"], matched_terms=matched,
+                part_hit=bool(part_hits), incident_has_part=bool(part_keys),
             )
             sc = score(f, cfg)
             scored.append((sc, row))
@@ -334,6 +361,8 @@ class Retriever:
 
         results = [self._result(r, s, False) for s, r in chosen]
         results += [self._result(r, s, True) for s, r in forced]
+        for r in results:
+            r["exact_match"] = exact_by_chunk.get(r["chunk_id"], [])
         near_miss = [self._result(r, s, False, brief=True)
                      for s, r in scored if r["chunk_id"] not in chosen_ids][:3]
 
@@ -346,7 +375,8 @@ class Retriever:
             "weights": {"R": cfg.w_relevance, "M": cfg.w_metadata, "F": cfg.w_freshness,
                         "A": cfg.w_authority, "P": cfg.w_ocr_penalty},
             "machine": ({"id": machine.id, "model": machine.model} if machine else None),
-            "fault_code": fault, "latency_ms": latency, "incident": ctx.to_dict(), "query": query,
+            "fault_code": fault, "part_keys": sorted(part_keys),
+            "latency_ms": latency, "incident": ctx.to_dict(), "query": query,
         }
         if log:
             try:

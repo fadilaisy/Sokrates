@@ -12,6 +12,7 @@ const NAV: { page: Page; label: string }[] = [
   { page: "dashboard", label: "Dasbor" },
   { page: "cockpit", label: "Cockpit" },
   { page: "floor", label: "Lantai Pabrik" },
+  { page: "maintenance", label: "Perawatan" },
 ];
 
 function Sidebar() {

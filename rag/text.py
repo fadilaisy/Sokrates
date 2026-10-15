@@ -59,6 +59,13 @@ _LEXICON_PAIRS = [
     ("listrik", ["electrical", "power"]), ("tegangan", ["voltage"]), ("kualitas", ["quality"]),
     ("toleransi", ["tolerance"]), ("pemanasan", ["warm-up", "warmup"]), ("motor", ["motor"]),
     ("sinyal", ["signal"]), ("pintu", ["door"]), ("kalibrasi", ["calibration"]), ("jadwal", ["schedule"]),
+    # Shop-floor repair vocabulary (maintenance logs are written in both languages).
+    ("spindel", ["spindle"]), ("bunyi", ["noise", "sound"]), ("berisik", ["noise", "noisy"]),
+    ("kasar", ["rough", "grinding"]), ("bocor", ["leak", "leaking"]), ("rembes", ["leak", "seep"]),
+    ("macet", ["jam", "stuck"]), ("kabel", ["cable"]), ("selang", ["hose"]), ("oli", ["oil"]),
+    ("pompa", ["pump"]), ("sumbu", ["axis"]), ("kipas", ["fan"]), ("longgar", ["loose"]), ("kendor", ["loose"]),
+    ("retak", ["crack", "cracked"]), ("sensor", ["sensor"]), ("hidrolik", ["hydraulic"]),
+    ("magazin", ["magazine"]), ("pahat", ["tool", "cutter"]), ("rendah", ["low"]), ("tinggi", ["high"]),
 ]
 LEXICON = {}
 for _id, _ens in _LEXICON_PAIRS:

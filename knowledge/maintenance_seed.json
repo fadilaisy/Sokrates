@@ -1,0 +1,943 @@
+{
+  "_meta": {
+    "synthetic": true,
+    "facility": "PT Karawang Precision Manufacturing",
+    "note": "Synthetic maintenance history for demo use. Alarm numbers and part codes are illustrative and do not map to real OEM manuals. Scanned entries carry deliberate OCR noise.",
+    "generator": "scripts/generate_maintenance_seed.py"
+  },
+  "cases": [
+    {
+      "id": "CASE-0001",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2023-08-14T09:20:00+07:00",
+      "machine_id": "CNC-01",
+      "machine_model": "Haas VF-2",
+      "controller": "Haas NGC",
+      "category": "SPINDLE",
+      "language": "en",
+      "source": "typed",
+      "symptom": "Spindle vibration 6.8 mm/s with grinding noise above 4000 rpm",
+      "error_codes": [
+        "ALM-162"
+      ],
+      "part_codes": [
+        "NSK-7014CTYNSULP4",
+        "SEAL-SP-0031",
+        "93-1000"
+      ],
+      "root_cause": "Front spindle bearing pre-load lost; raceway wear after coolant ingress through worn labyrinth seal.",
+      "fix_steps": [
+        "Stop spindle and lock out machine",
+        "Record vibration at 2000/3000/4000 rpm with handheld analyser",
+        "Remove spindle cartridge and inspect front bearing set",
+        "Replace bearing pair NSK-7014CTYNSULP4 and labyrinth seal SEAL-SP-0031",
+        "Re-grease with spindle grease 93-1000 (1.2 g per bearing) and run 30 min warm-up ramp",
+        "Confirm vibration below 2.5 mm/s at 6000 rpm"
+      ],
+      "safety_notes": "Lock out / tag out before opening spindle housing. Do not exceed 4000 rpm until warm-up completed.",
+      "downtime_hours": 6.5,
+      "mechanic_id": "MEK-001",
+      "outcome": "RESOLVED",
+      "text": "Op reported grinding noise from spindle on VF-2 No.1 during roughing of aluminium housings. Vib 6.8 mm/s at 4200 rpm, alarm ALM-162 spindle overload. Front bearing replaced, seal replaced, vibration back to 2.1 mm/s."
+    },
+    {
+      "id": "CASE-0002",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2023-11-17T14:30:00+07:00",
+      "machine_id": "CNC-03",
+      "machine_model": "Fanuc Robodrill α-D21MiA",
+      "controller": "Fanuc 0i-MD",
+      "category": "SERVO",
+      "language": "en",
+      "source": "pdf_scan",
+      "symptom": "Alarm SV0401 VRDY off on X axis after power-up, axis will not servo-on",
+      "error_codes": [
+        "SV0401"
+      ],
+      "part_codes": [
+        "FNC-A06B-6114-H105",
+        "CBL-FB-X-0412"
+      ],
+      "root_cause": "Feedback cable CBL-FB-X-0412 insvlation cut by chip; intermittent short caused amplifier not to reach ready state.",
+      "fix_steps": [
+        "Power off and wait 5 min for DC link discharge",
+        "Check amplifier status LED and servo diagnostics (DGN 200-205)",
+        "Inspect X-axis feedback cable along cablc carrier",
+        "Replace damaged cable CBL-FB-X-0412 and re-seat connector",
+        "Power up, clear SV0401, jog X at 10% before returning to production"
+      ],
+      "safety_notes": "DC link stays energised for several minutes after power-off; measure before touching amplifier terminals.",
+      "downtime_hours": 4.0,
+      "mechanic_id": "MEK-002",
+      "outcome": "RESOLVED",
+      "text": "After morning power-up the Robodrill showed SV0401 VRDY OFF on X. Amplifier A06B-6114-H105 LED showed 1. Found cut feedback cable in chain, replaced CBL-FB-X-0412. Axis servo-on normal.",
+      "ocr_confidence": 0.86,
+      "scan_ref": "scans/2023-11/case-0002.pdf"
+    },
+    {
+      "id": "CASE-0003",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2023-12-11T10:30:00+07:00",
+      "machine_id": "CNC-01",
+      "machine_model": "Haas VF-2",
+      "controller": "Haas NGC",
+      "category": "ELECTRICAL",
+      "language": "id",
+      "source": "typed",
+      "symptom": "Pintu mesin tidak terdeteksi tertutup, interlock door switch error",
+      "error_codes": [
+        "ALM-150"
+      ],
+      "part_codes": [
+        "SW-DOOR-0092"
+      ],
+      "root_cause": "Door interlock switch SW-DOOR-0092 tertutup serbuk dan posisi actuator bergeser.",
+      "fix_steps": [
+        "Hentikan mesin dan pastikan pintu aman",
+        "Bersihkan switch dan actuator dari serbuk",
+        "Setel ulang posisi actuator",
+        "Ganti switch SW-DOOR-0092 bila kontak tidak stabil",
+        "Uji fungsi interlock: spindle tidak boleh start saat pintu terbuka"
+      ],
+      "safety_notes": "Jangan pernah jumper switch interlock pintu.",
+      "downtime_hours": 1.5,
+      "mechanic_id": "MEK-002",
+      "outcome": "RESOLVED",
+      "text": "ALM-150 door interlock, pintu tertutup tapi tidak terbaca. Switch SW-DOOR-0092 kotor, actuator geser. Dibersihkan dan disetel, tes interlock OK."
+    },
+    {
+      "id": "CASE-0004",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-01-22T13:05:00+07:00",
+      "machine_id": "CNC-02",
+      "machine_model": "Haas VF-2",
+      "controller": "Haas NGC",
+      "category": "SPINDLE",
+      "language": "id",
+      "source": "handwritten_scan",
+      "symptom": "Spindel bunyi kasar dan getaran naik setelah jam kerja ke-6",
+      "error_codes": [
+        "ALM-I62"
+      ],
+      "part_codes": [
+        "NSK-7014CTYNSULP4"
+      ],
+      "root_cause": "Banta1an depan spindel aus, grease kering karena interval pelumasan terlewat.",
+      "fix_steps": [
+        "Hentikan mesin, kunci power (LOTO)",
+        "Ukur getaran spindel pada 2000 dan 4000 rpm",
+        "Bongkar cartridge spindel, periksa bantalan depan",
+        "Ganti set bantalan NSK-7014CTYNSULP4",
+        "Isi grease 93-1000 sesuai spesifikasi dan jalankan warm-up 30 menit",
+        "Catat jam spindel di kartu PM"
+      ],
+      "safety_notes": "Pakai LOTO sebelum membuka spindel.",
+      "downtime_hours": 5.0,
+      "mechanic_id": "MEK-001",
+      "outcome": "RESOLVED",
+      "text": "Spdl VF-2 No.2 bunyi kasar stlh jam ke-6, getaran naik sampai 6.2 mm/s, alarm ALM-162. Bearing depan aus, grease kering krn PM bulanan terlewat. Ganti bearing NSK-7014CTYNSULP4, warm-up 30 mnt, getaran normal 2.0 mm/s.",
+      "ocr_confidence": 0.78,
+      "scan_ref": "scans/2024-01/case-0004.jpg"
+    },
+    {
+      "id": "CASE-0005",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-02-27T17:20:00+07:00",
+      "machine_id": "CNC-05",
+      "machine_model": "DMG MORI NLX 2500",
+      "controller": "CELOS + Fanuc",
+      "category": "HYDRAULIC",
+      "language": "en",
+      "source": "typed",
+      "symptom": "Turret indexing fault, hydraulic pressure low at clamp",
+      "error_codes": [
+        "CELOS-2305"
+      ],
+      "part_codes": [
+        "HYD-VLV-5521",
+        "SEAL-HYD-0213"
+      ],
+      "root_cause": "Turret clamp solenoid valve spool sticking and O-ring leak reducing clamp pressure below 30 bar.",
+      "fix_steps": [
+        "Check hydraulic unit pressure gauge (nominal 35 bar)",
+        "Check clamp pressure switch signal in diagnostics",
+        "Inspect turret clamp valve HYD-VLV-5521 for sticking",
+        "Replace valve and O-ring kit SEAL-HYD-0213",
+        "Bleed lines and run 30 index cycles",
+        "Verify clamp pressure holds at 35 bar"
+      ],
+      "safety_notes": "Release hydraulic pressure before disconnecting any line.",
+      "downtime_hours": 3.0,
+      "mechanic_id": "MEK-003",
+      "outcome": "RESOLVED",
+      "text": "NLX 2500 turret failed to index, CELOS-2305 clamp pressure low (28 bar). Clamp valve HYD-VLV-5521 sticky, O-ring cut. Replaced valve + seal kit, 30 index cycles OK."
+    },
+    {
+      "id": "CASE-0006",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-03-09T08:15:00+07:00",
+      "machine_id": "CNC-03",
+      "machine_model": "Fanuc Robodrill α-D21MiA",
+      "controller": "Fanuc 0i-MD",
+      "category": "SPINDLE",
+      "language": "id",
+      "source": "typed",
+      "symptom": "Alarm SP1241 spindel motor overheat saat pengerjaan stainless",
+      "error_codes": [
+        "SP1241"
+      ],
+      "part_codes": [
+        "FAN-RD-0099"
+      ],
+      "root_cause": "Kipas pendingin motor spindel tersumbat serbuk logam dan oli; aliran udara berkurang.",
+      "fix_steps": [
+        "Matikan mesin dan tunggu motor dingin di bawah 50 C",
+        "Lepas cover kipas motor spindel",
+        "Bersihkan kipas dan saluran udara dengan compressed air",
+        "Periksa putaran kipas FAN-RD-0099 dengan tangan",
+        "Reset alarm SP1241 dan uji putar 3000 rpm selama 15 menit",
+        "Turunkan feed 10% selama 2 jam pertama"
+      ],
+      "safety_notes": "Pastikan motor sudah dingin sebelum cover dibuka.",
+      "downtime_hours": 2.5,
+      "mechanic_id": "MEK-004",
+      "outcome": "RESOLVED",
+      "text": "Robodrill alarm SP1241 spindel motor overheat waktu frais SUS304. Kipas motor penuh serbuk dan oli. Dibersihkan, alarm di-reset, suhu motor stabil 58 C setelah 15 menit di 3000 rpm."
+    },
+    {
+      "id": "CASE-0007",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-03-21T10:05:00+07:00",
+      "machine_id": "CNC-03",
+      "machine_model": "Fanuc Robodrill α-D21MiA",
+      "controller": "Fanuc 0i-MD",
+      "category": "ATC",
+      "language": "id",
+      "source": "handwritten_scan",
+      "symptom": "ATC magazin macet di posisi pot 7, alarm ATC-2031",
+      "error_codes": [
+        "ATC-2O31"
+      ],
+      "part_codes": [
+        "CAM-ATC-O150",
+        "SNS-PRX-O066"
+      ],
+      "root_cause": "Cam follower ATC aus dan sensor proximity posisi pot bergeser sehingga magazin tidak konfirmasi posisi.",
+      "fix_steps": [
+        "Pindahkan magazin ke posisi aman secara manual",
+        "Periksa cam follower dan celah cam",
+        "Atur ulang sensor proximity SNS-PRX-O066 (jarak 1.5 mm)",
+        "Ganti cam follower CAM-ATC-0150 bila aus",
+        "Jalankan ATC 20 siklus tanpa beban",
+        "Catat torsi baut cam di kartu PM"
+      ],
+      "safety_notes": "Pastikan magazin tidak bisa bergerak otomatis sebelum tangan masuk area ATC.",
+      "downtime_hours": 2.0,
+      "mechanic_id": "MEK-004",
+      "outcome": "RESOLVED",
+      "text": "ATC magazin macet pot 7, alarm ATC-2031. Cam follower aus + sensor prox SNS-PRX-0066 geser. Setel sensor jarak 1.5 mm, ganti follower. 20 siklus lancar.",
+      "ocr_confidence": 0.74,
+      "scan_ref": "scans/2024-03/case-0007.jpg"
+    },
+    {
+      "id": "CASE-0008",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-04-09T11:30:00+07:00",
+      "machine_id": "CNC-05",
+      "machine_model": "DMG MORI NLX 2500",
+      "controller": "CELOS + Fanuc",
+      "category": "CONTROLLER",
+      "language": "en",
+      "source": "typed",
+      "symptom": "Axis position lost after power-up, battery alarm",
+      "error_codes": [
+        "SV0300"
+      ],
+      "part_codes": [
+        "BAT-FNC-0003"
+      ],
+      "root_cause": "Absolute encoder backup battery below 2.6 V; reference position lost after weekend shutdown.",
+      "fix_steps": [
+        "Check battery voltage alarm on controller screen",
+        "Replace battery BAT-FNC-0003 with machine powered on",
+        "Re-establish reference positions per OEM procedure",
+        "Verify with a probing cycle",
+        "Note replacement date in PM card"
+      ],
+      "safety_notes": "Replace battery only while control is powered, otherwise reference is lost.",
+      "downtime_hours": 1.0,
+      "mechanic_id": "MEK-002",
+      "outcome": "RESOLVED",
+      "text": "SV0300 APC alarm on NLX after weekend. Battery BAT-FNC-0003 2.4 V. Replaced, re-referenced axes, probing cycle within 0.003 mm."
+    },
+    {
+      "id": "CASE-0009",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-04-18T09:00:00+07:00",
+      "machine_id": "CNC-01",
+      "machine_model": "Haas VF-2",
+      "controller": "Haas NGC",
+      "category": "COOLANT",
+      "language": "en",
+      "source": "typed",
+      "symptom": "Coolant pressure dropped to 1.9 bar, low pressure interlock",
+      "error_codes": [
+        "Alarm 970"
+      ],
+      "part_codes": [
+        "FLT-CLN-10U",
+        "COOL-PMP-0312"
+      ],
+      "root_cause": "Coolant filter cartridge clogged with fine swarf; pump cavitating due to restricted suction.",
+      "fix_steps": [
+        "Stop coolant pump and isolate tank valve",
+        "Remove and inspect suction strainer and filter cartridge FLT-CLN-10U",
+        "Replace cartridge and clean strainer basket",
+        "Bleed pump and refill tank to mark",
+        "Verify pressure 3.5-4.2 bar with pump running at full flow"
+      ],
+      "safety_notes": "SAFE-003 interlock stops spindle below 2.0 bar; do not bypass the pressure switch.",
+      "downtime_hours": 1.0,
+      "mechanic_id": "MEK-003",
+      "outcome": "RESOLVED",
+      "text": "Coolant pressure fell 3.9 -> 1.9 bar mid cycle, Alarm 970 coolant pressure low. Filter FLT-CLN-10U blocked with aluminium swarf. Replaced filter, cleaned strainer, pressure back to 3.9 bar."
+    },
+    {
+      "id": "CASE-0010",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-05-03T10:40:00+07:00",
+      "machine_id": "CNC-04",
+      "machine_model": "Mazak Variaxis i-500",
+      "controller": "Mazatrol SmoothX",
+      "category": "SPINDLE",
+      "language": "en",
+      "source": "typed",
+      "symptom": "Spindle motor temperature reached 92 C, spindle overheat alarm",
+      "error_codes": [
+        "ALM-410"
+      ],
+      "part_codes": [
+        "CHL-FAN-0220",
+        "FLT-CLN-10U"
+      ],
+      "root_cause": "Spindle chiller condenser fan stalled; coolant return temperature above 30 C so spindle jacket not cooled.",
+      "fix_steps": [
+        "Reduce feed override to 50% and let spindle idle at 1500 rpm",
+        "Check chiller display for set-point and return temperature",
+        "Inspect condenser fan CHL-FAN-0220 and clean condenser fins",
+        "Replace fan if shaft is seized",
+        "Verify jacket coolant temperature stabilises at 22-25 C",
+        "Resume at 70% load for first hour"
+      ],
+      "safety_notes": "Do not run spindle above 6000 rpm while motor temperature exceeds 85 C (SAFE-001 trips at 95 C).",
+      "downtime_hours": 3.0,
+      "mechanic_id": "MEK-001",
+      "outcome": "RESOLVED",
+      "text": "Variaxis spindle motor temp climbed 78 -> 92 C within 20 min, alarm ALM-410 SPINDLE OVERHEAT. Chiller fan CHL-FAN-0220 seized, condenser blocked with oil mist. Cleaned fins, replaced fan; temp stable at 71 C."
+    },
+    {
+      "id": "CASE-0011",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-06-04T13:40:00+07:00",
+      "machine_id": "CNC-01",
+      "machine_model": "Haas VF-2",
+      "controller": "Haas NGC",
+      "category": "TOOLING",
+      "language": "en",
+      "source": "typed",
+      "symptom": "Tool unclamp failure, tool stuck in spindle taper, low air pressure",
+      "error_codes": [
+        "ALM-318"
+      ],
+      "part_codes": [
+        "SOL-AIR-0044"
+      ],
+      "root_cause": "Shop air pressure dropped to 4 bar (min 5.5 bar) because of compressor drain valve failure; drawbar could not release.",
+      "fix_steps": [
+        "Check shop air pressure at machine regulator",
+        "Verify compressor output and drain valve",
+        "Restore air to 6 bar and confirm tool release button works",
+        "Inspect air solenoid SOL-AIR-0044 for sluggishness",
+        "Clean taper and pull stud before reloading tool"
+      ],
+      "safety_notes": "Do not strike the tool to free it; use unclamp button once air is restored.",
+      "downtime_hours": 1.2,
+      "mechanic_id": "MEK-004",
+      "outcome": "RESOLVED",
+      "text": "ALM-318 tool unclamp fail on CNC-01. Air at 4 bar. Compressor drain valve stuck open. Restored air to 6 bar, tool released. Solenoid SOL-AIR-0044 OK."
+    },
+    {
+      "id": "CASE-0012",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-06-26T15:45:00+07:00",
+      "machine_id": "CNC-02",
+      "machine_model": "Haas VF-2",
+      "controller": "Haas NGC",
+      "category": "COOLANT",
+      "language": "id",
+      "source": "typed",
+      "symptom": "Tekanan coolant rendah 2.1 bar dan pompa berisik",
+      "error_codes": [
+        "Alarm 970"
+      ],
+      "part_codes": [
+        "COOL-PMP-0312",
+        "SEAL-PMP-0058"
+      ],
+      "root_cause": "Impeller pompa coolant aus dan seal bocor, sehingga tekanan turun dan udara masuk.",
+      "fix_steps": [
+        "Matikan pompa dan tutup valve tangki",
+        "Lepas pompa COOL-PMP-0312 dan periksa impeller",
+        "Ganti impeller dan mechanical seal SEAL-PMP-0058",
+        "Pasang kembali, isi tangki, dan bleed udara",
+        "Uji tekanan di atas 3.5 bar selama 20 menit"
+      ],
+      "safety_notes": "Jangan bypass switch tekanan coolant (SAFE-003).",
+      "downtime_hours": 2.0,
+      "mechanic_id": "MEK-003",
+      "outcome": "RESOLVED",
+      "text": "Tekanan coolant VF-2 No.2 turun ke 2.1 bar, muncul Alarm 970, pompa berisik. Impeller aus, seal bocor. Ganti impeller + seal SEAL-PMP-0058, tekanan normal 4.0 bar."
+    },
+    {
+      "id": "CASE-0013",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-07-09T15:35:00+07:00",
+      "machine_id": "CNC-01",
+      "machine_model": "Haas VF-2",
+      "controller": "Haas NGC",
+      "category": "SPINDLE",
+      "language": "mixed",
+      "source": "handwritten_scan",
+      "symptom": "Spindle vibrasi naik 5.4 mm/s, drawbar spring lemah, pull stud longgar",
+      "error_codes": [],
+      "part_codes": [
+        "SP-DRB-O188",
+        "HSK-A63-SP-0042"
+      ],
+      "root_cause": "Drawbar spring fatigue sehingga clamping force turun dan tool holder bergetar.",
+      "fix_steps": [
+        "Ukur clamping force drawbar dengan gauge (spec 8 kN)",
+        "Ganti drawbar spring SP-DRB-0188",
+        "Bcrsihkan taper dan cek pull stud",
+        "Ukur runout setelah pasang",
+        "Jalankan vibration baseline"
+      ],
+      "safety_notes": "LOTO sebelum membuka spindle housing.",
+      "downtime_hours": 4.0,
+      "mechanic_id": "MEK-001",
+      "outcome": "RESOLVED",
+      "text": "Spindle vib 5.4 mm/s di 3000 rpm. Drawbar spring SP-DRB-0188 lemah, clamping 5.1 kN (spec 8). Spring diganti, getaran 2.0 mm/s, runout 0.004.",
+      "ocr_confidence": 0.69,
+      "scan_ref": "scans/2024-07/case-0013.jpg"
+    },
+    {
+      "id": "CASE-0014",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-07-30T11:10:00+07:00",
+      "machine_id": "CNC-03",
+      "machine_model": "Fanuc Robodrill α-D21MiA",
+      "controller": "Fanuc 0i-MD",
+      "category": "SERVO",
+      "language": "id",
+      "source": "handwritten_scan",
+      "symptom": "SV0401 muncul lagi di sumbu X, kabel feedback sudah pernah diganti",
+      "error_codes": [
+        "SV040I"
+      ],
+      "part_codes": [
+        "CBL-FB-X-O412"
+      ],
+      "root_cause": "Kabel feedback kembali rusak di titik tekuk carrier; routing kabel terlalu pendek sehingga menekuk tajarn.",
+      "fix_steps": [
+        "Cek diagnosa servo X dan LED amplifier",
+        "Periksa kabel di titik tekuk cable carrier",
+        "Ganti kabcl CBL-FB-X-0412 dengan jenis flex tinggi",
+        "Perpanjang routing dan pasang clamp strain relief",
+        "Uji jog X 10% selama 10 menit tanpa alarm"
+      ],
+      "safety_notes": "Tunggu DC link discharge 5 menit sebelum menyentuh amplifier.",
+      "downtime_hours": 3.5,
+      "mechanic_id": "MEK-002",
+      "outcome": "RECURRED",
+      "text": "SV0401 muncul lg di X (kejadian sama nov 2023). Kabel CBL-FB-X-0412 rusak di titik tekuk carrier. Ganti kabel flex, routing diperpanjang + clamp. Catatan: prob berulang krn routing, bukan kabelnya saja.",
+      "ocr_confidence": 0.71,
+      "scan_ref": "scans/2024-07/case-0014.jpg"
+    },
+    {
+      "id": "CASE-0015",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-08-12T09:35:00+07:00",
+      "machine_id": "CNC-05",
+      "machine_model": "DMG MORI NLX 2500",
+      "controller": "CELOS + Fanuc",
+      "category": "HYDRAULIC",
+      "language": "id",
+      "source": "pdf_scan",
+      "symptom": "Tekanan chuck turun, bocor oli di selang hidrolik chuck",
+      "error_codes": [
+        "CELOS-2314"
+      ],
+      "part_codes": [
+        "HOS-HYD-0071",
+        "SEAL-HYD-0213"
+      ],
+      "root_cause": "Selang hidrolik chuck HOS-HYD-0071 retak di dekat fitting karena gesekan.",
+      "fix_steps": [
+        "Hentikan spindel dan lepaskan tekanan hidrolik",
+        "Periksa semua selang chuck dan fitting dari kebocoran",
+        "Ganti selang HOS-HYD-0071 dan O-ring SEAL-HYD-0213",
+        "Isi ulang oli hidrolik dan bleed udara",
+        "Uji clamp chuck dengan benda uji dan cek tekanan 35 bar"
+      ],
+      "safety_notes": "Jangan memutar spindel dengan tekanan chuck tidak stabil; benda kerja bisa terlepas.",
+      "downtime_hours": 2.5,
+      "mechanic_id": "MEK-003",
+      "outcome": "RESOLVED",
+      "text": "Tekanan chuck NLX turun dari 35 ke 22 bar, ada rembesan oli di selang chuck. Selang HOS-HYD-0071 retak dekat fitting. Diganti bersama O-ring, tekanan stabil 35 bar.",
+      "ocr_confidence": 0.82,
+      "scan_ref": "scans/2024-08/case-0015.pdf"
+    },
+    {
+      "id": "CASE-0016",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-08-20T14:00:00+07:00",
+      "machine_id": "CNC-04",
+      "machine_model": "Mazak Variaxis i-500",
+      "controller": "Mazatrol SmoothX",
+      "category": "SPINDLE",
+      "language": "en",
+      "source": "typed",
+      "symptom": "Spindle runout 0.025 mm after tool crash, vibration 4.9 mm/s",
+      "error_codes": [
+        "ALM-410"
+      ],
+      "part_codes": [
+        "HSK-A63-SP-0042",
+        "SNS-VIB-0110"
+      ],
+      "root_cause": "Tool crash bent the HSK-A63 taper seating; drawbar clamping force reduced.",
+      "fix_steps": [
+        "Measure spindle runout at nose and at 100 mm test bar",
+        "Inspect HSK taper for fretting and pull-back force",
+        "Replace clamping set HSK-A63-SP-0042",
+        "Re-measure runout (target below 0.005 mm)",
+        "Run vibration baseline and save to PM card"
+      ],
+      "safety_notes": "Do not use the spindle for finishing until runout verified.",
+      "downtime_hours": 4.5,
+      "mechanic_id": "MEK-001",
+      "outcome": "RESOLVED",
+      "text": "After a crash on pallet 2 runout was 0.025 mm and vibration 4.9 mm/s. HSK taper damaged, clamping set HSK-A63-SP-0042 replaced, runout 0.004 mm."
+    },
+    {
+      "id": "CASE-0017",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-09-05T16:25:00+07:00",
+      "machine_id": "CNC-03",
+      "machine_model": "Fanuc Robodrill α-D21MiA",
+      "controller": "Fanuc 0i-MD",
+      "category": "SERVO",
+      "language": "en",
+      "source": "typed",
+      "symptom": "SV0430 servo motor overheat on Z axis during deep pocketing",
+      "error_codes": [
+        "SV0430"
+      ],
+      "part_codes": [
+        "GRS-LM-0007"
+      ],
+      "root_cause": "Z-axis ballscrew nut dry; friction raised motor current and temperature.",
+      "fix_steps": [
+        "Let axis cool for 15 minutes",
+        "Check Z axis load meter at rapid and at cut",
+        "Inspect ballscrew nut lubrication line and grease nipple",
+        "Pump grease 3 shots GRS-LM-0007 and cycle Z full stroke 10 times",
+        "Compare load meter against baseline (below 40%)"
+      ],
+      "safety_notes": "Keep hands clear of table while cycling axis with covers open.",
+      "downtime_hours": 1.5,
+      "mechanic_id": "MEK-002",
+      "outcome": "RESOLVED",
+      "text": "SV0430 on Z during deep pocket in steel. Load meter 85% at rapid. Ballscrew nut dry - missed greasing. 3 shots GRS-LM-0007, cycled stroke, load dropped to 32%."
+    },
+    {
+      "id": "CASE-0018",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-09-16T10:20:00+07:00",
+      "machine_id": "CNC-01",
+      "machine_model": "Haas VF-2",
+      "controller": "Haas NGC",
+      "category": "SPINDLE",
+      "language": "en",
+      "source": "typed",
+      "symptom": "Alarm 108 spindle motor overheat during second shift roughing",
+      "error_codes": [
+        "Alarm 108"
+      ],
+      "part_codes": [
+        "59-0112"
+      ],
+      "root_cause": "Spindle cooling fan filter 59-0112 clogged with mist and fine chips; airflow too low for two-shift load.",
+      "fix_steps": [
+        "Stop the cycle and let the spindle cool 20 minutes with the enclosure door open",
+        "Remove and inspect spindle cooling fan filter 59-0112",
+        "Replace filter 59-0112 and clean fan guard",
+        "Check spindle lubrication level",
+        "Run spindle warm-up program at 50% speed for 10 minutes",
+        "Log motor temperature every 30 minutes for the rest of the shift"
+      ],
+      "safety_notes": "Do not reset Alarm 108 repeatedly; if it repeats within one shift, stop and request service.",
+      "downtime_hours": 1.5,
+      "mechanic_id": "MEK-006",
+      "outcome": "RESOLVED",
+      "text": "VF-2 No.1 Alarm 108 at 21:40, motor winding 96 C. Fan filter 59-0112 fully blocked. Replaced filter, warm-up 10 min at 50%, motor stable 74 C until end of shift."
+    },
+    {
+      "id": "CASE-0019",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-09-25T08:50:00+07:00",
+      "machine_id": "CNC-04",
+      "machine_model": "Mazak Variaxis i-500",
+      "controller": "Mazatrol SmoothX",
+      "category": "ELECTRICAL",
+      "language": "en",
+      "source": "typed",
+      "symptom": "Intermittent over-voltage alarm on main drive, machine trips at start of shift",
+      "error_codes": [
+        "ALM-2113"
+      ],
+      "part_codes": [
+        "FUS-AC-0630",
+        "CAP-DC-0475"
+      ],
+      "root_cause": "Plant voltage swell at shift start; DC bus capacitor aging caused trip threshold margin to shrink.",
+      "fix_steps": [
+        "Log supply voltage during shift start with power analyser",
+        "Inspect drive cabinet filter and fans",
+        "Measure DC bus capacitor ESR and compare to datasheet",
+        "Replace capacitor module CAP-DC-0475 and check fuse FUS-AC-0630",
+        "Fit line reactor request to maintenance planning"
+      ],
+      "safety_notes": "Wait for DC bus discharge before probing drive terminals.",
+      "downtime_hours": 2.0,
+      "mechanic_id": "MEK-002",
+      "outcome": "RESOLVED",
+      "text": "Mazak tripped ALM-2113 over-voltage every morning ~07:05. Plant voltage up to 242 V at start. DC bus cap CAP-DC-0475 aged; replaced. No repeat in 2 weeks."
+    },
+    {
+      "id": "CASE-0020",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-10-02T07:50:00+07:00",
+      "machine_id": "CNC-01",
+      "machine_model": "Haas VF-2",
+      "controller": "Haas NGC",
+      "category": "LUBRICATION",
+      "language": "en",
+      "source": "typed",
+      "symptom": "Way lube low alarm, oil level OK but no pressure",
+      "error_codes": [
+        "ALM-130"
+      ],
+      "part_codes": [
+        "LUBE-PMP-0045",
+        "FLT-LUB-0012"
+      ],
+      "root_cause": "Way-lube pump inlet filter blocked, pump running but not delivering.",
+      "fix_steps": [
+        "Check reservoir level and oil grade (ISO VG 68)",
+        "Run manual lube cycle and watch for pressure at distributor",
+        "Replace inlet filter FLT-LUB-0012",
+        "Prime pump and run 3 manual cycles",
+        "Clear ALM-130 and confirm automatic cycle times"
+      ],
+      "safety_notes": "Do not run axes without way lube; ways wear within hours.",
+      "downtime_hours": 0.8,
+      "mechanic_id": "MEK-005",
+      "outcome": "RESOLVED",
+      "text": "ALM-130 lube low although tank full. Manual cycle showed no pressure. Inlet filter FLT-LUB-0012 clogged with sludge. Replaced, primed, normal."
+    },
+    {
+      "id": "CASE-0021",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-10-28T09:10:00+07:00",
+      "machine_id": "CNC-04",
+      "machine_model": "Mazak Variaxis i-500",
+      "controller": "Mazatrol SmoothX",
+      "category": "SERVO",
+      "language": "en",
+      "source": "pdf_scan",
+      "symptom": "Servo error too large on Z axis during 5-axis cutting, ALM-103",
+      "error_codes": [
+        "ALM-103"
+      ],
+      "part_codes": [
+        "BLS-Z-0902"
+      ],
+      "root_cause": "Z-axis ballscrew support bearing preload loss; excessive backlash 0.04 mm.",
+      "fix_steps": [
+        "Check Z backlash with laser or dial indicator",
+        "Inspect ballscrew support bearing and lock nut torque",
+        "Re-torque lock nut and re-preload per spec",
+        "Replace support bearing BLS-Z-0902 if play remains",
+        "Run laser calibration and update compensation tables"
+      ],
+      "safety_notes": "Support the Z head before releasing ballscrew coupling.",
+      "downtime_hours": 5.0,
+      "mechanic_id": "MEK-002",
+      "outcome": "RESOLVED",
+      "text": "ALM-103 servo error too large on Z during finishing. Backlash 0.04 mm. Support bearing BLS-Z-0902 replaced and re-preloaded; laser comp updated, error gone.",
+      "ocr_confidence": 0.88,
+      "scan_ref": "scans/2024-10/case-0021.pdf"
+    },
+    {
+      "id": "CASE-0022",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-11-12T10:15:00+07:00",
+      "machine_id": "CNC-02",
+      "machine_model": "Haas VF-2",
+      "controller": "Haas NGC",
+      "category": "SPINDLE",
+      "language": "id",
+      "source": "typed",
+      "symptom": "Bearing spindel panas 78 C, grease berlebih setelah PM",
+      "error_codes": [],
+      "part_codes": [
+        "NSK-7014CTYNSULP4",
+        "93-1000"
+      ],
+      "root_cause": "Grease berlebih setelah PM menyebabkan bantalan panas saat pertama kali jalan.",
+      "fix_steps": [
+        "Turunkan rpm ke 2000 selama 30 menit warm-up",
+        "Pantau suhu bantalan per 5 menit",
+        "Biarkan grease berlebih terdorong keluar (run-in)",
+        "Bersihkan sisa grease di labirin",
+        "Catat jumlah grease ke kartu PM (maks 1.2 g per bantalan)"
+      ],
+      "safety_notes": "Jangan naikkan rpm sebelum suhu bantalan di bawah 60 C.",
+      "downtime_hours": 3.0,
+      "mechanic_id": "MEK-001",
+      "outcome": "RESOLVED",
+      "text": "Setelah PM spindel VF-2 No.2 suhu bantalan naik ke 78 C. Penyebab: grease 93-1000 berlebih. Run-in 30 menit di 2000 rpm, suhu turun ke 52 C."
+    },
+    {
+      "id": "CASE-0023",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-11-26T14:20:00+07:00",
+      "machine_id": "CNC-05",
+      "machine_model": "DMG MORI NLX 2500",
+      "controller": "CELOS + Fanuc",
+      "category": "LUBRICATION",
+      "language": "en",
+      "source": "typed",
+      "symptom": "Chip conveyor jam, conveyor motor overload trip",
+      "error_codes": [
+        "ALM-612"
+      ],
+      "part_codes": [
+        "MTR-CNV-0.75KW"
+      ],
+      "root_cause": "Long stringy chips wrapped in conveyor sprocket and caused thermal overload.",
+      "fix_steps": [
+        "Lock out conveyor and clear chips from hinge belt",
+        "Check chain tension and sprocket teeth",
+        "Reset thermal relay and test run",
+        "Add chip breaker insert to turning program",
+        "Schedule weekly conveyor clean in PM"
+      ],
+      "safety_notes": "Never reach into the conveyor trough while powered.",
+      "downtime_hours": 1.0,
+      "mechanic_id": "MEK-005",
+      "outcome": "RESOLVED",
+      "text": "ALM-612 conveyor overload. Long chips wrapped sprocket. Cleared, retensioned chain, reset relay. Suggested chip breaker in program NLX-0207."
+    },
+    {
+      "id": "CASE-0024",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-12-03T16:10:00+07:00",
+      "machine_id": "CNC-02",
+      "machine_model": "Haas VF-2",
+      "controller": "Haas NGC",
+      "category": "COOLANT",
+      "language": "mixed",
+      "source": "whatsapp",
+      "symptom": "Coolant bau busuk dan foaming, filter cepat tersumbat",
+      "error_codes": [],
+      "part_codes": [
+        "FLT-CLN-10U"
+      ],
+      "root_cause": "Konsentrasi coolant rendah dan kontaminasi tramp oil, bakteri berkembang.",
+      "fix_steps": [
+        "Ukur konsentrasi dengan refraktometer (target 7-9%)",
+        "Skim tramp oil dan bersihkan tangki",
+        "Tambah biocide dan atur konsentrasi",
+        "Ganti filter FLT-CLN-10U",
+        "Jadwalkan pengukuran konsentrasi mingguan"
+      ],
+      "safety_notes": "Pakai sarung tangan nitril saat menangani biocide.",
+      "downtime_hours": 0.5,
+      "mechanic_id": "MEK-003",
+      "outcome": "RESOLVED",
+      "text": "WA dari operator: coolant VF-2 No.2 baunya busuk + busa banyak. Konsentrasi 3%, banyak tramp oil. Tangki dibersihkan, biocide, konsentrasi 8%, filter FLT-CLN-10U diganti."
+    },
+    {
+      "id": "CASE-0025",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-12-18T10:00:00+07:00",
+      "machine_id": "CNC-04",
+      "machine_model": "Mazak Variaxis i-500",
+      "controller": "Mazatrol SmoothX",
+      "category": "COOLANT",
+      "language": "en",
+      "source": "typed",
+      "symptom": "Through-spindle coolant pressure low, tool cooling poor, drill breakage",
+      "error_codes": [
+        "ALM-441"
+      ],
+      "part_codes": [
+        "FLT-CLN-10U",
+        "COOL-PMP-0312"
+      ],
+      "root_cause": "High-pressure pump relief valve set too low after maintenance; filter bypass open.",
+      "fix_steps": [
+        "Check high-pressure pump relief valve setting",
+        "Reset relief to OEM spec (70 bar)",
+        "Inspect filter bypass indicator and replace filter FLT-CLN-10U",
+        "Test through-spindle flow with a nozzle plate",
+        "Update PM checklist to record relief setting"
+      ],
+      "safety_notes": "Do not exceed relief setting; high pressure line failure is hazardous.",
+      "downtime_hours": 2.0,
+      "mechanic_id": "MEK-005",
+      "outcome": "RESOLVED",
+      "text": "Through-spindle coolant gave only 22 bar; drills breaking. Relief valve was left at 40 bar after PM. Reset to 70 bar, replaced FLT-CLN-10U, pressure OK."
+    },
+    {
+      "id": "CASE-0026",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2024-12-27T12:40:00+07:00",
+      "machine_id": "CNC-02",
+      "machine_model": "Haas VF-2",
+      "controller": "Haas NGC",
+      "category": "SPINDLE",
+      "language": "id",
+      "source": "handwritten_scan",
+      "symptom": "Spindel getar lagi, bearing depan baru diganti 11 bulan lalu",
+      "error_codes": [
+        "ALM-162"
+      ],
+      "part_codes": [
+        "NSK-7014CTYNSULP4",
+        "SEAL-SP-O031"
+      ],
+      "root_cause": "Seal labirin SEAL-SP-0031 tidak diganti pada perbaikan sebelumnya, coolant masuk lagi ke bantalan.",
+      "fix_steps": [
+        "Bongkar cartridge spindel dan periksa bantalan serta seal",
+        "Ganti set bantalan NSK-7014CTYNSULP4 DAN seal SEAL-SP-0031 bersamaan",
+        "Periksa air purge spindel (tekanan 0.3 bar)",
+        "Isi grease sesuai spec dan run-in 30 menit",
+        "Ukur getaran dan catat baseline"
+      ],
+      "safety_notes": "LOTO sebelum membuka spindel.",
+      "downtime_hours": 6.0,
+      "mechanic_id": "MEK-001",
+      "outcome": "RECURRED",
+      "text": "ALM-162 lagi di VF-2 No.2. Bearing depan rusak lg, seal labirin SEAL-SP-0031 tdk ikut diganti dulu. Ganti bearing + seal bersamaan, cek air purge 0.3 bar. Pelajaran: selalu ganti seal bersama bearing.",
+      "ocr_confidence": 0.66,
+      "scan_ref": "scans/2024-12/case-0026.jpg"
+    },
+    {
+      "id": "CASE-0027",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2025-01-08T12:30:00+07:00",
+      "machine_id": "CNC-03",
+      "machine_model": "Fanuc Robodrill α-D21MiA",
+      "controller": "Fanuc 0i-MD",
+      "category": "ATC",
+      "language": "mixed",
+      "source": "typed",
+      "symptom": "ATC magazine cam perlu adjustment, tool change lambat dan ada bunyi klik",
+      "error_codes": [
+        "ATC-2031"
+      ],
+      "part_codes": [
+        "CAM-ATC-0150"
+      ],
+      "root_cause": "Backlash cam magazine di atas toleransi, tool change time naik dari 2.1 s ke 3.4 s.",
+      "fix_steps": [
+        "Ukur waktu tool change dan bandingkan dengan baseline 2.1 s",
+        "Periksa backlash cam dengan dial indicator (batas 0.05 mm)",
+        "Setel ulang posisi cam dan kencangkan baut",
+        "Lumasi cam dengan grease ATC",
+        "Jalankan 20 siklus ATC dan ukur ulang"
+      ],
+      "safety_notes": "LOTO saat menyetel cam.",
+      "downtime_hours": 2.0,
+      "mechanic_id": "MEK-004",
+      "outcome": "RESOLVED",
+      "text": "PM korektif: ATC magazine cam adjustment sesuai jadwal PM-002. Backlash cam 0.08 mm (batas 0.05). Disetel + dilumasi, tool change 2.2 s. Kode ATC-2031 tidak muncul lagi."
+    },
+    {
+      "id": "CASE-0028",
+      "entry_type": "CASE",
+      "status": "RESOLVED",
+      "logged_at": "2025-03-11T14:50:00+07:00",
+      "machine_id": "CNC-02",
+      "machine_model": "Haas VF-2",
+      "controller": "Haas NGC",
+      "category": "SPINDLE",
+      "language": "id",
+      "source": "handwritten_scan",
+      "symptom": "Alarm 108 muncul dua kali dalam satu shift walau filter kipas baru diganti",
+      "error_codes": [
+        "Alarm I08"
+      ],
+      "part_codes": [
+        "59-O112",
+        "DRV-SP-2207"
+      ],
+      "root_cause": "Filter kipas bersih; penyebab sebenarnya kipas drive spindel DRV-SP-2207 lemah sehingga drive ikut panas.",
+      "fix_steps": [
+        "Hentikan siklus dan dinginkan spindel 20 menit",
+        "Periksa filter kipas 59-0112 (bersih = cari penyebab lain)",
+        "Ukur arus dan suhu drive spindel di kabinet",
+        "Ganti kipas drive DRV-5P-2207",
+        "Bvat work order bila Alarm 108 muncul dua kali per shift",
+        "Pemanasan spindel 10 menit pada 50% sebelum prodvksi"
+      ],
+      "safety_notes": "LOTO sebelum membuka kabinet drive.",
+      "downtime_hours": 4.0,
+      "mechanic_id": "MEK-006",
+      "outcome": "RECURRED",
+      "text": "Alarm 108 dua kali di VF-2 No.2 shift pagi. Filter 59-0112 baru diganti mgg lalu, masih bersih. Kipas drive DRV-SP-2207 putaran lemah, drive panas 71 C. Kipas diganti. Catatan: kalau filter bersih, cek drive!",
+      "ocr_confidence": 0.76,
+      "scan_ref": "scans/2025-03/case-0028.jpg"
+    }
+  ]
+}

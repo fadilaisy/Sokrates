@@ -42,6 +42,8 @@ class Features:
     doc_type: str
     ocr_confidence: Optional[float]
     matched_terms: List[str] = field(default_factory=list)
+    part_hit: bool = False             # a part number from the incident/query is on this chunk
+    incident_has_part: bool = False
 
 
 @dataclass
@@ -76,6 +78,8 @@ def relevance(f: Features, cfg: ScoringConfig) -> float:
 def metadata_match(f: Features) -> float:
     m = 0.0
     if f.incident_has_fault and f.fault_hit:
+        m += 0.6
+    if f.incident_has_part and f.part_hit:
         m += 0.6
     if f.incident_has_machine:
         if f.machine_hit_chunk:
@@ -137,6 +141,8 @@ def score(f: Features, cfg: ScoringConfig, today: Optional[date] = None) -> Scor
         reasons.append("cocok kata kunci: " + ", ".join(f.matched_terms[:6]))
     if f.incident_has_fault and f.fault_hit:
         reasons.append("fault code insiden ada di passage ini")
+    if f.incident_has_part and f.part_hit:
+        reasons.append("nomor part persis ada di passage ini")
     if f.incident_has_machine:
         if f.machine_hit_chunk:
             reasons.append("menyebut mesin insiden secara langsung")

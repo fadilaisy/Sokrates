@@ -26,19 +26,38 @@ from .text import tokens
 
 # Haas "Alarm 108", generic "ALM-1001", Fanuc "SV0401" / "SP 1241" / "OT0500",
 # controller "ERR 2041", and the plant's own safety rule IDs "SAFE-003".
+# Digit groups accept O/I/l because scanned logs read "SV0401" as "SVO401";
+# a match still needs at least two real digits (see _digits_ok).
+_D = "[0-9OIl]"
 _FAULT_PATTERNS = [
-    re.compile(r"\b(?:ALARM|ALM|AL)[\s\-#:.]*(\d{2,5})\b", re.I),
-    re.compile(r"\b(SV|SP|OT|PS|SR|IO|OH|DS|EX|PW|SW|MC|BG|OI)[\s\-]?(\d{3,4})\b"),
-    re.compile(r"\b(?:ERR|ERROR)[\s\-#:]*(\d{3,5})\b", re.I),
+    re.compile(r"\b(?:ALARM|ALM|AL)[\s\-#:.]*(" + _D + r"{2,5})\b", re.I),
+    # Not inside a hyphenated part number ("HSK-A63-SP-0042" is a part, not fault SP0042).
+    re.compile(r"(?<![A-Za-z0-9\-])(SV|SP|OT|PS|SR|IO|OH|DS|EX|PW|SW|MC|BG|OI)[\s\-]?(" + _D + r"{3,4})\b"),
+    re.compile(r"\b(?:ERR|ERROR)[\s\-#:]*(" + _D + r"{3,5})\b", re.I),
     re.compile(r"\b(SAFE)-(\d{3})\b", re.I),
+    # Controller / subsystem codes written PREFIX-NNNN, e.g. "ATC-2031", "CELOS-2305".
+    # Not part of a longer hyphenated token, so part numbers like CAM-ATC-0150 don't match.
+    re.compile(r"(?<![A-Za-z0-9\-])([A-Z]{3,5})-(" + "[0-9OI]" + r"{3,4})(?![A-Za-z0-9\-])"),
 ]
+# PREFIX-NNNN tokens that are identifiers, not faults.
+_NOT_FAULT_PREFIXES = {"CNC", "SOP", "CASE", "MEK", "RES", "PRD", "REV", "ISO", "PLC"}
+# Prefixes whose numeric tail may be OCR-folded (O→0, I/L→1) during normalisation.
+_FOLD_PREFIXES = r"(ALM|ERR|SAFE|SV|SP|OT|PS|SR|IO|OH|DS|EX|PW|SW|MC|BG|OI)"
+_OCR_DIGITS = str.maketrans({"O": "0", "I": "1", "L": "1"})
+
+
+def _digits_ok(s: str) -> bool:
+    return sum(ch.isdigit() for ch in s) >= 2
 
 
 def normalize_fault_code(code: str) -> str:
-    """'Alarm 108' → 'ALM108', 'SV 0401' → 'SV0401', 'safe-003' → 'SAFE003'."""
+    """'Alarm 108' → 'ALM108', 'SV 0401' → 'SV0401', 'safe-003' → 'SAFE003', OCR 'SVO401' → 'SV0401'."""
     c = re.sub(r"[^A-Za-z0-9]", "", code or "").upper()
-    c = re.sub(r"^(ALARM|AL)(?=\d)", "ALM", c)
+    c = re.sub(r"^(ALARM|AL)(?=[0-9OIL]{2})", "ALM", c)
     c = re.sub(r"^ERROR(?=\d)", "ERR", c)
+    m = re.match("^" + _FOLD_PREFIXES + r"([0-9OIL]+)$", c)
+    if m and _digits_ok(m.group(2)):
+        c = m.group(1) + m.group(2).translate(_OCR_DIGITS)
     return c
 
 
@@ -51,7 +70,11 @@ def extract_fault_codes(text: str) -> List[str]:
             elif i == 2:
                 code = "ERR" + m.group(1)
             else:
-                code = m.group(1) + m.group(2)
+                if i == 4 and m.group(1) in _NOT_FAULT_PREFIXES:
+                    continue
+                code = m.group(1) + (m.group(2).translate(_OCR_DIGITS) if i == 4 else m.group(2))
+            if not _digits_ok(code):
+                continue
             code = normalize_fault_code(code)
             if code not in found:
                 found.append(code)
@@ -70,6 +93,30 @@ _PN_LABELLED = re.compile(
 _PN_HAAS = re.compile(r"\b(\d{2}-\d{4,5}[A-Z]?)\b")      # e.g. 93-1000, 30-12345A
 
 
+# Unlabelled vendor/stock codes with two or more hyphenated segments and at least one
+# digit: "HSK-A63-SP-0042", "CBL-FB-X-0412", "NSK-7014CTYNSULP4" (one mixed segment).
+_PN_SEGMENTED = re.compile(r"(?<![A-Za-z0-9\-])([A-Z]{2,5}(?:-[A-Z0-9.]{1,20}){1,4})(?![A-Za-z0-9\-])")
+_NOT_PART_PREFIXES = {"CNC", "WO", "PM", "OP", "SOP", "CASE", "MEK", "RES", "PB", "SAFE", "ISO"}
+
+
+def part_key(pn: str) -> str:
+    """Comparison key for part numbers: separators dropped, OCR look-alikes folded (O→0, I/L→1)."""
+    return re.sub(r"[^A-Z0-9]", "", (pn or "").upper()).translate(_OCR_DIGITS)
+
+
+def _segmented_part(tok: str) -> bool:
+    segs = tok.split("-")
+    if segs[0] in _NOT_PART_PREFIXES or not any(ch.isdigit() for ch in tok):
+        return False
+    if len(segs) >= 3:
+        return True
+    # PREFIX-SEG: only when the segment mixes letters and digits (ATC-2031 is a fault code).
+    tail = segs[1]
+    if tail.upper().translate(_OCR_DIGITS).isdigit():
+        return False                                   # "ATC-2O31" is an OCR-damaged fault code
+    return any(ch.isdigit() for ch in tail) and any(ch.isalpha() for ch in tail) and len(tail) >= 4
+
+
 def extract_part_numbers(text: str) -> List[str]:
     out: List[str] = []
     for m in _PN_LABELLED.finditer(text):
@@ -79,6 +126,12 @@ def extract_part_numbers(text: str) -> List[str]:
     for m in _PN_HAAS.finditer(text):
         pn = m.group(1).upper()
         if pn not in out:
+            out.append(pn)
+    keys = {part_key(p) for p in out}
+    for m in _PN_SEGMENTED.finditer(text):
+        pn = m.group(1).rstrip(".")
+        if _segmented_part(pn) and part_key(pn) not in keys:
+            keys.add(part_key(pn))
             out.append(pn)
     return out
 

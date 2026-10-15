@@ -1,0 +1,104 @@
+{
+  "_meta": {
+    "synthetic": true,
+    "note": "Fictional maintenance roster for PT Karawang Precision Manufacturing demo."
+  },
+  "mechanics": [
+    {
+      "id": "MEK-001",
+      "name": "Hendra Wijaya",
+      "role": "Senior Mekanik Spindel",
+      "skills": [
+        "SPINDLE",
+        "TOOLING"
+      ],
+      "models": [
+        "Haas VF-2",
+        "Mazak Variaxis i-500"
+      ],
+      "shift": "07:00-15:00",
+      "whatsapp": "+62-812-5550-0101"
+    },
+    {
+      "id": "MEK-002",
+      "name": "Dedi Kurniawan",
+      "role": "Teknisi Kelistrikan & Kontrol",
+      "skills": [
+        "ELECTRICAL",
+        "SERVO",
+        "CONTROLLER"
+      ],
+      "models": [
+        "Fanuc Robodrill α-D21MiA",
+        "Haas VF-2",
+        "DMG MORI NLX 2500"
+      ],
+      "shift": "07:00-15:00",
+      "whatsapp": "+62-812-5550-0102"
+    },
+    {
+      "id": "MEK-003",
+      "name": "Yusuf Maulana",
+      "role": "Teknisi Pendingin & Hidrolik",
+      "skills": [
+        "COOLANT",
+        "HYDRAULIC",
+        "LUBRICATION"
+      ],
+      "models": [
+        "Haas VF-2",
+        "DMG MORI NLX 2500"
+      ],
+      "shift": "15:00-23:00",
+      "whatsapp": "+62-812-5550-0103"
+    },
+    {
+      "id": "MEK-004",
+      "name": "Agung Prasetyo",
+      "role": "Mekanik ATC & Perkakas",
+      "skills": [
+        "ATC",
+        "TOOLING",
+        "SPINDLE"
+      ],
+      "models": [
+        "Fanuc Robodrill α-D21MiA",
+        "Mazak Variaxis i-500"
+      ],
+      "shift": "07:00-15:00",
+      "whatsapp": "+62-812-5550-0104"
+    },
+    {
+      "id": "MEK-005",
+      "name": "Siti Rahmawati",
+      "role": "Planner Perawatan Preventif",
+      "skills": [
+        "LUBRICATION",
+        "COOLANT",
+        "ELECTRICAL"
+      ],
+      "models": [
+        "Haas VF-2",
+        "Fanuc Robodrill α-D21MiA",
+        "Mazak Variaxis i-500",
+        "DMG MORI NLX 2500"
+      ],
+      "shift": "07:00-15:00",
+      "whatsapp": "+62-812-5550-0105"
+    },
+    {
+      "id": "MEK-006",
+      "name": "Rudi Hartono",
+      "role": "Teknisi Spindel & Drive Haas",
+      "skills": [
+        "SPINDLE",
+        "ELECTRICAL"
+      ],
+      "models": [
+        "Haas VF-2"
+      ],
+      "shift": "07:00-15:00",
+      "whatsapp": "+62-812-5550-0106"
+    }
+  ]
+}

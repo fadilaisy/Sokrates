@@ -35,13 +35,13 @@ import traceback
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 # ── Load .env before everything else ─────────────────────────────────────────
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -61,6 +61,11 @@ from rag.api import router as rag_router
 from rag.retrieve import Retriever
 from rag.generate import sanitize as rag_sanitize
 from backend.metrics import compute_metrics, events_for_approval
+from knowledge.maintenance_ledger import MaintenanceLedger
+from knowledge.case_index import case_id_for_doc
+from knowledge.proactive_agent import ProactiveAgent
+from rag.store import get_store
+from rag.generate import answer_from_retrieval
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Google Gemini configuration (REST API, no SDK dependency)
@@ -97,6 +102,10 @@ _ledger    = AuditLedger()
 _solver    = ScheduleSolver()
 _skills    = SkillRegistry()
 _skills.index()
+
+# Maintenance case ledger (hash-chained, seeded with synthetic cases on first start).
+# Resolved cases are indexed into the RAG store at startup for similar-case search.
+_maint_ledger = MaintenanceLedger(os.getenv("MAINTENANCE_LEDGER_PATH") or None)
 
 # Log startup skill load once so the ledger shows what the solver runs on.
 try:
@@ -1333,6 +1342,22 @@ async def ws_telemetry(websocket: WebSocket) -> None:
                 "timestamp":      datetime.now(timezone.utc).isoformat(),
             })
 
+            # Proactive flow: abnormal telemetry → ledger entry → similar cases → playbook → mechanic.
+            if severity != "OK":
+                res = await _telemetry_to_playbook(machine_id, metric, value, severity, rule_triggered)
+                if res is not None:
+                    fl = res["flow"]
+                    await websocket.send_json({
+                        "event": "maintenance_playbook",
+                        "machine_id": machine_id,
+                        "entry_id": res["entry"]["id"],
+                        "mechanic": fl["mechanic"],
+                        "message": fl["message"],
+                        "confidence": fl["playbook"]["confidence"],
+                        "supporting_cases": fl["playbook"]["supporting_cases"],
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+
             # Extra safety alert for CRITICAL conditions
             if severity == "CRITICAL":
                 await websocket.send_json({
@@ -1411,6 +1436,192 @@ def _classify_telemetry(metric: str, value: float) -> tuple[str, str | None]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Proactive maintenance — new ledger entry → similar cases → playbook → mechanic
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def _agent_llm(prompt: str) -> str:
+    return await _call_gemini(prompt, max_tokens=300)
+
+
+_agent = ProactiveAgent(_maint_ledger, llm=_agent_llm)
+
+
+@app.on_event("startup")
+async def _index_maintenance_cases() -> None:
+    try:
+        counts = await run_in_threadpool(_agent.sync)
+        print(f"[maintenance] cases in RAG index: {counts}")
+    except Exception as exc:  # the cockpit must start even if indexing fails
+        print(f"[maintenance] case indexing skipped: {exc}", file=sys.stderr)
+
+
+class MaintenanceEntryRequest(BaseModel):
+    machine_id: str
+    symptom: str = Field(min_length=3)
+    text: Optional[str] = None
+    reported_by: Optional[str] = None
+    error_codes: list[str] = Field(default_factory=list)
+    part_codes: list[str] = Field(default_factory=list)
+    category: Optional[str] = None
+    severity: Optional[str] = None
+    language: Optional[str] = None
+    source: Optional[str] = None
+
+
+class MaintenanceResolveRequest(BaseModel):
+    root_cause: str = Field(min_length=3)
+    fix_steps: list[str] = Field(min_length=1)
+    part_codes: list[str] = Field(default_factory=list)
+    downtime_hours: Optional[float] = None
+    mechanic_id: Optional[str] = None
+    outcome: str = "RESOLVED"
+    safety_notes: Optional[str] = None
+
+
+class MaintenanceChatRequest(BaseModel):
+    question: str = Field(min_length=2)
+    machine_id: Optional[str] = None
+
+
+def _case_view(case: dict[str, Any]) -> dict[str, Any]:
+    """Case plus the ledger proof a reviewer needs to verify it."""
+    return {**case, "ledger_hash": case.get("sha256_hash")}
+
+
+@app.post("/api/maintenance/entries", summary="New maintenance entry → proactive flow")
+async def post_maintenance_entry(body: MaintenanceEntryRequest) -> dict[str, Any]:
+    """
+    Writes a CASE to the hash-chained maintenance ledger, then runs the proactive flow:
+    similar-case search (RAG, maintenance_log docs) → repair playbook → message to the
+    relevant mechanic. Every playbook step cites the ledger entries it came from.
+    """
+    return await _agent.handle_new_entry(body.model_dump())
+
+
+@app.get("/api/maintenance/entries", summary="List maintenance cases")
+async def get_maintenance_entries(
+    machine_id: str = "", category: str = "", status_: str = Query("", alias="status"),
+    language: str = "", limit: int = 200,
+) -> list[dict[str, Any]]:
+    rows = _maint_ledger.cases()
+    for key, want in (("machine_id", machine_id), ("category", category),
+                      ("status", status_), ("language", language)):
+        if want:
+            rows = [c for c in rows if str(c.get(key, "")).lower() == want.lower()]
+    rows.sort(key=lambda c: c.get("logged_at", ""), reverse=True)
+    return [_case_view(c) for c in rows[:limit]]
+
+
+@app.get("/api/maintenance/entries/{entry_id}", summary="One ledger entry (citation target)")
+async def get_maintenance_entry(entry_id: str) -> dict[str, Any]:
+    entry = _maint_ledger.get_case(entry_id) or _maint_ledger.get_entry(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Ledger entry {entry_id} not found")
+    return _case_view(entry)
+
+
+@app.post("/api/maintenance/entries/{entry_id}/resolve", summary="Close a case and index it for search")
+async def post_maintenance_resolve(entry_id: str, body: MaintenanceResolveRequest) -> dict[str, Any]:
+    case = _maint_ledger.get_case(entry_id)
+    if case is None:
+        raise HTTPException(status_code=404, detail=f"Case {entry_id} not found")
+    if case.get("status") == "RESOLVED":
+        raise HTTPException(status_code=409, detail=f"Case {entry_id} is already resolved")
+    out = await _agent.resolve(entry_id, body.model_dump())
+    out["case"] = _case_view(out["case"])
+    return out
+
+
+@app.get("/api/maintenance/search", summary="Similar-case search (RAG: BM25 + exact codes + metadata filters)")
+async def get_maintenance_search(q: str, machine_id: str = "", language: str = "",
+                                 cases_only: bool = False, top_k: int = 6) -> dict[str, Any]:
+    res = await run_in_threadpool(lambda: _agent.search(
+        q, machine_id=machine_id or None, language=language or None, cases_only=cases_only, top_k=top_k))
+    for c in res["cases"]:
+        c["case"] = _case_view(c["case"])
+    return res
+
+
+@app.get("/api/maintenance/code/{code}", summary="Exact fault-code / part-number lookup (OCR-tolerant)")
+async def get_maintenance_code(code: str) -> dict[str, Any]:
+    res = await run_in_threadpool(lambda: _agent.lookup_code(code))
+    for c in res["cases"]:
+        c["case"] = _case_view(c["case"])
+    return res
+
+
+@app.get("/api/maintenance/flows", summary="Recent playbooks sent to mechanics")
+async def get_maintenance_flows(mechanic_id: str = "", limit: int = 20) -> list[dict[str, Any]]:
+    rows = _maint_ledger.playbooks()
+    if mechanic_id:
+        rows = [r for r in rows if r.get("mechanic_id") == mechanic_id]
+    out = []
+    for r in reversed(rows[-limit:]):
+        case = _maint_ledger.get_case(r.get("case_id", ""))
+        out.append({**r, "ledger_hash": r.get("sha256_hash"), "case": _case_view(case) if case else None,
+                    "mechanic": next((m for m in _agent.mechanics if m["id"] == r.get("mechanic_id")), None)})
+    return out
+
+
+@app.post("/api/maintenance/chat", summary="Secondary chat — cited answer from cases and plant documents")
+async def post_maintenance_chat(body: MaintenanceChatRequest) -> dict[str, Any]:
+    """rag's cited answer (or abstention); citations that are ledger cases get their case id + hash."""
+    def run() -> dict[str, Any]:
+        retrieval = _agent._retrieve({"machine_id": body.machine_id}, body.question)
+        return answer_from_retrieval(body.question, retrieval)
+
+    res = await run_in_threadpool(run)
+    for src in list(res.get("citations") or []) + list(res.get("sources") or []):
+        doc = get_store().get_document(src.get("doc_id") or "")
+        cid = case_id_for_doc(doc)
+        if cid:
+            case = _maint_ledger.get_case(cid) or {}
+            src["case_id"], src["ledger_hash"] = cid, case.get("sha256_hash")
+    return res
+
+
+@app.get("/api/maintenance/ledger/verify", summary="Verify maintenance ledger hash chain")
+async def get_maintenance_verify() -> dict[str, Any]:
+    return _maint_ledger.verify()
+
+
+_TELEMETRY_PHRASES = {
+    "motor_temp_celsius": "spindle motor temperature overheat suhu motor tinggi",
+    "spindle_vibration_mm_per_s": "spindle vibration getaran spindel bearing noise",
+    "coolant_pressure_bar": "coolant pressure low tekanan coolant rendah",
+    "concurrent_axis_faults": "servo axis fault multiple axes alarm",
+}
+_TELEMETRY_DEBOUNCE_S = 300
+_telemetry_last: dict[tuple[str, str], float] = {}
+
+
+async def _telemetry_to_playbook(
+    machine_id: str, metric: str, value: float, severity: str, rule: str | None
+) -> dict[str, Any] | None:
+    """Abnormal telemetry becomes a ledger entry and runs the flow (debounced per machine+metric)."""
+    key = (machine_id, metric)
+    now = time.monotonic()
+    if now - _telemetry_last.get(key, -1e9) < _TELEMETRY_DEBOUNCE_S:
+        return None
+    if not any(w.get("id") == machine_id for w in _sap.get_state().get("work_centers", [])):
+        return None
+    _telemetry_last[key] = now
+    phrase = _TELEMETRY_PHRASES.get(metric, metric.replace("_", " "))
+    try:
+        # Template message only: keeps the Gemini free-tier quota for the operator-facing analysis.
+        return await _agent.handle_new_entry({
+            "machine_id": machine_id,
+            "symptom": f"{severity}: {metric} = {value}" + (f" ({rule})" if rule else "") + f" — {phrase}",
+            "reported_by": "telemetry-hook", "source": "telemetry", "language": "en",
+            "severity": "CRITICAL" if severity == "CRITICAL" else "WARNING",
+        }, use_llm=False)
+    except Exception as exc:  # never let the flow break the telemetry socket
+        print(f"[maintenance] proactive flow failed: {exc}", file=sys.stderr)
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Health check
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1423,6 +1634,7 @@ async def health() -> dict[str, str]:
         "gemini_configured":  "yes" if GEMINI_API_KEY else "no — set GEMINI_API_KEY in .env",
         "sap_version":        str(_sap.get_version()),
         "ledger_entries":     str(len(_ledger.get_all())),
+        "maintenance_cases":  str(len(_maint_ledger.cases())),
     }
 
 
