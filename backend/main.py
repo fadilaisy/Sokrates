@@ -2,7 +2,8 @@
 backend/main.py
 ───────────────
 SkillForge FastAPI backend — Agentic AI Supervisor for Indonesian Manufacturers.
-AI model: Gemini 3.5 Flash (Google) via the REST API.
+AI model: GPT-5.4 on SAP AI Core when configured (rag/aicore.py), with
+Gemini 3.5 Flash (Google) via the REST API as the backup.
 
 Endpoints
 ---------
@@ -27,6 +28,7 @@ Docs:   http://localhost:8000/docs
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -60,6 +62,7 @@ from fastapi.concurrency import run_in_threadpool
 from rag.api import router as rag_router
 from rag.retrieve import Retriever
 from rag.generate import sanitize as rag_sanitize
+from rag import aicore
 from backend.metrics import compute_metrics, events_for_approval
 from knowledge.maintenance_ledger import MaintenanceLedger
 from knowledge.case_index import case_id_for_doc
@@ -310,15 +313,25 @@ async def _call_gemini(prompt: str, max_tokens: int = 512) -> str:
     Identical prompts are served from a short-lived cache, and calls are
     capped at GEMINI_RPM per minute so the free-tier quota isn't exhausted.
     """
+    cache_key = (prompt, max_tokens)
+    hit = _gemini_cache.get(cache_key)
+    if hit and time.monotonic() - hit[0] < GEMINI_CACHE_TTL:
+        return hit[1]
+    # SAP AI Core (GPT-5.4) is the main model when its credentials are in .env;
+    # Gemini below is the backup if AI Core is missing or fails.
+    if aicore.configured():
+        try:
+            # GPT-5.x counts hidden reasoning against the limit, so give it headroom.
+            text = await asyncio.to_thread(aicore.ask, prompt, max_tokens=max(max_tokens, 2048))
+            _gemini_cache[cache_key] = (time.monotonic(), text)
+            return text
+        except aicore.AICoreError as exc:
+            print(f"[aicore] {exc} — falling back to Gemini", file=sys.stderr)
     if _gemini_client is None:
         return (
             "[Gemini tidak dikonfigurasi — tambahkan GEMINI_API_KEY ke file .env] "
             "Tinjau skenario solver di atas dan pilih yang sesuai secara manual."
         )
-    cache_key = (prompt, max_tokens)
-    hit = _gemini_cache.get(cache_key)
-    if hit and time.monotonic() - hit[0] < GEMINI_CACHE_TTL:
-        return hit[1]
     if not _gemini_budget_ok():
         return (
             "[Gemini: batas permintaan per menit tercapai, coba lagi sebentar lagi] "
@@ -845,8 +858,8 @@ async def post_skills_draft(body: SkillDraftRequest) -> SkillDraftResponse:
             validation_errors=validation_errors,
         )
 
-    # Fallback template if Gemini not configured
-    if _gemini_client is None:
+    # Fallback template if no LLM is configured
+    if _gemini_client is None and not aicore.configured():
         return SkillDraftResponse(
             skill_md=_create_fallback_skill_md(
                 body.machine_type,
@@ -1630,7 +1643,8 @@ async def _telemetry_to_playbook(
 async def health() -> dict[str, str]:
     return {
         "status":             "ok",
-        "ai_model":           GEMINI_MODEL,
+        "ai_model":           aicore.model_label() if aicore.configured() else GEMINI_MODEL,
+        "aicore_configured":  "yes" if aicore.configured() else "no — set AICORE_* and AI_API_URL in .env",
         "gemini_configured":  "yes" if GEMINI_API_KEY else "no — set GEMINI_API_KEY in .env",
         "sap_version":        str(_sap.get_version()),
         "ledger_entries":     str(len(_ledger.get_all())),
