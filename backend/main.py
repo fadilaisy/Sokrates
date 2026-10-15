@@ -30,7 +30,9 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import traceback
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -271,17 +273,47 @@ class SkillApproveResponse(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# Client-side guard for the Gemini free tier (5 requests/min, 20/day on the
+# free plan). Stay under GEMINI_RPM so we don't burn quota on calls Google will
+# reject anyway, and reuse identical answers for a short time.
+GEMINI_RPM       = int(os.getenv("GEMINI_RPM", "4"))
+GEMINI_CACHE_TTL = float(os.getenv("GEMINI_CACHE_TTL", "300"))
+_gemini_calls: deque[float] = deque()                    # monotonic timestamps, last 60s
+_gemini_cache: dict[tuple[str, int], tuple[float, str]] = {}
+
+
+def _gemini_budget_ok() -> bool:
+    now = time.monotonic()
+    while _gemini_calls and now - _gemini_calls[0] > 60:
+        _gemini_calls.popleft()
+    if len(_gemini_calls) >= GEMINI_RPM:
+        return False
+    _gemini_calls.append(now)
+    return True
+
+
 async def _call_gemini(prompt: str, max_tokens: int = 512) -> str:
     """
     Call Gemini 3.5 Flash via the Google REST API with async httpx.
 
     Returns a graceful fallback string when the API key is not configured
     or an error occurs — the app stays functional without AI summaries.
+    Identical prompts are served from a short-lived cache, and calls are
+    capped at GEMINI_RPM per minute so the free-tier quota isn't exhausted.
     """
     if _gemini_client is None:
         return (
             "[Gemini tidak dikonfigurasi — tambahkan GEMINI_API_KEY ke file .env] "
             "Tinjau skenario solver di atas dan pilih yang sesuai secara manual."
+        )
+    cache_key = (prompt, max_tokens)
+    hit = _gemini_cache.get(cache_key)
+    if hit and time.monotonic() - hit[0] < GEMINI_CACHE_TTL:
+        return hit[1]
+    if not _gemini_budget_ok():
+        return (
+            "[Gemini: batas permintaan per menit tercapai, coba lagi sebentar lagi] "
+            "Silakan tinjau skenario solver secara manual."
         )
     payload = {
         "contents": [{
@@ -306,7 +338,10 @@ async def _call_gemini(prompt: str, max_tokens: int = 512) -> str:
         if candidates and "content" in candidates[0]:
             parts = candidates[0]["content"].get("parts", [])
             if parts:
-                return parts[0].get("text", "").strip()
+                text = parts[0].get("text", "").strip()
+                if text:
+                    _gemini_cache[cache_key] = (time.monotonic(), text)
+                return text
         return "[Gemini: No content in response] Silakan tinjau skenario solver secara manual."
     except Exception as exc:
         return f"[Gemini error: {_safe_gemini_error(exc)}] Silakan tinjau skenario solver secara manual."
@@ -1281,7 +1316,11 @@ async def ws_telemetry(websocket: WebSocket) -> None:
                   "Jawab HANYA analisisnya, tanpa kata pengantar."
             )
 
-            analysis = await _call_gemini(analysis_prompt, max_tokens=150)
+            if severity == "OK":
+                # Normal readings don't need an LLM — save quota for real alerts.
+                analysis = f"{machine_id}: {metric} = {value} dalam batas normal."
+            else:
+                analysis = await _call_gemini(analysis_prompt, max_tokens=150)
 
             await websocket.send_json({
                 "event":          "telemetry_analysis",
