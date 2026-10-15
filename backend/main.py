@@ -43,6 +43,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import httpx
@@ -1636,6 +1637,15 @@ async def health() -> dict[str, str]:
         "ledger_entries":     str(len(_ledger.get_all())),
         "maintenance_cases":  str(len(_maint_ledger.cases())),
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Built frontend (Railway / Docker image). Mounted last so every API route wins.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if _FRONTEND_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=_FRONTEND_DIST, html=True), name="frontend")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

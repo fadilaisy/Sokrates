@@ -1,5 +1,10 @@
+// Empty VITE_API_BASE (the Railway build, see frontend/.env.railway) means the
+// backend serves this page, so API calls go to the same origin.
 export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "http://localhost:8000";
-export const WS_TELEMETRY = API_BASE.replace(/^http/, "ws") + "/ws/telemetry";
+export const WS_TELEMETRY =
+  (API_BASE
+    ? API_BASE.replace(/^http/, "ws")
+    : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`) + "/ws/telemetry";
 
 /** Error with the HTTP status and parsed body, so callers can react to 409 drift etc. */
 export class ApiError extends Error {
