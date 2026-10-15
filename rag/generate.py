@@ -209,7 +209,7 @@ def answer_from_retrieval(query: str, retrieval: Dict[str, Any], *, store: Optio
 
     if not available_providers():
         return {**base, "status": "llm_unavailable",
-                "message": "LLM belum dikonfigurasi (GEMINI_API_KEY / ANTHROPIC_API_KEY). "
+                "message": "LLM belum dikonfigurasi (AICORE_* / GEMINI_API_KEY / ANTHROPIC_API_KEY). "
                            "Menampilkan passage sumber teratas tanpa ringkasan.",
                 "answer": None, "claims": [], "rejected_claims": [],
                 "sources": [_public_source(p) for p in packed], "injection_flags": injection,

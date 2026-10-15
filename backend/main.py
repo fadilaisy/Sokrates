@@ -63,6 +63,7 @@ from rag.api import router as rag_router
 from rag.retrieve import Retriever
 from rag.generate import sanitize as rag_sanitize
 from rag import aicore
+from rag.llm import gemini_error, gemini_generation_config, gemini_text
 from backend.metrics import compute_metrics, events_for_approval
 from knowledge.maintenance_ledger import MaintenanceLedger
 from knowledge.case_index import case_id_for_doc
@@ -82,14 +83,13 @@ GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMI
 
 
 def _safe_gemini_error(exc: Exception) -> str:
-    """Short error text for the UI. Never includes the URL or the API key."""
-    if isinstance(exc, httpx.HTTPStatusError):
-        code = exc.response.status_code
-        if code == 429:
-            return "HTTP 429: kuota Gemini terlampaui, coba lagi nanti"
-        return f"HTTP {code}"
-    msg = f"{type(exc).__name__}"
-    return msg.replace(GEMINI_API_KEY, "***") if GEMINI_API_KEY else msg
+    """Short error text for the UI: HTTP code + Google's reason. Never the URL or key."""
+    return gemini_error(exc)
+
+
+def _active_model() -> str:
+    """Model that answers _call_gemini first (AI Core when configured, else Gemini)."""
+    return aicore.model_label() if aicore.configured() else GEMINI_MODEL
 
 # Async HTTP client for Gemini API
 _gemini_client: httpx.AsyncClient | None = (
@@ -290,21 +290,25 @@ class SkillApproveResponse(BaseModel):
 # reject anyway, and reuse identical answers for a short time.
 GEMINI_RPM       = int(os.getenv("GEMINI_RPM", "4"))
 GEMINI_CACHE_TTL = float(os.getenv("GEMINI_CACHE_TTL", "300"))
+# Calls per minute kept free for interactive requests (chat, skills, disrupt),
+# so background telemetry/agent calls can't use up the whole budget.
+GEMINI_INTERACTIVE_RESERVE = int(os.getenv("GEMINI_INTERACTIVE_RESERVE", "2"))
 _gemini_calls: deque[float] = deque()                    # monotonic timestamps, last 60s
 _gemini_cache: dict[tuple[str, int], tuple[float, str]] = {}
 
 
-def _gemini_budget_ok() -> bool:
+def _gemini_budget_ok(interactive: bool = True) -> bool:
     now = time.monotonic()
     while _gemini_calls and now - _gemini_calls[0] > 60:
         _gemini_calls.popleft()
-    if len(_gemini_calls) >= GEMINI_RPM:
+    limit = GEMINI_RPM if interactive else max(GEMINI_RPM - GEMINI_INTERACTIVE_RESERVE, 0)
+    if len(_gemini_calls) >= limit:
         return False
     _gemini_calls.append(now)
     return True
 
 
-async def _call_gemini(prompt: str, max_tokens: int = 512) -> str:
+async def _call_gemini(prompt: str, max_tokens: int = 512, *, interactive: bool = True) -> str:
     """
     Call Gemini 3.5 Flash via the Google REST API with async httpx.
 
@@ -332,7 +336,7 @@ async def _call_gemini(prompt: str, max_tokens: int = 512) -> str:
             "[Gemini tidak dikonfigurasi — tambahkan GEMINI_API_KEY ke file .env] "
             "Tinjau skenario solver di atas dan pilih yang sesuai secara manual."
         )
-    if not _gemini_budget_ok():
+    if not _gemini_budget_ok(interactive):
         return (
             "[Gemini: batas permintaan per menit tercapai, coba lagi sebentar lagi] "
             "Silakan tinjau skenario solver secara manual."
@@ -341,9 +345,7 @@ async def _call_gemini(prompt: str, max_tokens: int = 512) -> str:
         "contents": [{
             "parts": [{"text": prompt}]
         }],
-        "generationConfig": {
-            "maxOutputTokens": max_tokens,
-        }
+        "generationConfig": gemini_generation_config(max_tokens, GEMINI_MODEL),
     }
 
     try:
@@ -354,19 +356,17 @@ async def _call_gemini(prompt: str, max_tokens: int = 512) -> str:
                      "x-goog-api-key": GEMINI_API_KEY},
         )
         response.raise_for_status()
-        result = response.json()
-        # Extract text from Gemini response
-        candidates = result.get("candidates", [])
-        if candidates and "content" in candidates[0]:
-            parts = candidates[0]["content"].get("parts", [])
-            if parts:
-                text = parts[0].get("text", "").strip()
-                if text:
-                    _gemini_cache[cache_key] = (time.monotonic(), text)
-                return text
-        return "[Gemini: No content in response] Silakan tinjau skenario solver secara manual."
+        text, finish = gemini_text(response.json())
+        if text:
+            _gemini_cache[cache_key] = (time.monotonic(), text)
+            return text
+        print(f"[gemini] empty reply (finishReason={finish})", file=sys.stderr)
+        return (f"[Gemini: tidak ada teks dalam respons (finishReason={finish})] "
+                "Silakan tinjau skenario solver secara manual.")
     except Exception as exc:
-        return f"[Gemini error: {_safe_gemini_error(exc)}] Silakan tinjau skenario solver secara manual."
+        err = _safe_gemini_error(exc)
+        print(f"[gemini] {err}", file=sys.stderr)
+        return f"[Gemini error: {err}] Silakan tinjau skenario solver secara manual."
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -713,7 +713,7 @@ async def post_skills_generate(body: SkillGenerateRequest) -> SkillGenerateRespo
         "Output ONLY the raw markdown, starting with # SKILL.md."
     )
     skill_md = await _call_gemini(prompt, max_tokens=2048)
-    return SkillGenerateResponse(skill_md=skill_md, model_used=GEMINI_MODEL)
+    return SkillGenerateResponse(skill_md=skill_md, model_used=_active_model())
 
 
 def _hhmm(ts: Any) -> str:
@@ -783,7 +783,7 @@ async def post_chat(body: ChatRequest) -> ChatResponse:
     # Gemini 3.x thinking tokens count against maxOutputTokens; 300 cut replies
     # mid-sentence ("...dalam status"). 1024 leaves room for a 3-sentence answer.
     reply = await _call_gemini(prompt, max_tokens=1024)
-    return ChatResponse(reply=reply, model_used=GEMINI_MODEL)
+    return ChatResponse(reply=reply, model_used=_active_model())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1342,7 +1342,7 @@ async def ws_telemetry(websocket: WebSocket) -> None:
                 # Normal readings don't need an LLM — save quota for real alerts.
                 analysis = f"{machine_id}: {metric} = {value} dalam batas normal."
             else:
-                analysis = await _call_gemini(analysis_prompt, max_tokens=150)
+                analysis = await _call_gemini(analysis_prompt, max_tokens=150, interactive=False)
 
             await websocket.send_json({
                 "event":          "telemetry_analysis",
@@ -1454,7 +1454,7 @@ def _classify_telemetry(metric: str, value: float) -> tuple[str, str | None]:
 
 
 async def _agent_llm(prompt: str) -> str:
-    return await _call_gemini(prompt, max_tokens=300)
+    return await _call_gemini(prompt, max_tokens=300, interactive=False)
 
 
 _agent = ProactiveAgent(_maint_ledger, llm=_agent_llm)

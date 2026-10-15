@@ -71,9 +71,50 @@ def _call_aicore(system: str, user: str, max_tokens: int, json_mode: bool, timeo
         return LLMResult(False, provider="aicore", model=model, error=str(exc)[:400])
 
 
+# Gemini 2.5+/3.x are thinking models: hidden reasoning counts against
+# maxOutputTokens, so a small limit can end with MAX_TOKENS and no text at all.
+GEMINI_MIN_OUTPUT_TOKENS = 2048
+
+
+def gemini_generation_config(max_tokens: int, model: str) -> dict:
+    """generationConfig with room for thinking, and low thinking on Gemini 3.x."""
+    cfg: dict = {"maxOutputTokens": max(max_tokens, GEMINI_MIN_OUTPUT_TOKENS)}
+    level = config.gemini_thinking_level()
+    if level and model.startswith("gemini-3"):
+        cfg["thinkingConfig"] = {"thinkingLevel": level}
+    return cfg
+
+
+def gemini_text(body: dict) -> Tuple[str, Optional[str]]:
+    """(text of all non-thought parts, finishReason) from a generateContent reply."""
+    cand = (body.get("candidates") or [{}])[0]
+    parts = (cand.get("content") or {}).get("parts") or []
+    text = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+    return text, cand.get("finishReason")
+
+
+def gemini_error(exc: Exception) -> str:
+    """Short, key-free error: HTTP code plus Google's status/reason/message."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        try:
+            err = exc.response.json().get("error") or {}
+            reason = next((d.get("reason") for d in err.get("details") or [] if d.get("reason")), None)
+            detail = " ".join(x for x in (err.get("status"), reason, (err.get("message") or "")[:200]) if x)
+        except Exception:
+            detail = exc.response.text[:200]
+        if code == 429:
+            detail = f"kuota Gemini terlampaui, coba lagi nanti ({detail})"
+        msg = f"HTTP {code}: {detail}" if detail else f"HTTP {code}"
+    else:
+        msg = f"{type(exc).__name__}: {exc}"[:300]
+    key = config.gemini_key()
+    return msg.replace(key, "***") if key else msg
+
+
 def _call_gemini(system: str, user: str, max_tokens: int, json_mode: bool, timeout: float) -> LLMResult:
     model = config.gemini_model()
-    gen_cfg: dict = {"maxOutputTokens": max_tokens, "temperature": 0.1}
+    gen_cfg: dict = {**gemini_generation_config(max_tokens, model), "temperature": 0.1}
     if json_mode:
         gen_cfg["responseMimeType"] = "application/json"
     payload = {
@@ -86,14 +127,13 @@ def _call_gemini(system: str, user: str, max_tokens: int, json_mode: bool, timeo
                        headers={"x-goog-api-key": config.gemini_key() or "",
                                 "Content-Type": "application/json"})
         r.raise_for_status()
-        body = r.json()
-        parts = (body.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
-        text = "".join(p.get("text", "") for p in parts).strip()
+        text, finish = gemini_text(r.json())
         if not text:
-            return LLMResult(False, provider="gemini", model=model, error="empty response")
+            return LLMResult(False, provider="gemini", model=model,
+                             error=f"empty response (finishReason={finish})")
         return LLMResult(True, text=text, provider="gemini", model=model)
     except Exception as exc:
-        return LLMResult(False, provider="gemini", model=model, error=_err(exc))
+        return LLMResult(False, provider="gemini", model=model, error=gemini_error(exc))
 
 
 def _call_claude(system: str, user: str, max_tokens: int, json_mode: bool, timeout: float) -> LLMResult:
