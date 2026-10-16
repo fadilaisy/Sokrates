@@ -18,10 +18,11 @@ import pytest
 
 _TMP = tempfile.mkdtemp(prefix="rag_test_")
 os.environ["RAG_DATA_DIR"] = _TMP
-os.environ.pop("GEMINI_API_KEY", None)
-os.environ.pop("ANTHROPIC_API_KEY", None)
-for _k in ("AICORE_AUTH_URL", "AICORE_CLIENT_ID", "AICORE_CLIENT_SECRET", "AI_API_URL"):
-    os.environ.pop(_k, None)
+# Set to "" rather than pop: backend.main's load_dotenv() never overrides an
+# existing variable, but would re-add a popped one from .env and go online.
+for _k in ("GEMINI_API_KEY", "ANTHROPIC_API_KEY",
+           "AICORE_AUTH_URL", "AICORE_CLIENT_ID", "AICORE_CLIENT_SECRET", "AI_API_URL"):
+    os.environ[_k] = ""
 
 from rag import generate, metadata, samples  # noqa: E402
 from rag.config import ScoringConfig  # noqa: E402

@@ -117,6 +117,11 @@ def gemini_model() -> str:
     return os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 
 
+def gemini_thinking_level() -> str:
+    """Gemini 3.x thinkingLevel ("low" keeps short answers fast); empty = model default."""
+    return os.getenv("GEMINI_THINKING_LEVEL", "low").strip()
+
+
 def claude_model() -> str:
     return os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")
 
