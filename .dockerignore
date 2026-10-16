@@ -1,0 +1,10 @@
+.git
+.env
+**/__pycache__
+.venv
+venv
+frontend
+rag_data
+audit_ledger.jsonl
+maintenance_ledger.jsonl
+.pytest_cache
