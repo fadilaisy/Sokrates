@@ -10,6 +10,10 @@ const MUTE_KEY = "sf-sound-muted";
 const COOLDOWN_MS = 1500;
 
 let ctx: AudioContext | null = null;
+// The disruption alarm is a recorded paging sound; the synthesised tones
+// below are only a fallback if the file can't play.
+const alarm = typeof Audio !== "undefined" ? new Audio("/sounds/disruption.mp3") : null;
+if (alarm) alarm.preload = "auto";
 let muted = readMuted();
 const lastPlayed: Record<SoundKind, number> = { disruption: 0, ledger: 0 };
 
@@ -27,6 +31,10 @@ export function isMuted(): boolean {
 
 export function setMuted(v: boolean) {
   muted = v;
+  if (v && alarm) {
+    alarm.pause();
+    alarm.currentTime = 0;
+  }
   try {
     window.localStorage.setItem(MUTE_KEY, v ? "1" : "0");
   } catch {
@@ -63,6 +71,17 @@ export function playSound(kind: SoundKind) {
   const now = Date.now();
   if (now - lastPlayed[kind] < COOLDOWN_MS) return;
   lastPlayed[kind] = now;
+  if (kind === "disruption" && alarm) {
+    // Let a page that is still sounding finish instead of restarting it.
+    if (!alarm.paused) return;
+    alarm.currentTime = 0;
+    alarm.play().catch(() => playTones(kind));
+    return;
+  }
+  playTones(kind);
+}
+
+function playTones(kind: SoundKind) {
   if (kind === "disruption") {
     // urgent two-tone alarm, played twice
     tone(880, 0, 0.18, "square", 0.15);
