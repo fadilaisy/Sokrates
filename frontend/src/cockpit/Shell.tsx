@@ -1,4 +1,4 @@
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, Volume2, VolumeX } from "lucide-react";
 import type { ReactNode } from "react";
 import SkillStudio from "../components/SkillStudio";
 import { cn } from "../lib/utils";
@@ -114,7 +114,7 @@ function MobileNav() {
 }
 
 export function Header() {
-  const { state, sapVersion, online, reset, resetting } = useCockpit();
+  const { state, sapVersion, online, reset, resetting, muted, toggleMute } = useCockpit();
   const plant = state?._meta.facility ?? "PT Karawang Precision Manufacturing";
   const shift = `Shift 1 · ${String(SHIFT_START).padStart(2, "0")}:00–${SHIFT_END}:00`;
   return (
@@ -134,6 +134,16 @@ export function Header() {
           <span className="font-bold">ID</span>
           <span className="text-muted-ink" title="Bahasa Inggris belum tersedia"> | EN</span>
         </Mono>
+        <button
+          type="button"
+          onClick={toggleMute}
+          aria-pressed={muted}
+          aria-label={muted ? "Nyalakan suara notifikasi" : "Matikan suara notifikasi"}
+          title={muted ? "Suara notifikasi mati" : "Suara notifikasi aktif"}
+          className="flex min-h-12 min-w-12 items-center justify-center rounded-lg border border-line bg-surface px-3 hover:bg-page"
+        >
+          {muted ? <VolumeX className="size-5" aria-hidden /> : <Volume2 className="size-5" aria-hidden />}
+        </button>
         <button
           type="button"
           onClick={reset}
