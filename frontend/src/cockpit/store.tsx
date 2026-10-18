@@ -204,7 +204,10 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       setSapVersion(s._meta.version);
       setLedger(l);
       setOnline(h.status === "ok");
-      setAiConfigured(String(h.gemini_configured ?? "").startsWith("yes"));
+      setAiConfigured(
+        String(h.gemini_configured ?? "").startsWith("yes") ||
+        String(h.aicore_configured ?? "").startsWith("yes"),
+      );
       setError(null);
     } catch (e) {
       setOnline(false);

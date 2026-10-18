@@ -6,7 +6,7 @@ OR-Tools CP-SAT scheduling solver for SkillForge.
 Generates exactly 3 recovery scenarios given a machine disruption:
   A — Status Quo:        Accept delays, pay SLA penalties.
   B — Lembur (Overtime): Move orders to night-shift overtime.
-  C — Rerute Optimal:    CP-SAT optimal reroute minimising total IDR cost.
+  C — Rerute Optimal:    CP-SAT optimal reroute minimising changeover + overtime IDR cost.
 """
 
 from __future__ import annotations
@@ -84,6 +84,9 @@ class ScheduleSolver:
         """
         machine_id       = disruption["machine_id"]
         disruption_hours = int(disruption["end_hour"]) - int(disruption["start_hour"])
+        # Work on the disrupted machine resumes when the outage ENDS, not after
+        # `disruption_hours` from shift start (they differ when start_hour > 0).
+        self._resume_h = int(disruption["end_hour"])
 
         # Phase 2: costs come from the skill file, read fresh every solve.
         pph, mp, ot_cost, co_cost = _load_skill_costs()
@@ -122,6 +125,10 @@ class ScheduleSolver:
     # ── Skill-driven cost accessors (fresh per solve, defaults otherwise) ──────
 
     @property
+    def _resume(self):
+        return getattr(self, "_resume_h", 0)
+
+    @property
     def _cost_pph(self):
         return getattr(self, "_pph", PENALTY_PER_HOUR)
 
@@ -140,7 +147,7 @@ class ScheduleSolver:
     def _total_penalty(self, orders, delay_hours):
         total = 0
         for o in orders:
-            cls = o.get("order_class", "C")
+            cls = o.get("order_class") if o.get("order_class") in ("A", "B", "C") else "C"
             total += min(delay_hours * self._cost_pph[cls], self._cost_mp[cls])
         return total
 
@@ -150,7 +157,7 @@ class ScheduleSolver:
         total_penalty = 0
         gantt_changes = []
         for order in affected:
-            cls     = order.get("order_class", "C")
+            cls     = order.get("order_class") if order.get("order_class") in ("A", "B", "C") else "C"
             penalty = min(disruption_hours * self._cost_pph[cls], self._cost_mp[cls])
             total_penalty += penalty
             dur = self._duration_h(order)
@@ -158,8 +165,8 @@ class ScheduleSolver:
                 "order_id":      order["id"],
                 "from_machine":  machine_id,
                 "to_machine":    machine_id,
-                "new_start_time": f"{7 + disruption_hours:02d}:00 WIB",
-                "new_end_time":   f"{min(7 + disruption_hours + int(dur), 15):02d}:00 WIB",
+                "new_start_time": f"{7 + self._resume:02d}:00 WIB",
+                "new_end_time":   f"{min(7 + self._resume + int(dur), 15):02d}:00 WIB",
                 "delay_hours":   disruption_hours,
                 "sla_penalty_idr": penalty,
             })
@@ -236,8 +243,11 @@ class ScheduleSolver:
                 "rationale_template": "Tidak ada mesin alternatif tersedia. Identik dengan Status Quo.",
             }
 
-        avail_ids = [m["id"] for m in available]
+        # Candidate machines: the disrupted machine itself (work resumes at
+        # disruption_hours and may run into overtime) plus every safe alternative.
+        avail_ids = [machine_id] + [m["id"] for m in available]
         n_o, n_m  = len(affected), len(avail_ids)
+        durations = [self._duration_h(o) for o in affected]
 
         model  = cp_model.CpModel()
         assign = [[model.NewBoolVar(f"x_{i}_{j}") for j in range(n_m)] for i in range(n_o)]
@@ -245,15 +255,31 @@ class ScheduleSolver:
         for i in range(n_o):
             model.AddExactlyOne(assign[i][j] for j in range(n_m))
 
-        remaining = max(SHIFT_END_H - disruption_hours, 0)
-        for j in range(n_m):
+        # Capacity: every machine's assigned work must fit its operating window
+        # extended by overtime. The disrupted machine resumes at disruption_hours;
+        # alternatives start at the beginning of the shift (07:00).
+        for j, target in enumerate(avail_ids):
+            window_h = (OVERTIME_END_H - self._resume) if target == machine_id else OVERTIME_END_H
+            cap_h    = max(window_h, 0)
             model.Add(
-                sum(assign[i][j] * int(self._duration_h(affected[i]) * 10) for i in range(n_o))
-                <= int(remaining * 10)
+                sum(assign[i][j] * int(durations[i] * 10) for i in range(n_o))
+                <= int(cap_h * 10)
             )
 
+        # Constant ×10 integer cost per (order i, machine j): changeover +
+        # overtime. Overtime is deterministic because start_h depends only on the
+        # machine, so the model's optimum and the reported costs agree exactly.
+        cost10: list[list[int]] = []
+        for i in range(n_o):
+            row: list[int] = []
+            for j in range(n_m):
+                _, _, co_cost, ot_cost = self._assignment_plan(
+                    durations[i], machine_id, self._resume, avail_ids[j]
+                )
+                row.append(int((co_cost + ot_cost) * 10))
+            cost10.append(row)
         cost_expr = sum(
-            assign[i][j] * (int(self._cost_co * 10) if avail_ids[j] != machine_id else 0)
+            assign[i][j] * cost10[i][j]
             for i in range(n_o) for j in range(n_m)
         )
         model.Minimize(cost_expr)
@@ -267,15 +293,9 @@ class ScheduleSolver:
             for i, order in enumerate(affected):
                 for j, mach_id in enumerate(avail_ids):
                     if solver.Value(assign[i][j]):
-                        dur     = self._duration_h(order)
-                        start_h = disruption_hours if mach_id == machine_id else 0
-                        end_h   = min(start_h + dur, SHIFT_END_H)
-                        co_cost = self._cost_co if mach_id != machine_id else 0
-                        ot_cost = 0
-                        if mach_id != machine_id or start_h >= SHIFT_END_H:
-                            # Rerouted or starts after shift - may need OT
-                            ot_hours = max(0, end_h - SHIFT_END_H)
-                            ot_cost = math.ceil(ot_hours) * self._cost_ot if ot_hours > 0 else 0
+                        start_h, end_h, co_cost, ot_cost = self._assignment_plan(
+                            durations[i], machine_id, self._resume, mach_id
+                        )
                         total_cost += co_cost + ot_cost
                         total_ot_cost += ot_cost
                         gantt_changes.append({
@@ -289,6 +309,10 @@ class ScheduleSolver:
                         })
                         break
         else:
+            # Last resort when even the overtime-extended window cannot absorb
+            # the work (with AddExactlyOne and the widened capacities this needs
+            # work larger than every candidate machine's window). No CP-SAT
+            # optimum exists, so the greedy round-robin costs are approximate.
             for i, order in enumerate(affected):
                 mach_id = avail_ids[i % n_m]
                 dur     = self._duration_h(order)
@@ -325,6 +349,20 @@ class ScheduleSolver:
         }
 
     # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _assignment_plan(self, dur_h, machine_id, disruption_hours, target_id):
+        """Deterministic (start_h, end_h, changeover, overtime) for one order on
+        one target machine.
+
+        start_h depends only on the machine: work resumes at disruption_hours on
+        the disrupted machine, while alternatives start at 07:00. Shared by the
+        CP-SAT objective table and the reporting replay so both agree exactly.
+        """
+        start_h = disruption_hours if target_id == machine_id else 0
+        end_h   = start_h + dur_h
+        ot_cost = math.ceil(max(0.0, end_h - SHIFT_END_H)) * self._cost_ot
+        co_cost = 0 if target_id == machine_id else self._cost_co
+        return start_h, end_h, co_cost, ot_cost
 
     @staticmethod
     def _duration_h(order):

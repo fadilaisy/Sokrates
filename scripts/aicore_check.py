@@ -30,7 +30,9 @@ def main() -> int:
         aicore.get_token()
         print("1/2 login ok (token received)")
         reply = aicore.ask(prompt)
-        print(f"2/2 chat ok ({aicore.model_label()}, deployment {aicore.deployment_id()}):\n")
+        target = aicore.orchestration_id() or aicore.deployment_id()
+        mode = "orchestration" if aicore.orchestration_id() else "direct"
+        print(f"2/2 chat ok ({aicore.model_label()}, {mode} deployment {target}):\n")
         print(reply)
         return 0
     except aicore.AICoreError as exc:

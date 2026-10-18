@@ -6,9 +6,14 @@ how backend/main.py already calls Gemini (no SDK dependency).
 
 Providers
 ---------
-aicore   SAP AI Core GPT-5.4 deployment (AICORE_* + AI_API_URL; see rag/aicore.py)
-gemini   Google Gemini (GEMINI_API_KEY, GEMINI_MODEL; default gemini-3.5-flash)
-claude   Anthropic Claude Haiku 4.5 (ANTHROPIC_API_KEY, CLAUDE_MODEL; default claude-haiku-4-5)
+aicore   SAP AI Core (AICORE_* + AI_API_URL; see rag/aicore.py). With orchestration
+         on (default) the model is AICORE_MODEL_NAME, default gpt-5.4.
+gemini   AI Core orchestration as AICORE_GEMINI_MODEL (default gemini-3.5-flash)
+         when orchestration is on; otherwise Google Gemini directly
+         (GEMINI_API_KEY, GEMINI_MODEL; default gemini-3.5-flash).
+claude   AI Core orchestration as AICORE_CLAUDE_MODEL (default
+         anthropic--claude-4.5-haiku) when orchestration is on; otherwise
+         Anthropic directly (ANTHROPIC_API_KEY, CLAUDE_MODEL; default claude-haiku-4-5).
 
 RAG_GEN_PROVIDER=auto (default) tries AI Core first, then Gemini, then Claude,
 skipping any that are not configured, so the demo keeps working if one key is
@@ -42,9 +47,15 @@ class LLMResult:
 
 
 def available_providers() -> List[str]:
+    """aicore → gemini → claude. With AI Core orchestration on (the default),
+    gemini/claude are served by the same tenant; with orchestration disabled
+    (AICORE_ORCHESTRATION_ID="") or AI Core unset, each needs its own vendor key."""
     out = []
     if aicore.configured():
         out.append("aicore")
+        if aicore.orchestration_id():
+            out.extend(["gemini", "claude"])
+            return out
     if config.gemini_key():
         out.append("gemini")
     if config.anthropic_key():
@@ -64,11 +75,30 @@ def _provider_order(provider: Optional[str]) -> List[str]:
 def _call_aicore(system: str, user: str, max_tokens: int, json_mode: bool, timeout: float) -> LLMResult:
     model = aicore.model_label()
     try:
-        # GPT-5.x counts hidden reasoning against max_completion_tokens, so give it headroom.
-        text = aicore.ask(user, system=system, max_tokens=max(max_tokens, 2048), timeout=timeout)
+        # GPT-5.x counts hidden reasoning against the token budget, so give it headroom.
+        text = aicore.ask(user, system=system, max_tokens=max(max_tokens, 2048), timeout=timeout,
+                          model=aicore.model_name())
         return LLMResult(True, text=text, provider="aicore", model=model)
     except Exception as exc:
         return LLMResult(False, provider="aicore", model=model, error=str(exc)[:400])
+
+
+# Orchestration exposes no response_format knob, so json_mode is prompt-steered here;
+# complete() still parses the reply with parse_json_loose (fences/chatter tolerated).
+JSON_STEER = "\n\nBalas dengan JSON saja, tanpa teks lain."
+
+
+def _call_aicore_model(provider: str, model: str, system: str, user: str, max_tokens: int,
+                       json_mode: bool, timeout: float) -> LLMResult:
+    """Run one call under a logical provider name (gemini/claude) via orchestration."""
+    if json_mode:
+        user = f"{user}{JSON_STEER}"
+    try:
+        text = aicore.ask(user, system=system, max_tokens=max(max_tokens, 2048), timeout=timeout,
+                          model=model)
+        return LLMResult(True, text=text, provider=provider, model=model)
+    except Exception as exc:
+        return LLMResult(False, provider=provider, model=model, error=str(exc)[:400])
 
 
 # Gemini 2.5+/3.x are thinking models: hidden reasoning counts against
@@ -113,6 +143,10 @@ def gemini_error(exc: Exception) -> str:
 
 
 def _call_gemini(system: str, user: str, max_tokens: int, json_mode: bool, timeout: float) -> LLMResult:
+    if aicore.configured() and aicore.orchestration_id():
+        # Same tenant call as aicore, different model_name — no vendor key needed.
+        return _call_aicore_model("gemini", config.aicore_gemini_model(), system, user,
+                                  max_tokens, json_mode, timeout)
     model = config.gemini_model()
     gen_cfg: dict = {**gemini_generation_config(max_tokens, model), "temperature": 0.1}
     if json_mode:
@@ -137,6 +171,10 @@ def _call_gemini(system: str, user: str, max_tokens: int, json_mode: bool, timeo
 
 
 def _call_claude(system: str, user: str, max_tokens: int, json_mode: bool, timeout: float) -> LLMResult:
+    if aicore.configured() and aicore.orchestration_id():
+        # Same tenant call as aicore, different model_name — no vendor key needed.
+        return _call_aicore_model("claude", config.aicore_claude_model(), system, user,
+                                  max_tokens, json_mode, timeout)
     model = config.claude_model()
     messages = [{"role": "user", "content": user}]
     if json_mode:

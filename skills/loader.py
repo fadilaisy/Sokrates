@@ -12,6 +12,52 @@ import re
 from pathlib import Path
 from typing import Any
 
+# Version-backup directories created by the skill-approve flow: skills/<id>.v<N>
+_BACKUP_DIR_RE = re.compile(r"\.v\d+$")
+# YAML frontmatter delimited by --- at the very start of the file
+_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
+# HTML comment block used by hand-authored skills: <!-- skill_metadata ... -->
+_SKILL_METADATA_COMMENT_RE = re.compile(r"<!--\s*skill_metadata\b(.*?)-->", re.DOTALL)
+
+
+def _strip_quotes(value: str) -> str:
+    """Trim whitespace and one layer of surrounding quotes from a value."""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"\"", "'"}:
+        return value[1:-1].strip()
+    return value
+
+
+def _split_machine_types(value: str) -> list[str]:
+    """Parse a comma-separated machine_types value into a trimmed list."""
+    return [cleaned for cleaned in (_strip_quotes(part) for part in value.split(",")) if cleaned]
+
+
+def _parse_top_level_metadata(text: str) -> dict[str, Any]:
+    """
+    Extract metadata from top-level ``key: value`` lines only.
+
+    Lines with leading whitespace (nested structures such as ``tier_hierarchy:``)
+    are ignored. Recognised keys: ``name``, ``machine_type`` (singular) and
+    ``machine_types`` (comma-separated). The first non-empty occurrence wins.
+    """
+    found: dict[str, Any] = {}
+    for line in text.splitlines():
+        if not line or line[:1].isspace() or ":" not in line:
+            continue
+        key, raw_value = line.split(":", 1)
+        key = key.strip()
+        value = _strip_quotes(raw_value)
+        if not value:
+            continue
+        if key == "name" and "name" not in found:
+            found["name"] = value
+        elif key == "machine_type" and "machine_types" not in found:
+            found["machine_types"] = [value]
+        elif key == "machine_types" and "machine_types" not in found:
+            found["machine_types"] = _split_machine_types(value)
+    return found
+
 
 class Hook:
     """Represents a hook from hooks.json"""
@@ -88,13 +134,25 @@ class SkillRegistry:
     def index(self) -> None:
         """
         Index skill metadata only. Does NOT load full rules.
-        Reads SKILL.md files to extract skill names and machine types.
+        Rebuilds the registry from scratch on every call so deleted skills do
+        not linger. Reads SKILL.md files to extract skill names and machine types.
+        Version-backup dirs (``<id>.v<N>``), hidden dirs and ``__pycache__`` are skipped.
         """
+        self._registry = {}
+
         for skill_dir in self._skills_dir.iterdir():
             if not skill_dir.is_dir():
                 continue
 
             skill_id = skill_dir.name
+
+            if (
+                skill_id.startswith(".")
+                or skill_id == "__pycache__"
+                or _BACKUP_DIR_RE.search(skill_id)
+            ):
+                continue
+
             skill_file = skill_dir / "SKILL.md"
 
             if skill_file.exists():
@@ -113,25 +171,37 @@ class SkillRegistry:
                         self._registry[skill_id]["hook_ids"] = [h.get("id", "") for h in hooks_data]
 
     def _extract_metadata(self, skill_file: Path) -> dict[str, Any]:
-        """Extract metadata from SKILL.md (YAML frontmatter or parse text)"""
-        content = skill_file.read_text(encoding="utf-8")
+        """
+        Extract metadata from SKILL.md.
+
+        Two formats are merged, first non-empty value wins:
+        - YAML frontmatter delimited by ``---`` at the start of the file
+        - an HTML comment block starting with ``<!-- skill_metadata``
+        Only top-level (unindented) ``key: value`` lines are read, so nested
+        keys such as ``tier_hierarchy:`` are ignored. Never raises on malformed
+        input; always returns a dict with at least ``machine_types``.
+        """
         metadata: dict[str, Any] = {"machine_types": []}
 
-        # Try to parse YAML frontmatter if present
-        if content.startswith("---"):
-            try:
-                parts = content.split("---", 2)
-                if len(parts) >= 3:
-                    yaml_content = parts[1]
-                    for line in yaml_content.split("\n"):
-                        if ":" in line:
-                            key, value = line.split(":", 1)
-                            key = key.strip()
-                            value = value.strip().strip('"')
-                            if key == "machine_types":
-                                metadata["machine_types"] = [t.strip() for t in value.split(",")]
-            except Exception:
-                pass
+        try:
+            content = skill_file.read_text(encoding="utf-8")
+            sources: list[dict[str, Any]] = []
+
+            frontmatter = _FRONTMATTER_RE.match(content.lstrip("\ufeff"))
+            if frontmatter:
+                sources.append(_parse_top_level_metadata(frontmatter.group(1)))
+
+            comment = _SKILL_METADATA_COMMENT_RE.search(content)
+            if comment:
+                sources.append(_parse_top_level_metadata(comment.group(1)))
+
+            for source in sources:
+                for key in ("name", "machine_types"):
+                    if not metadata.get(key) and source.get(key):
+                        metadata[key] = source[key]
+        except Exception:
+            # Metadata is best-effort; malformed SKILL.md files must not break indexing.
+            pass
 
         return metadata
 
