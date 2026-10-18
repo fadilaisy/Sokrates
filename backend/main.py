@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -55,9 +56,10 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from erp_adapter.sap_client import DriftError, SAPClient
+import copy
 from erp_adapter.audit_ledger import AuditLedger
-from solver.schedule_solver import ScheduleSolver
-from skills.loader import SkillRegistry
+from solver.schedule_solver import ScheduleSolver, TIER1_BLOCKED_STATUSES
+from skills.loader import SafetyInterlock, SkillRegistry
 from fastapi.concurrency import run_in_threadpool
 from rag.api import router as rag_router
 from rag.retrieve import Retriever
@@ -101,10 +103,15 @@ _gemini_client: httpx.AsyncClient | None = (
 # ─────────────────────────────────────────────────────────────────────────────
 
 _sap       = SAPClient()
-_ledger    = AuditLedger()
+_ledger    = AuditLedger(os.getenv("AUDIT_LEDGER_PATH") or None)
 _solver    = ScheduleSolver()
 _skills    = SkillRegistry()
 _skills.index()
+
+# Scenarios the solver actually produced, by id (latest /api/disrupt wins).
+# /api/approve only accepts a payload identical to one of these, so a client
+# cannot invent reroutes, target blocked machines or forge downtime events.
+_issued_scenarios: dict[str, dict[str, Any]] = {}
 
 # Maintenance case ledger (hash-chained, seeded with synthetic cases on first start).
 # Resolved cases are indexed into the RAG store at startup for similar-case search.
@@ -129,10 +136,19 @@ app = FastAPI(
     ),
 )
 
+# CORS: explicit allow-list from CORS_ORIGINS (comma-separated). Browsers reject
+# a wildcard together with credentials, and this API is served same-origin in
+# production (Caddy) — so the default is the local Vite dev origin only.
+_cors_origins = [
+    o.strip()
+    for o in (os.getenv("CORS_ORIGINS") or "http://localhost:5173,http://127.0.0.1:5173").split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    # `*` + credentials is an invalid combination; drop credentials if asked for all origins.
+    allow_credentials="*" not in _cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -249,12 +265,133 @@ class SkillDraftResponse(BaseModel):
     validation_errors: list[str]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Tier 1 safety helpers — shared by the skill draft, lint and approve endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CONDITION_RE = re.compile(r"^(\w+)\s*(>=|<=|>|<|==|!=|=)\s*(\S+)$")
+
+
+def _parse_condition(condition: str) -> tuple[str, str, float | bool | str] | None:
+    """Parse a simple 'metric <op> value' condition; returns None when unparseable."""
+    match = _CONDITION_RE.match((condition or "").strip())
+    if not match:
+        return None
+    metric, op, raw = match.groups()
+    if raw.lower() == "true":
+        value: float | bool | str = True
+    elif raw.lower() == "false":
+        value = False
+    else:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = raw
+    return metric, op, value
+
+
+def _threshold_errors(base: SafetyInterlock, submitted: float) -> list[str]:
+    """Errors when `submitted` relaxes the numeric Tier 1 threshold of `base`."""
+    parsed = _parse_condition(base.condition)
+    if not parsed:
+        return []
+    _, op, base_value = parsed
+    if isinstance(base_value, bool) or not isinstance(base_value, (int, float)):
+        return []
+    base_value = float(base_value)
+    relaxed = (
+        (op in (">", ">=") and submitted > base_value)
+        or (op in ("<", "<=") and submitted < base_value)
+        or (op in ("=", "==") and submitted != base_value)
+    )
+    if not relaxed:
+        return []
+    if op in ("<", "<="):
+        detail = f"di bawah batas Tier 1 ({base_value:g})"
+    elif op in ("=", "=="):
+        detail = f"tidak sama dengan nilai Tier 1 ({base_value:g})"
+    else:
+        detail = f"melebihi batas Tier 1 ({base_value:g})"
+    return [
+        f"{base.id}: Threshold {submitted:g} {detail}. "
+        "Tier 1 safety rule TIDAK BOLEH direlaksasi."
+    ]
+
+
+def _relaxation_errors(base: SafetyInterlock, submitted: dict) -> list[str]:
+    """Errors when a submitted Tier 1 rule weakens `base`.
+
+    Checks tier demotion, override_allowed: true, and threshold/metric changes
+    parsed from the condition (stricter thresholds are allowed).
+    """
+    errors: list[str] = []
+    safe_id = base.id
+
+    submitted_tier = submitted.get("tier", 1)
+    if submitted_tier != base.tier:
+        errors.append(
+            f"{safe_id}: Tier {base.tier} rule tidak boleh diubah menjadi tier {submitted_tier}."
+        )
+    if submitted.get("override_allowed", False):
+        errors.append(
+            f"{safe_id}: Tier 1 rule tidak boleh memiliki override_allowed: true"
+        )
+
+    # The action a Tier 1 rule takes (e.g. EMERGENCY_STOP) may not be changed or dropped.
+    if base.action and submitted.get("action") != base.action:
+        errors.append(
+            f"{safe_id}: aksi Tier 1 harus tetap '{base.action}' "
+            f"(ditemukan '{submitted.get('action')}')."
+        )
+
+    submitted_parsed = _parse_condition(submitted.get("condition", ""))
+    base_parsed = _parse_condition(base.condition)
+    if base_parsed and not submitted_parsed:
+        # Compound / free-form conditions ("x > 95 and false") cannot be proven
+        # at least as strict as the base rule, so they are rejected outright.
+        errors.append(
+            f"{safe_id}: kondisi Tier 1 harus berbentuk sederhana "
+            f"'<metrik> <operator> <nilai>' (ditemukan '{submitted.get('condition', '')}')."
+        )
+    elif submitted_parsed and base_parsed:
+        sub_metric, sub_op, sub_value = submitted_parsed
+        base_op = base_parsed[1]
+        if {sub_op, base_op} <= {"=", "=="}:
+            pass
+        elif sub_op not in (base_op, ">=" if base_op == ">" else "<=" if base_op == "<" else base_op):
+            errors.append(
+                f"{safe_id}: operator kondisi berubah dari '{base_op}' ke '{sub_op}' — "
+                "arah pemicu Tier 1 tidak boleh dibalik."
+            )
+        base_metric, _, base_value = base_parsed
+        if isinstance(sub_metric, str) and sub_metric != base_metric:
+            errors.append(
+                f"{safe_id}: metrik kondisi berubah dari {base_metric} ke {sub_metric} — "
+                "aturan Tier 1 yang sama tidak boleh diarahkan ke metrik lain."
+            )
+        elif isinstance(base_value, (bool, str)) and sub_value != base_value:
+            errors.append(
+                f"{safe_id}: nilai kondisi Tier 1 berubah dari {base_value} ke {sub_value}."
+            )
+        elif isinstance(sub_value, (int, float)) and not isinstance(sub_value, bool):
+            errors.extend(_threshold_errors(base, float(sub_value)))
+    else:
+        # Condition unparseable — fall back to the explicit threshold_value fields.
+        threshold = submitted.get("threshold_value")
+        if isinstance(threshold, (int, float)) and not isinstance(threshold, bool):
+            errors.extend(_threshold_errors(base, float(threshold)))
+    return errors
+
+
 class SkillLintRequest(BaseModel):
     skill_md: str
     sla_penalties: dict
     hooks: list[dict]
     interlocks: list[dict]
     base_skill_id: str = Field(default="cnc_milling")
+    # When set and skills/<skill_id> exists, the draft is treated as a
+    # replacement for that skill: deleting any of its Tier 1 rules is an error.
+    skill_id: str | None = Field(default=None)
 
 
 class SkillLintResponse(BaseModel):
@@ -295,6 +432,18 @@ GEMINI_CACHE_TTL = float(os.getenv("GEMINI_CACHE_TTL", "300"))
 GEMINI_INTERACTIVE_RESERVE = int(os.getenv("GEMINI_INTERACTIVE_RESERVE", "2"))
 _gemini_calls: deque[float] = deque()                    # monotonic timestamps, last 60s
 _gemini_cache: dict[tuple[str, int], tuple[float, str]] = {}
+_GEMINI_CACHE_MAX = 256
+
+
+def _gemini_cache_put(key: tuple[str, int], text: str) -> None:
+    """Insert into the Gemini cache, dropping expired entries and evicting oldest past the cap."""
+    now = time.monotonic()
+    _gemini_cache.pop(key, None)
+    for k in [k for k, (ts, _) in _gemini_cache.items() if now - ts >= GEMINI_CACHE_TTL]:
+        del _gemini_cache[k]
+    while len(_gemini_cache) >= _GEMINI_CACHE_MAX:
+        del _gemini_cache[next(iter(_gemini_cache))]  # dict keeps insertion order: oldest first
+    _gemini_cache[key] = (now, text)
 
 
 def _gemini_budget_ok(interactive: bool = True) -> bool:
@@ -327,7 +476,7 @@ async def _call_gemini(prompt: str, max_tokens: int = 512, *, interactive: bool 
         try:
             # GPT-5.x counts hidden reasoning against the limit, so give it headroom.
             text = await asyncio.to_thread(aicore.ask, prompt, max_tokens=max(max_tokens, 2048))
-            _gemini_cache[cache_key] = (time.monotonic(), text)
+            _gemini_cache_put(cache_key, text)
             return text
         except aicore.AICoreError as exc:
             print(f"[aicore] {exc} — falling back to Gemini", file=sys.stderr)
@@ -358,7 +507,7 @@ async def _call_gemini(prompt: str, max_tokens: int = 512, *, interactive: bool 
         response.raise_for_status()
         text, finish = gemini_text(response.json())
         if text:
-            _gemini_cache[cache_key] = (time.monotonic(), text)
+            _gemini_cache_put(cache_key, text)
             return text
         print(f"[gemini] empty reply (finishReason={finish})", file=sys.stderr)
         return (f"[Gemini: tidak ada teks dalam respons (finishReason={finish})] "
@@ -404,6 +553,11 @@ async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
         )
 
     state      = _sap.get_state()
+    if not any(w.get("id") == body.machine_id for w in state.get("work_centers", [])):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown machine_id: {body.machine_id}",
+        )
     disruption = {
         "machine_id":      body.machine_id,
         "disruption_type": body.disruption_type,
@@ -423,6 +577,7 @@ async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
     # confirmed downtime (used by /api/metrics) without trusting extra client fields.
     for s in scenarios:
         s["disruption"] = dict(disruption)
+        _issued_scenarios[s["id"]] = copy.deepcopy(s)
 
     disruption_hours = body.end_hour - body.start_hour
 
@@ -571,6 +726,40 @@ async def post_approve(body: ApproveRequest) -> ApproveResponse:
     Returns HTTP 409 if the SAP version has changed since the caller's last read
     (optimistic locking / drift detection).
     """
+    issued = _issued_scenarios.get(body.scenario_id)
+    if (
+        issued is None
+        or issued.get("gantt_changes") != body.scenario_data.get("gantt_changes")
+        or issued.get("disruption") != body.scenario_data.get("disruption")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "ScenarioMismatch",
+                "message": "Skenario tidak dikenal atau tidak cocok dengan hasil solver. "
+                           "Jalankan analisis gangguan lagi (/api/disrupt) lalu setujui ulang.",
+            },
+        )
+    body.scenario_data = copy.deepcopy(issued)   # server copy is the source of truth
+
+    # Tier 1: never move work onto a machine that is down or in a safety status,
+    # and never reference orders that do not exist (re-checked against live state).
+    _live = _sap.get_state()
+    _wc_status = {w["id"]: w.get("status") for w in _live.get("work_centers", [])}
+    _order_ids = {o.get("id") for o in _live.get("production_orders", [])}
+    for change in body.scenario_data.get("gantt_changes", []):
+        target = change.get("to_machine")
+        if change.get("order_id") not in _order_ids or target not in _wc_status:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail=f"Order/mesin tidak dikenal: {change.get('order_id')} → {target}")
+        if target != change.get("from_machine") and _wc_status[target] in TIER1_BLOCKED_STATUSES:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"error": "Tier1Violation",
+                        "message": f"Mesin {target} berstatus {_wc_status[target]}; "
+                                   "pekerjaan tidak boleh dialihkan ke sana (Tier 1)."},
+            )
+
     gantt_changes: list[dict] = body.scenario_data.get("gantt_changes", [])
     order_updates = [
         {
@@ -585,6 +774,20 @@ async def post_approve(body: ApproveRequest) -> ApproveResponse:
 
     approved_at = datetime.now(timezone.utc).isoformat()
     current_state = _sap.get_state()
+    # Snapshot the pre-change field values per order, stored in the ledger entry
+    # only. A later revert restores exactly these values instead of re-applying
+    # the post-change ones under a "RESTORED" status (finding #1).
+    state_orders = {o.get("id"): o for o in current_state.get("production_orders", [])}
+    order_snapshots: dict[str, dict[str, Any]] = {}
+    for change in gantt_changes:
+        src = state_orders.get(change.get("order_id"))
+        if src is not None:
+            order_snapshots[change["order_id"]] = {
+                "work_center_id": src.get("work_center_id"),
+                "planned_start":  src.get("planned_start", ""),
+                "planned_end":    src.get("planned_end", ""),
+                "status":         src.get("status", ""),
+            }
     new_events = events_for_approval(
         current_state, {**body.scenario_data, "id": body.scenario_id}, approved_at
     )
@@ -637,7 +840,9 @@ async def post_approve(body: ApproveRequest) -> ApproveResponse:
     entry = _ledger.append({
         "action_type":        "SCENARIO_APPROVED",
         "scenario_chosen":    body.scenario_id,
-        "delta_applied":      delta,
+        # The applied delta is stored with pre-change order snapshots so the
+        # revert endpoint can restore the exact previous schedule fields.
+        "delta_applied":      {**delta, "order_snapshots": order_snapshots},
         "sap_version_before": version_before,
         "sap_version_after":  version_after,
         "approved_by":        body.approved_by,
@@ -818,36 +1023,15 @@ async def post_skills_draft(body: SkillDraftRequest) -> SkillDraftResponse:
             "Class B penalty harus lebih tinggi dari Class C."
         )
 
-    # Check safety thresholds - Tier 1 rules must not be relaxed
-    base_interlocks = {
-        "SAFE-001": {"id": "SAFE-001", "tier": 1, "name": "Motor Overtemperature Interlock",
-                     "condition": "motor_temp_celsius > 95", "threshold_value": 95},
-        "SAFE-002": {"id": "SAFE-002", "tier": 1, "name": "Spindle Vibration Overload Interlock",
-                     "condition": "spindle_vibration_mm_per_s > 8", "threshold_value": 8},
-        "SAFE-003": {"id": "SAFE-003", "tier": 1, "name": "Coolant Pressure Low Interlock",
-                     "condition": "coolant_pressure_bar < 2", "threshold_value": 2},
-    }
-
-    # Check if user is trying to relax Tier 1 thresholds
-    for safe_id, base in base_interlocks.items():
-        user_val = body.safety_thresholds.get(base["condition"].split()[0])
-        if user_val is not None:
-            base_val = base["threshold_value"]
-            if safe_id == "SAFE-001" and user_val > 95:
-                validation_errors.append(
-                    f"{safe_id}: Threshold {user_val}°C melebihi batas Tier 1 (95°C). "
-                    "Tier 1 safety rule TIDAK BOLEH direlaksasi."
-                )
-            elif safe_id == "SAFE-002" and user_val > 8:
-                validation_errors.append(
-                    f"{safe_id}: Threshold {user_val} mm/s melebihi batas Tier 1 (8 mm/s). "
-                    "Tier 1 safety rule TIDAK BOLEH direlaksasi."
-                )
-            elif safe_id == "SAFE-003" and user_val < 2:
-                validation_errors.append(
-                    f"{safe_id}: Threshold {user_val} bar di bawah batas Tier 1 (2 bar). "
-                    "Tier 1 safety rule TIDAK BOLEH direlaksasi."
-                )
+    # Check safety thresholds — Tier 1 rules come from the skill files on disk
+    # (not a hardcoded table) and may only be made stricter, never relaxed.
+    for base in _skills.load_interlocks("cnc_milling"):
+        parsed = _parse_condition(base.condition)
+        if not parsed:
+            continue
+        user_val = body.safety_thresholds.get(parsed[0])
+        if isinstance(user_val, (int, float)) and not isinstance(user_val, bool):
+            validation_errors.extend(_threshold_errors(base, float(user_val)))
 
     if validation_errors:
         return SkillDraftResponse(
@@ -1036,64 +1220,61 @@ def _create_fallback_interlocks(safety_thresholds: dict) -> list:
 async def post_skills_lint(body: SkillLintRequest) -> SkillLintResponse:
     """
     Lint skill files to ensure Tier 1 safety rules are not relaxed.
-    - Rejects draft that raises Tier 1 thresholds
-    - Rejects draft that sets override_allowed: true on Tier 1 rules
-    - Rejects draft that removes Tier 1 rules from base skill
+    - Rejects drafts that relax Tier 1 thresholds (compared against the real
+      rules on disk: skills/<base_skill_id>/rules/safety_interlocks.json)
+    - Rejects override_allowed: true, tier demotion, or metric changes on Tier 1
+    - Rejects removal of Tier 1 rules when the draft replaces an existing skill
+      (skill_id points at skills/<skill_id> on disk)
     - Allows adding stricter constraints
     """
     errors: list[str] = []
     warnings: list[str] = []
 
-    # Base skill interlocks (cnc_milling)
-    base_interlocks = {
-        "SAFE-001": {"tier": 1, "threshold": 95, "metric": "motor_temp_celsius"},
-        "SAFE-002": {"tier": 1, "threshold": 8, "metric": "spindle_vibration_mm_per_s"},
-        "SAFE-003": {"tier": 1, "threshold": 2, "metric": "coolant_pressure_bar"},
-    }
+    # Both ids are used to build filesystem paths below: reject anything but [a-z0-9_]+.
+    for _label, _val in (("base_skill_id", body.base_skill_id), ("skill_id", body.skill_id)):
+        if _val and not _valid_skill_id(_val.strip()):
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                detail=f"{_label} must match ^[a-z0-9_]+$")
+
+    # Reference rules: an explicit skill_id targets the skill this draft replaces.
+    target_id = (body.skill_id or "").strip()
+    replacing = bool(target_id) and (_ROOT / "skills" / target_id / "SKILL.md").exists()
+    reference_id = target_id if replacing else body.base_skill_id
+    base_rules = {il.id: il for il in _skills.load_interlocks(reference_id)}
+    submitted_ids = {il.get("id", "") for il in body.interlocks}
 
     for interlock in body.interlocks:
-        safe_id = interlock.get("id", "")
-        tier = interlock.get("tier", 1)
-        condition = interlock.get("condition", "")
+        base = base_rules.get(interlock.get("id", ""))
+        if base is not None and base.tier == 1:
+            # Only Tier 1 is hard-blocked; higher tiers may be edited through the
+            # normal supervisor approval flow.
+            errors.extend(_relaxation_errors(base, interlock))
 
-        # Parse condition for threshold
-        if tier == 1:
-            # Check for override_allowed = true on Tier 1
-            if interlock.get("override_allowed", False):
+    if replacing:
+        for safe_id, base in base_rules.items():
+            if base.tier == 1 and safe_id not in submitted_ids:
                 errors.append(
-                    f"{safe_id}: Tier 1 rule tidak boleh memiliki override_allowed: true"
+                    f"{safe_id}: Tier 1 rule ({base.name}) dihapus — "
+                    "aturan Tier 1 TIDAK BOLEH dihapus dari skill dasar."
                 )
-
-            # Parse threshold from condition
-            import re
-            match = re.search(r'(\w+)\s*(>|<)\s*(\d+\.?\d*)', condition)
-            if match:
-                metric, op, threshold = match.groups()
-                threshold = float(threshold)
-
-                if safe_id in base_interlocks:
-                    base = base_interlocks[safe_id]
-                    base_threshold = base["threshold"]
-
-                    # Tier 1 threshold can only be stricter (lower for >, higher for <)
-                    if op == ">":
-                        if threshold > base_threshold:
-                            errors.append(
-                                f"{safe_id}: Threshold {threshold} melebihi base Tier 1 ({base_threshold}). "
-                                f"Tier 1 rule TIDAK BOLEH direlaksasi."
-                            )
-                    elif op == "<":
-                        if threshold < base_threshold:
-                            errors.append(
-                                f"{safe_id}: Threshold {threshold} di bawah base Tier 1 ({base_threshold}). "
-                                f"Tier 1 rule TIDAK BOLEH direlaksasi."
-                            )
+    elif base_rules:
+        warnings.append(
+            f"Tier 1 dibandingkan terhadap skill dasar '{reference_id}'. "
+            "Penghapusan aturan hanya diperiksa saat draft menggantikan skill "
+            "yang sudah ada (skill_id)."
+        )
 
     return SkillLintResponse(
         valid=len(errors) == 0,
         errors=errors,
         warnings=warnings,
     )
+
+
+def _valid_skill_id(s: str) -> bool:
+    """Skill ids are lowercase letters, digits and underscores only (no dots, slashes, backslashes)."""
+    import re
+    return bool(re.fullmatch(r"[a-z0-9_]+", s or ""))
 
 
 @app.post(
@@ -1106,10 +1287,67 @@ async def post_skills_approve(body: SkillApproveRequest) -> SkillApproveResponse
     Write skill files to disk and reload the registry.
     - Writes to skills/<skill_id>/
     - Keeps previous version as .v{n}
+    - Rejects writes that drop or weaken a Tier 1 rule of the existing version
     - Reloads SkillRegistry
     - Logs to audit ledger
     """
-    skill_dir = _ROOT / "skills" / body.skill_id
+    if not _valid_skill_id(body.skill_id):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="skill_id must match ^[a-z0-9_]+$",
+        )
+    skills_root = (_ROOT / "skills").resolve()
+    skill_dir = skills_root / body.skill_id
+    if not skill_dir.resolve().is_relative_to(skills_root):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="skill_id resolves outside skills/",
+        )
+
+    # Tier 1 write gate: replacing an existing skill must keep every Tier 1 rule
+    # of its current version, unweakened. Lint is advisory for the UI; this check
+    # is what actually prevents a safety rule from being dropped on disk.
+    if skill_dir.exists():
+        existing = {il.id: il for il in _skills.load_interlocks(body.skill_id)}
+        submitted = {il.get("id", ""): il for il in body.interlocks}
+        gate_errors: list[str] = []
+        for safe_id, base in existing.items():
+            if base.tier != 1:
+                continue
+            if safe_id not in submitted:
+                gate_errors.append(
+                    f"{safe_id}: Tier 1 rule ({base.name}) dihapus — "
+                    "Tier 1 TIDAK BOLEH dihapus dari skill yang sudah aktif."
+                )
+            else:
+                gate_errors.extend(_relaxation_errors(base, submitted[safe_id]))
+        if gate_errors:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": "Tier1Violation",
+                    "errors": gate_errors,
+                    "hint": "Perbaiki aturan Tier 1, lint ulang, lalu approve lagi.",
+                },
+            )
+
+    # Shape validation: a malformed hooks.json / interlocks file would make
+    # SkillRegistry.index() raise after the files were already written.
+    shape_errors: list[str] = []
+    for label, items in (("hooks", body.hooks), ("interlocks", body.interlocks)):
+        ids = [i.get("id") for i in items]
+        for n, item in enumerate(items):
+            if not isinstance(item.get("id"), str) or not item["id"].strip():
+                shape_errors.append(f"{label}[{n}]: 'id' wajib berupa teks tidak kosong.")
+            if not isinstance(item.get("condition", ""), str):
+                shape_errors.append(f"{label}[{n}]: 'condition' harus teks.")
+        if len(set(ids)) != len(ids):
+            shape_errors.append(f"{label}: id duplikat.")
+    if shape_errors:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "InvalidSkillFiles", "errors": shape_errors},
+        )
 
     # Create backup of existing files if they exist
     if skill_dir.exists():
@@ -1125,7 +1363,7 @@ async def post_skills_approve(body: SkillApproveRequest) -> SkillApproveResponse
         shutil.copytree(skill_dir, backup_dir)
 
     # Create skill directory
-    skill_dir.mkdir(exist_ok=True)
+    skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "rules").mkdir(exist_ok=True)
 
     # Write files
@@ -1183,6 +1421,8 @@ async def post_ledger_revert(entry_id: str, body: LedgerEntryId) -> ApproveRespo
     Revert a previously approved scenario by applying its reverse delta.
     - Reads the original entry from the ledger
     - Extracts the delta that was applied
+    - Restores each order from the pre-change snapshot captured at approval time
+      (work_center_id, planned_start, planned_end, status)
     - Applies the inverse delta with optimistic lock
     - Logs to ledger as SCENARIO_REVERTED
     - Same approval workflow as normal approve
@@ -1213,16 +1453,31 @@ async def post_ledger_revert(entry_id: str, body: LedgerEntryId) -> ApproveRespo
             detail="No delta to revert",
         )
 
-    # Build inverse delta
+    # Build inverse delta: restore each order's pre-change snapshot when the
+    # approve entry captured one (new entries always do). Legacy entries keep
+    # the old best-effort behaviour: values are left as-is and only the status
+    # is reset. The snapshot path restores work_center_id, planned_start,
+    # planned_end and status exactly as they were before the approval.
+    snapshots = delta.get("order_snapshots", {})
     order_updates = []
     for update in delta.get("order_updates", []):
-        order_updates.append({
-            "id": update["id"],
-            "work_center_id": update.get("work_center_id"),
-            "planned_start": update.get("planned_start", ""),
-            "planned_end": update.get("planned_end", ""),
-            "status": "RESTORED",
-        })
+        snap = snapshots.get(update["id"])
+        if snap:
+            order_updates.append({
+                "id":             update["id"],
+                "work_center_id": snap.get("work_center_id"),
+                "planned_start":  snap.get("planned_start", ""),
+                "planned_end":    snap.get("planned_end", ""),
+                "status":         snap.get("status") or "RESTORED",
+            })
+        else:
+            order_updates.append({
+                "id":             update["id"],
+                "work_center_id": update.get("work_center_id"),
+                "planned_start":  update.get("planned_start", ""),
+                "planned_end":    update.get("planned_end", ""),
+                "status":         "RESTORED",
+            })
 
     inverse_meta: dict[str, Any] = {
         "last_reverted_scenario": delta.get("meta_updates", {}).get("last_approved_scenario"),
@@ -1243,7 +1498,17 @@ async def post_ledger_revert(entry_id: str, body: LedgerEntryId) -> ApproveRespo
         "meta_updates": inverse_meta,
     }
 
-    version_before = _sap.get_version()
+    if any(e.get("action_type") == "SCENARIO_REVERTED" and e.get("original_entry_id") == entry_id
+           for e in entries):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Entry {entry_id} sudah pernah dikembalikan (reverted).",
+        )
+
+    # Optimistic lock against the state the approval produced: if anything else
+    # changed SAP since (another approval, an external change), restoring the old
+    # snapshots would silently overwrite that work — refuse like a normal drift.
+    version_before = int(original_entry.get("sap_version_after", _sap.get_version()))
     new_state = None
     try:
         new_state = _sap.apply_delta(inverse_delta, expected_version=version_before)
@@ -1270,6 +1535,7 @@ async def post_ledger_revert(entry_id: str, body: LedgerEntryId) -> ApproveRespo
     entry = _ledger.append({
         "action_type":        "SCENARIO_REVERTED",
         "original_entry_id":  entry_id,
+        "delta_applied":      inverse_delta,
         "sap_version_before": version_before,
         "sap_version_after":  version_after,
         "approved_by":        body.approved_by,
@@ -1319,10 +1585,23 @@ async def ws_telemetry(websocket: WebSocket) -> None:
             except json.JSONDecodeError:
                 await websocket.send_json({"error": "Invalid JSON payload"})
                 continue
+            if not isinstance(event, dict):
+                await websocket.send_json({"error": "Payload must be a JSON object"})
+                continue
 
             machine_id = event.get("machine_id", "UNKNOWN")
             metric     = event.get("metric", "unknown_metric")
-            value      = float(event.get("value", 0))
+            try:
+                value = float(event.get("value", 0))
+            except (TypeError, ValueError):
+                # A bad payload must not kill the socket — answer with a frame
+                # and keep listening (finding #5).
+                await websocket.send_json({
+                    "error":     "Invalid 'value' payload — expected a number (e.g. 91.5)",
+                    "machine_id": machine_id,
+                    "metric":    metric,
+                })
+                continue
 
             severity, rule_triggered = _classify_telemetry(metric, value)
 
@@ -1388,11 +1667,13 @@ async def ws_telemetry(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     except Exception as exc:
+        # Never leak internals (traceback) to the client; keep the details in
+        # the server log instead (finding #5).
+        print(f"[ws] telemetry socket failed: {exc}\n{traceback.format_exc()}", file=sys.stderr)
         try:
             await websocket.send_json({
-                "event":     "error",
-                "message":   str(exc),
-                "traceback": traceback.format_exc(),
+                "event":   "error",
+                "message": "Terjadi kesalahan internal pada server telemetri.",
             })
         except Exception:
             pass

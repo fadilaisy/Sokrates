@@ -126,6 +126,16 @@ def claude_model() -> str:
     return os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")
 
 
+def aicore_gemini_model() -> str:
+    """model_name used when gemini calls are routed through AI Core orchestration."""
+    return os.getenv("AICORE_GEMINI_MODEL", "gemini-3.5-flash")
+
+
+def aicore_claude_model() -> str:
+    """model_name used when claude calls are routed through AI Core orchestration."""
+    return os.getenv("AICORE_CLAUDE_MODEL", "anthropic--claude-4.5-haiku")
+
+
 def gemini_key() -> Optional[str]:
     return os.getenv("GEMINI_API_KEY") or None
 

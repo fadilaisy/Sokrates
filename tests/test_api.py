@@ -1,5 +1,6 @@
 """tests/test_api.py — Phase 6: backend API contract tests (TestClient, no server needed)."""
 
+import json
 import shutil
 from pathlib import Path
 
@@ -190,3 +191,131 @@ def test_maintenance_context_falls_back_to_work_center_windows():
     ctx = _maintenance_context(state)
     assert "CNC-09 [PM-X] PREVENTIVE, 2025-01-16 08:00-09:30: Ganti filter coolant" in ctx
     assert _maintenance_context({}) == "- (tidak ada jadwal maintenance)"
+
+
+_SKILL_INTERLOCKS_PATH = Path(__file__).parent.parent / "skills" / "cnc_milling" / "rules" / "safety_interlocks.json"
+
+
+def test_revert_restores_previous_schedule_fields():
+    """Revert must restore pre-approval order fields, not re-apply the new ones."""
+    d = client.post("/api/disrupt", json=DISRUPTION).json()
+    before = {o["id"]: o for o in client.get("/api/state").json()["production_orders"]}
+    sc = next(s for s in d["scenarios"] if s["recommended"])
+    touched = [c["order_id"] for c in sc.get("gantt_changes", [])]
+    assert touched, "recommended scenario should change at least one order"
+
+    approved = client.post("/api/approve", json={
+        "scenario_id": sc["id"], "scenario_data": sc,
+        "expected_sap_version": d["sap_version"], "approved_by": "Tester",
+    })
+    assert approved.status_code == 200, approved.text[:300]
+    entry = [e for e in client.get("/api/ledger").json() if e.get("action_type") == "SCENARIO_APPROVED"][-1]
+
+    r = client.post(f"/api/ledger/{entry['id']}/revert",
+                    json={"id": entry["id"], "approved_by": "Tester"})
+    assert r.status_code == 200, r.text[:300]
+
+    after = {o["id"]: o for o in client.get("/api/state").json()["production_orders"]}
+    for order_id in touched:
+        for field in ("work_center_id", "planned_start", "planned_end", "status"):
+            assert after[order_id][field] == before[order_id][field], (
+                order_id, field, before[order_id].get(field), after[order_id].get(field),
+            )
+    # The revert itself is audited, including the inverse delta it applied.
+    revert_entry = [e for e in client.get("/api/ledger").json() if e.get("action_type") == "SCENARIO_REVERTED"][-1]
+    assert revert_entry.get("delta_applied", {}).get("order_updates")
+
+
+def test_skills_lint_rejects_rule_removal_and_covers_all_base_rules():
+    """Lint must diff against the real skill files: no silent removal, SAFE-005 included."""
+    base = json.loads(_SKILL_INTERLOCKS_PATH.read_text(encoding="utf-8"))
+
+    # Removing SAFE-004 while replacing cnc_milling must be rejected.
+    partial = [il for il in base if il["id"] != "SAFE-004"]
+    bad = client.post("/api/skills/lint", json={
+        "skill_id": "cnc_milling", "skill_md": "x", "sla_penalties": {},
+        "hooks": [], "interlocks": partial,
+    }).json()
+    assert bad["valid"] is False
+    assert any("SAFE-004" in e for e in bad["errors"])
+
+    # An empty rule list "removes" all five.
+    bad2 = client.post("/api/skills/lint", json={
+        "skill_id": "cnc_milling", "skill_md": "x", "sla_penalties": {},
+        "hooks": [], "interlocks": [],
+    }).json()
+    assert bad2["valid"] is False
+    assert {e.split(":")[0] for e in bad2["errors"]} >= {il["id"] for il in base}
+
+    # Relaxing SAFE-005 (never covered by the old hardcoded table) must fail.
+    lax = []
+    for il in base:
+        il = dict(il)
+        if il["id"] == "SAFE-005":
+            il["condition"] = "concurrent_axis_faults >= 3"
+        lax.append(il)
+    bad3 = client.post("/api/skills/lint", json={
+        "skill_id": "cnc_milling", "skill_md": "x", "sla_penalties": {},
+        "hooks": [], "interlocks": lax,
+    }).json()
+    assert bad3["valid"] is False
+    assert any("SAFE-005" in e for e in bad3["errors"])
+
+    # Keeping all rules and tightening SAFE-001 is allowed.
+    stricter = []
+    for il in base:
+        il = dict(il)
+        if il["id"] == "SAFE-001":
+            il["condition"] = "motor_temp_celsius > 90"
+            il["threshold_value"] = 90
+        stricter.append(il)
+    ok = client.post("/api/skills/lint", json={
+        "skill_id": "cnc_milling", "skill_md": "x", "sla_penalties": {},
+        "hooks": [], "interlocks": stricter,
+    }).json()
+    assert ok["valid"] is True, ok["errors"]
+
+
+def test_skills_approve_gate_blocks_tier1_removal():
+    """Approving over an existing skill must not drop a Tier 1 rule from disk."""
+    skill_id = "test_skill_gate_tmp"
+    target = Path("skills") / skill_id
+    if target.exists():
+        shutil.rmtree(target)
+    base = json.loads(_SKILL_INTERLOCKS_PATH.read_text(encoding="utf-8"))
+    payload = {
+        "skill_md": "# gate test",
+        "sla_penalties": {},
+        "hooks": [],
+        "interlocks": base,
+    }
+    try:
+        first = client.post("/api/skills/approve", json={"skill_id": skill_id, "approved_by": "Tester", **payload})
+        assert first.status_code == 200, first.text[:300]
+
+        stripped = {**payload, "interlocks": [il for il in base if il["id"] != "SAFE-004"]}
+        second = client.post("/api/skills/approve", json={"skill_id": skill_id, "approved_by": "Tester", **stripped})
+        assert second.status_code == 400
+        assert second.json()["detail"]["error"] == "Tier1Violation"
+
+        on_disk = json.loads((target / "rules" / "safety_interlocks.json").read_text(encoding="utf-8"))
+        assert [il["id"] for il in on_disk] == [il["id"] for il in base]
+        assert not list(Path("skills").glob(f"{skill_id}.v*")), "rejected write must not create a backup"
+    finally:
+        if target.exists():
+            shutil.rmtree(target)
+        for backup in Path("skills").glob(f"{skill_id}.v*"):
+            shutil.rmtree(backup, ignore_errors=True)
+
+
+def test_ws_telemetry_rejects_bad_value_and_keeps_session():
+    """A non-numeric value must not kill the socket, and no traceback leaks."""
+    with client.websocket_connect("/ws/telemetry") as ws:
+        ws.send_json({"machine_id": "CNC-04", "metric": "motor_temp_celsius", "value": "bukan-angka"})
+        bad = ws.receive_json()
+        assert "error" in bad and "traceback" not in bad
+        # The session must still work for the next frame.
+        ws.send_json({"machine_id": "CNC-04", "metric": "motor_temp_celsius", "value": 70})
+        ok = ws.receive_json()
+        assert ok["event"] == "telemetry_analysis"
+        assert ok["severity"] == "OK" and ok["value"] == 70

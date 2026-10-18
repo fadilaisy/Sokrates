@@ -115,10 +115,15 @@ def test_whatif_alone_does_not_add_downtime():
 
 
 def test_approval_records_breakdown_and_reset_clears_it():
-    _approve()
+    sc = _approve()[0]
+    moved = [c for c in sc["gantt_changes"]
+             if c.get("to_machine") != c.get("from_machine") and (c.get("changeover_cost_idr") or 0) > 0]
     m = client.get("/api/metrics").json()
     assert _cat(m, "unplanned") == pytest.approx(13)          # + CNC-02 09:00–12:00
-    assert m["oee"]["availability"] == pytest.approx(67.5)
+    # Availability = (5 machines × 8h − 13h unplanned − 0.5h per moved order) / 40h,
+    # derived from the approved plan so it stays true whatever the solver recommends.
+    expected_availability = (40 - 13 - 0.5 * len(moved)) / 40 * 100
+    assert m["oee"]["availability"] == pytest.approx(expected_availability, abs=0.1)
     client.post("/api/state/reset")
     assert _cat(client.get("/api/metrics").json(), "unplanned") == pytest.approx(10)
 
