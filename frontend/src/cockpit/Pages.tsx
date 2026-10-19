@@ -1,5 +1,6 @@
 import { ArrowRight } from "lucide-react";
 import type { ReactNode } from "react";
+import { API_BASE } from "../lib/api";
 import { cn } from "../lib/utils";
 import { fmt1, ordersToday, STATUS_STYLE, telemetryOf } from "../lib/shift";
 import type { MachineStatus } from "../lib/shift";
@@ -342,7 +343,10 @@ export function CurrentPage() {
     <>
       {!online && error && (
         <p role="alert" className="rounded-lg border border-danger-line bg-danger-bg px-4 py-3 text-[16px] text-fault">
-          Backend tidak terjangkau. Jalankan <Mono>python3 -m uvicorn backend.main:app --port 8000</Mono> lalu muat ulang halaman.
+          Backend tidak terjangkau di <Mono>{API_BASE}</Mono>.{" "}
+          {API_BASE.includes("localhost")
+            ? <>Jalankan <Mono>python3 -m uvicorn backend.main:app --port 8000</Mono> lalu muat ulang halaman.</>
+            : <>Periksa bahwa backend menyala dan mengizinkan origin ini lewat <Mono>CORS_ORIGINS</Mono>.</>}
         </p>
       )}
       {page === "dashboard" ? <DashboardPage /> : page === "cockpit" ? <CockpitPage /> : page === "maintenance" ? <MaintenancePage /> : <FloorPage />}

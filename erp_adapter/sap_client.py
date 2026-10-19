@@ -16,6 +16,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from erp_adapter import s4hana
+
 
 class DriftError(Exception):
     """
@@ -54,7 +56,8 @@ class SAPClient:
             raw = json.load(fh)
         raw.setdefault("_meta", {})
         raw["_meta"].setdefault("version", 1)
-        return raw
+        # Real S/4HANA order data when SAP_API_KEY is set; mock otherwise.
+        return s4hana.overlay(raw)
 
     def _deep_copy_state(self):
         return copy.deepcopy(self._state)

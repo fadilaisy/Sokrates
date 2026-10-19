@@ -10,7 +10,7 @@ websockets>=12.0
 pytest>=8.0.0
 
 # ── RAG layer (rag/) ──────────────────────────────────────────────────────────
-pymupdf>=1.24.0          # PDF text layer, tables, page rendering
+pymupdf>=1.24.0,<2  # 2.0 changes table text extraction; RAG golden set g5 fails on it
 pytesseract>=0.3.10      # OCR fallback (needs the tesseract binary + 'ind' and 'eng' data)
 Pillow>=10.0.0
 python-multipart>=0.0.9  # file uploads

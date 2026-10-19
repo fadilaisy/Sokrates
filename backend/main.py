@@ -144,9 +144,13 @@ _cors_origins = [
     for o in (os.getenv("CORS_ORIGINS") or "http://localhost:5173,http://127.0.0.1:5173").split(",")
     if o.strip()
 ]
+# Optional regex for origins that change per deploy, e.g. Vercel preview URLs:
+# CORS_ORIGIN_REGEX=https://sokrates-[a-z0-9-]+-fadilaisy\.vercel\.app
+_cors_origin_regex = (os.getenv("CORS_ORIGIN_REGEX") or "").strip() or None
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
+    allow_origin_regex=_cors_origin_regex,
     # `*` + credentials is an invalid combination; drop credentials if asked for all origins.
     allow_credentials="*" not in _cors_origins,
     allow_methods=["*"],
@@ -1928,6 +1932,8 @@ async def health() -> dict[str, str]:
         "aicore_configured":  "yes" if aicore.configured() else "no — set AICORE_* and AI_API_URL in .env",
         "gemini_configured":  "yes" if GEMINI_API_KEY else "no — set GEMINI_API_KEY in .env",
         "sap_version":        str(_sap.get_version()),
+        "sap_source":         str(_sap.get_state()["_meta"].get("source", "mock")),
+        "sap_error":          str(_sap.get_state()["_meta"].get("s4hana_error", "")),
         "ledger_entries":     str(len(_ledger.get_all())),
         "maintenance_cases":  str(len(_maint_ledger.cases())),
     }

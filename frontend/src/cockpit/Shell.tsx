@@ -116,6 +116,8 @@ function MobileNav() {
 export function Header() {
   const { state, sapVersion, online, reset, resetting, muted, toggleMute } = useCockpit();
   const plant = state?._meta.facility ?? "PT Karawang Precision Manufacturing";
+  const source = String(state?._meta.source ?? "mock");
+  const sapLabel = source === "s4hana_sandbox" ? "S/4HANA sandbox" : source === "s4hana" ? "S/4HANA" : "SAP mock";
   const shift = `Shift 1 · ${String(SHIFT_START).padStart(2, "0")}:00–${SHIFT_END}:00`;
   return (
     <header className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-surface px-4 py-2">
@@ -128,7 +130,7 @@ export function Header() {
       <div className="flex items-center gap-5">
         <span className="flex items-center gap-2 text-[15px]" role="status">
           <span className={cn("size-2.5 rounded-full", online ? "bg-ok-line" : "bg-danger-line")} aria-hidden />
-          SAP v{sapVersion} · {online ? "Terhubung" : "Terputus"}
+          {sapLabel} v{sapVersion} · {online ? "Terhubung" : "Terputus"}
         </span>
         <Mono className="text-[15px]" >
           <span className="font-bold">ID</span>

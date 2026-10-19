@@ -63,7 +63,7 @@ export function ShiftGantt({
         end: e,
         label: pend ? `${o.id} (tertunda)` : o.id,
         kind: pend ? "pending" : o.status === "RESCHEDULED" ? "rescheduled" : "order",
-        title: `${o.id} · ${o.product_name} · ${o.customer}`,
+        title: `${o.id}${o.sap_order_number ? ` (SAP ${o.sap_order_number})` : ""} · ${o.product_name} · ${o.customer}`,
       });
     }
     for (const m of maintenanceToday(state).filter((x) => x.work_center_id === w.id)) {
