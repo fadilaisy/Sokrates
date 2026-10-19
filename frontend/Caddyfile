@@ -11,11 +11,32 @@
 	log {
 		format json
 	}
+
+	# Proxy API requests to backend service
+	handle /api/* {
+		reverse_proxy {$BACKEND_URL:http://backend:8000}
+	}
+
+	# Frontend health check
 	handle /health {
 		respond "ok" 200
 	}
+
+	# Static files with SPA fallback
 	root * dist
 	encode gzip
+
+	# Security headers
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		X-XSS-Protection "1; mode=block"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' {$BACKEND_URL:http://backend:8000} ws: wss:;"
+	}
+
 	file_server
 	try_files {path} /index.html
 }
