@@ -1932,6 +1932,8 @@ async def health() -> dict[str, str]:
         "aicore_configured":  "yes" if aicore.configured() else "no — set AICORE_* and AI_API_URL in .env",
         "gemini_configured":  "yes" if GEMINI_API_KEY else "no — set GEMINI_API_KEY in .env",
         "sap_version":        str(_sap.get_version()),
+        "sap_source":         str(_sap.get_state()["_meta"].get("source", "mock")),
+        "sap_error":          str(_sap.get_state()["_meta"].get("s4hana_error", "")),
         "ledger_entries":     str(len(_ledger.get_all())),
         "maintenance_cases":  str(len(_maint_ledger.cases())),
     }
