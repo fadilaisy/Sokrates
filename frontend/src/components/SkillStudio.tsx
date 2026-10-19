@@ -87,6 +87,7 @@ export default function SkillStudio() {
     setError(null);
     try {
       const r = await api.lintSkill({
+        skill_id: skillId.trim(),
         skill_md: skillStudioDraft.skill_md,
         sla_penalties: skillStudioDraft.sla_penalties,
         hooks: skillStudioDraft.hooks,

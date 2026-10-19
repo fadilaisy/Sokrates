@@ -51,3 +51,6 @@ htmlcov/
 # RAG index + uploaded documents
 rag_data/
 rag/samples_out/
+
+# Local bug-hunt / review notes (agent output, not source)
+docs/findings-*.md

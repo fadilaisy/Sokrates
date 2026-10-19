@@ -5,7 +5,8 @@ Tests for the metadata-augmented RAG layer (rag/).
 
 Runs fully offline: the demo corpus is generated on the fly into a temp
 directory and the LLM is replaced with a fake where generation is tested.
-OCR tests are skipped when Tesseract is not installed.
+OCR-dependent assertions degrade gracefully when Tesseract is not installed
+(the scanned seed may fail to index and its golden entry is excluded).
 """
 
 from __future__ import annotations
@@ -73,7 +74,16 @@ def test_machine_matching_prefers_explicit_ids():
 # ── ingestion ───────────────────────────────────────────────────────────────
 
 def test_corpus_indexed_and_versioned(corpus):
-    assert all(r["status"] == "indexed" for r in corpus.values() if not r.get("duplicate")), corpus
+    for name, r in corpus.items():
+        if r.get("duplicate"):
+            continue
+        if name == samples.SCAN_NAME and not OCR_OK:
+            # No Tesseract here: the scan is the one seed that needs OCR, so a
+            # failed ingestion is the expected outcome — everything else must
+            # still index cleanly.
+            assert r["status"] == "failed" and r.get("error"), (name, r)
+        else:
+            assert r["status"] == "indexed", (name, r)
     v1 = doc_for("SOP_Overheat_Spindle_CNC_rev1.pdf")
     v2 = doc_for("SOP_Overheat_Spindle_CNC_rev2.pdf")
     assert v1["status"] == "superseded" and v1["superseded_by"] == v2["doc_id"]
@@ -128,7 +138,9 @@ def test_score_is_weighted_sum_and_ocr_penalised():
 # ── retrieval ───────────────────────────────────────────────────────────────
 
 def test_golden_set_full_mode(corpus):
-    report = run_eval(samples.GOLDEN, k=5, modes=["full"])
+    # g7 expects the scanned document, which only resolves with OCR installed.
+    golden = [g for g in samples.GOLDEN if OCR_OK or g["id"] != "g7"]
+    report = run_eval(golden, k=5, modes=["full"])
     assert report["unresolved_expectations"] == []
     m = report["modes"]["full"]
     assert m["recall"] == 1.0 and m["mrr"] >= 0.9 and m["abstain_accuracy"] == 1.0

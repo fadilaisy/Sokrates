@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { api, ApiError, formatIDR, WS_TELEMETRY } from "../lib/api";
 import type { ApproveReceipt, DisruptResponse, DriftDetail, LedgerEntry, SapState, Scenario, ShiftMetrics, TelemetryFrame } from "../lib/api";
 import { normalizeStatus, windowLabel } from "../lib/shift";
+import { isMuted, playSound, setMuted, unlockAudio } from "../lib/sound";
 import type { MachineStatus } from "../lib/shift";
 import type { SkillStudioFormData, SkillStudioDraft, SkillStudioLintResult } from "../lib/api";
 
@@ -99,6 +100,8 @@ interface CockpitValue {
   closeChat: () => void;
   sendChat: (text: string) => Promise<void>;
   // misc
+  muted: boolean;
+  toggleMute: () => void;
   toast: string | null;
   reset: () => Promise<void>;
   resetting: boolean;
@@ -169,6 +172,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
 
   const [toast, setToast] = useState<string | null>(null);
   const [resetting, setResetting] = useState(false);
+  const [muted, setMutedState] = useState(isMuted);
 
   // Phase 3: Skill Studio
   const [skillStudioOpen, setSkillStudioOpen] = useState(false);
@@ -191,26 +195,80 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     window.setTimeout(() => setToast((cur) => (cur === t ? null : cur)), 4500);
   }, []);
 
+  // ── notification sounds ──────────────────────────────────────────────────
+  // Both refs stay null until the first successful load, so the initial
+  // fetch never beeps.
+  const ledgerCount = useRef<number | null>(null);
+  const machineStatus = useRef<Map<string, string> | null>(null);
+
+  const noteLedger = useCallback((l: LedgerEntry[]) => {
+    if (ledgerCount.current !== null && l.length > ledgerCount.current) playSound("ledger");
+    ledgerCount.current = l.length;
+    setLedger(l);
+  }, []);
+
+  // A machine newly in FAULT/DISRUPTED covers the drill and changes made in other tabs.
+  const noteMachines = useCallback((s: SapState) => {
+    const next = new Map(s.work_centers.map((w) => [w.id, normalizeStatus(w.status)] as [string, string]));
+    const prev = machineStatus.current;
+    if (prev && [...next].some(([id, st]) => (st === "FAULT" || st === "DISRUPTED") && prev.get(id) !== st)) {
+      playSound("disruption");
+    }
+    machineStatus.current = next;
+  }, []);
+
+  const toggleMute = useCallback(() => {
+    unlockAudio();
+    setMutedState((m) => {
+      setMuted(!m);
+      return !m;
+    });
+  }, []);
+
+  useEffect(() => {
+    const unlock = () => unlockAudio();
+    window.addEventListener("pointerdown", unlock, { once: true });
+    window.addEventListener("keydown", unlock, { once: true });
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, []);
+
   const load = useCallback(async () => {
     try {
       const [s, h, l, m] = await Promise.all([
         api.state(),
         api.health(),
-        api.ledger().catch(() => [] as LedgerEntry[]),
+        // A failed ledger fetch keeps the last list rather than blanking it.
+        api.ledger().catch(() => null),
         api.metrics().catch(() => null),
       ]);
+      noteMachines(s);
       setState(s);
       setMetrics(m);
       setSapVersion(s._meta.version);
-      setLedger(l);
+      if (l) noteLedger(l);
       setOnline(h.status === "ok");
-      setAiConfigured(String(h.gemini_configured ?? "").startsWith("yes"));
+      setAiConfigured(
+        String(h.gemini_configured ?? "").startsWith("yes") ||
+        String(h.aicore_configured ?? "").startsWith("yes"),
+      );
       setError(null);
     } catch (e) {
       setOnline(false);
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, []);
+  }, [noteMachines, noteLedger]);
+
+  useEffect(() => {
+    if (phase === "detecting") playSound("disruption");
+  }, [phase]);
+
+  const safetyKey = safety ? `${safety.machine_id}|${safety.rule}|${safety.timestamp ?? ""}` : null;
+  useEffect(() => {
+    if (safetyKey) playSound("disruption");
+  }, [safetyKey]);
 
   useEffect(() => {
     load();
@@ -420,13 +478,13 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     try {
       const [v, l] = await Promise.all([api.verify(), api.ledger()]);
       setVerifyResult(v);
-      setLedger(l);
+      noteLedger(l);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setVerifying(false);
     }
-  }, []);
+  }, [noteLedger]);
 
   // ── chat ─────────────────────────────────────────────────────────────────
   const push = (m: Omit<ChatMessage, "id">) => {
@@ -594,7 +652,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       wsStatus, lastAnalysis, safety, sendTelemetry, runFullAnalysis,
       ledgerOpen, setLedgerOpen, verifying, verifyResult, verify,
       chatOpen, chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat,
-      toast, reset, resetting,
+      muted, toggleMute, toast, reset, resetting,
       // Phase 3: Skill Studio
       skillStudioOpen, setSkillStudioOpen, skillStudioState, setSkillStudioState,
       skillStudioFormData, setSkillStudioFormData, skillStudioDraft, setSkillStudioDraft,
@@ -604,7 +662,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       state, metrics, online, aiConfigured, error, ledger, sapVersion, page, phase, detectStep, params, result, receipt, runDisruption,
       approvalFor, approving, conflict, approver, openApproval, closeApproval, confirmApproval, injecting, injectDrill, displayStatus, live, wsStatus,
       lastAnalysis, safety, sendTelemetry, runFullAnalysis, ledgerOpen, verifying, verifyResult, verify, chatOpen,
-      chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat, toast, reset, resetting,
+      chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat, muted, toggleMute, toast, reset, resetting,
       skillStudioOpen, skillStudioState, skillStudioFormData, skillStudioDraft, skillStudioLintResult,
     ],
   );

@@ -417,7 +417,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify(b),
     }),
-  lintSkill: (b: { skill_md: string; sla_penalties: any; hooks: any[]; interlocks: any[] }) =>
+  lintSkill: (b: { skill_md: string; sla_penalties: any; hooks: any[]; interlocks: any[]; skill_id?: string }) =>
     req<{ valid: boolean; errors: string[]; warnings: string[] }>("/api/skills/lint", {
       method: "POST",
       body: JSON.stringify(b),

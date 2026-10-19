@@ -6,7 +6,7 @@ open questions were answered as follows, and the design changed accordingly:
 | Open question | Answer | Effect on the design |
 | --- | --- | --- |
 | Scanned or digital, which language? | Mixed scans + digital, Bahasa + English | Text layer first, Tesseract OCR (`ind+eng`) only for pages without text; a bilingual shop-floor lexicon so an Indonesian question finds an English OEM manual (and vice versa) |
-| On-prem or cloud? | **No embedding model.** A scoring layer (decision model) over indexed metadata ranks the passages, then a generative LLM (Gemini, Claude Haiku 4.5) writes the cited answer | Dense retrieval and the cross-encoder are removed. Candidates come from FTS5/BM25 under hard metadata filters, and the scoring layer is deterministic and explainable |
+| On-prem or cloud? | **No embedding model.** A scoring layer (decision model) over indexed metadata ranks the passages, then a generative LLM (GPT-5.4 via SAP AI Core by default; Gemini / Claude Haiku fallbacks) writes the cited answer | Dense retrieval and the cross-encoder are removed. Candidates come from FTS5/BM25 under hard metadata filters, and the scoring layer is deterministic and explainable |
 | "Scores based on what happened"? | Incident-context-aware reranking | Incident context (machine, fault code, disruption type, severity) drives hard filters, the metadata term M, reserved safety slots, and the query concepts |
 | Current data store? | None (SQLite) | One SQLite file: typed metadata columns + JSON arrays + an FTS5 index. No new infrastructure |
 
@@ -24,12 +24,14 @@ python3 -m pytest tests/test_rag.py -q         # offline test suite
 In the cockpit, open **📚 Dokumen & RAG**. **Muat korpus demo** loads the demo
 documents (the button calls `POST /api/rag/seed-demo` as admin).
 
-Environment (`.env`): `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`,
-`RAG_GEN_PROVIDER=auto|gemini|claude` (auto = Gemini first, Claude Haiku 4.5 as
-fallback), `CLAUDE_MODEL` (default `claude-haiku-4-5`), `RAG_DATA_DIR`
-(default `./rag_data`), `RAG_OCR_LANGS` (default `ind+eng`). Without any LLM
-key, `/api/answer` still returns the top passages, with status
-`llm_unavailable`.
+Environment (`.env`): `AICORE_*` + `AI_API_URL` (main path; orchestration picks
+the model per call — see `.env.example`), `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`,
+`RAG_GEN_PROVIDER=auto|gemini|claude` (auto = AI Core first, then Gemini, then
+Claude — Gemini/Claude run through AI Core orchestration when AI Core is
+configured, and via the public vendor APIs otherwise), `CLAUDE_MODEL` (public
+Anthropic name, default `claude-haiku-4-5`), `RAG_DATA_DIR` (default
+`./rag_data`), `RAG_OCR_LANGS` (default `ind+eng`). Without any LLM key,
+`/api/answer` still returns the top passages, with status `llm_unavailable`.
 
 ## Pipeline
 
