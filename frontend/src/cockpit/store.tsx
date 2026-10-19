@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { api, ApiError, formatIDR, WS_TELEMETRY } from "../lib/api";
-import type { ApproveReceipt, DisruptResponse, DriftDetail, LedgerEntry, SapState, Scenario, ShiftMetrics, TelemetryFrame } from "../lib/api";
+import type { ApproveReceipt, DisruptResponse, DriftDetail, LedgerEntry, RagSource, SapState, Scenario, ShiftMetrics, TelemetryFrame } from "../lib/api";
 import { normalizeStatus, windowLabel } from "../lib/shift";
 import { isMuted, playSound, setMuted, unlockAudio } from "../lib/sound";
 import type { MachineStatus } from "../lib/shift";
@@ -37,6 +37,8 @@ export interface ChatMessage {
   text: string;
   kind?: "progress" | "result";
   scenario?: Scenario;
+  /** SOP/plant-document passages the reply cites as [S1], [S2] … */
+  sources?: RagSource[];
 }
 
 type WsStatus = "connecting" | "open" | "closed";
@@ -601,7 +603,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
         try {
           const r = await api.chat(t);
           setMessages((cur) => cur.filter((m) => m.id !== pid));
-          push({ from: "ai", text: r.reply });
+          push({ from: "ai", text: r.reply, sources: r.sources });
         } catch {
           setMessages((cur) => cur.filter((m) => m.id !== pid));
           push({

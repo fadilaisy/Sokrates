@@ -4,6 +4,7 @@ import { API_BASE, maintApi } from "../lib/api";
 import type { DocRef, MaintCase, MaintChat, MaintFlow, MaintSearch, Playbook } from "../lib/api";
 import { cn } from "../lib/utils";
 import { Header } from "./Shell";
+import { SourceCitations } from "./Citations";
 import { Btn, Card, Mono, Spinner } from "./ui";
 
 /*
@@ -26,6 +27,13 @@ const CONF_STYLE: Record<Playbook["confidence"], string> = {
 const CONF_LABEL: Record<Playbook["confidence"], string> = {
   high: "keyakinan tinggi", medium: "keyakinan sedang", low: "keyakinan rendah", none: "tidak ada preseden",
 };
+
+/** Plant-document sources of a chat answer: the cited ones, or all retrieved ones when nothing was cited. */
+function chatDocs(chat: MaintChat) {
+  const docs = (chat.sources ?? []).filter((s) => !s.case_id);
+  const cited = docs.filter((s) => s.cited);
+  return cited.length ? cited : docs;
+}
 
 function CaseChip({ id, onOpen }: { id: string; onOpen: (id: string) => void }) {
   return (
@@ -419,16 +427,15 @@ export function MaintenancePage() {
             {chat && (
               <div className="flex flex-col gap-2 rounded-md bg-page p-3 text-[15px]">
                 <p className="whitespace-pre-wrap">{chat.answer ?? chat.message ?? "Tidak ada jawaban."}</p>
-                <p className="flex flex-wrap items-center gap-1.5 text-[13px] text-muted-ink">
-                  Sumber:
-                  {(chat.sources ?? []).map((s) =>
-                    s.case_id ? (
-                      <CaseChip key={s.citation} id={s.case_id} onOpen={setOpen} />
-                    ) : (
-                      <Mono key={s.citation}>{s.citation}</Mono>
-                    ),
-                  )}
-                </p>
+                {(chat.sources ?? []).some((s) => s.case_id) && (
+                  <p className="flex flex-wrap items-center gap-1.5 text-[13px] text-muted-ink">
+                    Kasus ledger:
+                    {(chat.sources ?? []).filter((s) => s.case_id).map((s) => (
+                      <CaseChip key={s.citation} id={s.case_id!} onOpen={setOpen} />
+                    ))}
+                  </p>
+                )}
+                <SourceCitations sources={chatDocs(chat)} />
               </div>
             )}
           </div>

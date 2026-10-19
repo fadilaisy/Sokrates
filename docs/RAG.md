@@ -82,6 +82,13 @@ The LLM must return `{"claims": [{"text", "sources": ["S1"]}]}`. The post-check 
 - lexical support is under 34%. Support is measured through the ID↔EN lexicon, so an Indonesian claim can be checked against an English manual.
 
 Rejected claims are returned separately and are never part of the answer.
+The AI Supervisor chat (`/api/chat`) retrieves passages for each free-form question and asks the model to
+end every sentence that uses a document fact with its id (`[S1]`). It returns only the passages the reply
+cites (ids the model made up are dropped), and `rag/highlight.py` marks the sentence in each passage that
+best supports each citing claim (`highlights` = character offsets, `quote` = those sentences). `/api/answer`
+and the maintenance chat return the same `highlights`, `quote` and `cited` fields. The cockpit shows them
+as expandable source chips under the answer: document, section, page, and the passage with the supporting
+text highlighted, so a supervisor can verify each claim by hand.
 `/api/disrupt` now retrieves passages for the incident and passes them to the Gemini summary prompt. It also returns
 `sources` and `grounding_abstained`. The cockpit shows these as citation chips that open the page with the passage
 highlighted.
