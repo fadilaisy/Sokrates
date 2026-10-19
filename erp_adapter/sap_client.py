@@ -44,8 +44,8 @@ class SAPClient:
 
     def __init__(self, state_file=None):
         if state_file is None:
-            state_file = Path(__file__).parent / "mock_sap_state.json"
-        self._state_file = Path(state_file)
+            state_file = Path(__file__).resolve().parent / "mock_sap_state.json"
+        self._state_file = Path(state_file).resolve()
         self._lock = threading.Lock()
         self._state = self._load()
 
