@@ -16,6 +16,7 @@ claude   AI Core orchestration as AICORE_CLAUDE_MODEL (default
          Anthropic directly (ANTHROPIC_API_KEY, CLAUDE_MODEL; default claude-haiku-4-5).
 
 RAG_GEN_PROVIDER=auto (default) tries AI Core first, then Gemini, then Claude,
+then (orchestration on) Gemini and Claude on their own APIs when their keys are set,
 skipping any that are not configured, so the demo keeps working if one key is
 missing or one API errors.
 """
@@ -55,6 +56,12 @@ def available_providers() -> List[str]:
         out.append("aicore")
         if aicore.orchestration_id():
             out.extend(["gemini", "claude"])
+            # All three above share one AI Core login; if that tenant is down,
+            # the vendors' own APIs are the only way left to answer.
+            if config.gemini_key():
+                out.append("gemini_direct")
+            if config.anthropic_key():
+                out.append("claude_direct")
             return out
     if config.gemini_key():
         out.append("gemini")
@@ -147,6 +154,11 @@ def _call_gemini(system: str, user: str, max_tokens: int, json_mode: bool, timeo
         # Same tenant call as aicore, different model_name — no vendor key needed.
         return _call_aicore_model("gemini", config.aicore_gemini_model(), system, user,
                                   max_tokens, json_mode, timeout)
+    return _call_gemini_direct(system, user, max_tokens, json_mode, timeout)
+
+
+def _call_gemini_direct(system: str, user: str, max_tokens: int, json_mode: bool,
+                        timeout: float) -> LLMResult:
     model = config.gemini_model()
     gen_cfg: dict = {**gemini_generation_config(max_tokens, model), "temperature": 0.1}
     if json_mode:
@@ -175,6 +187,11 @@ def _call_claude(system: str, user: str, max_tokens: int, json_mode: bool, timeo
         # Same tenant call as aicore, different model_name — no vendor key needed.
         return _call_aicore_model("claude", config.aicore_claude_model(), system, user,
                                   max_tokens, json_mode, timeout)
+    return _call_claude_direct(system, user, max_tokens, json_mode, timeout)
+
+
+def _call_claude_direct(system: str, user: str, max_tokens: int, json_mode: bool,
+                        timeout: float) -> LLMResult:
     model = config.claude_model()
     messages = [{"role": "user", "content": user}]
     if json_mode:
@@ -252,7 +269,8 @@ def complete(system: str, user: str, *, max_tokens: int = 1200, json_mode: bool 
     if not order:
         return LLMResult(False, error="Tidak ada LLM yang dikonfigurasi (set AICORE_*, GEMINI_API_KEY atau ANTHROPIC_API_KEY)."), errors
     for p in order:
-        fn = {"aicore": _call_aicore, "gemini": _call_gemini}.get(p, _call_claude)
+        fn = {"aicore": _call_aicore, "gemini": _call_gemini, "gemini_direct": _call_gemini_direct,
+              "claude_direct": _call_claude_direct}.get(p, _call_claude)
         res = fn(system, user, max_tokens, json_mode, timeout)
         if res.ok and json_mode:
             res.data = parse_json_loose(res.text)

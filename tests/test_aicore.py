@@ -276,3 +276,27 @@ def test_vendor_path_used_when_aicore_not_configured(vendor_only):
     assert url == llm.ANTHROPIC_URL
     assert payload["model"] == "claude-haiku-4-5"
     assert headers["x-api-key"] == "a"
+
+
+def test_vendor_keys_back_up_aicore_when_tenant_unreachable(monkeypatch):
+    """AI Core login fails (as on Railway with a ConnectError): RAG still answers
+    through the Gemini key instead of failing aicore → gemini → claude on the same login."""
+    for k, v in ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("AICORE_ORCHESTRATION_ID", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    aicore.reset_token()
+    vendor = FakeVendorHTTP()
+
+    def post(url, **kw):
+        if url.endswith("/oauth/token"):
+            raise httpx.ConnectError("Name or service not known")
+        return vendor.post(url, json=kw.get("json"), headers=kw.get("headers"))
+
+    monkeypatch.setattr(httpx, "post", post)
+    assert llm.available_providers() == ["aicore", "gemini", "claude", "gemini_direct"]
+    res, errors = llm.complete("sys", "user", json_mode=False)
+    assert res.ok and res.provider == "gemini" and res.text == "Halo dunia"
+    assert len(errors) == 3 and "auth.example" in errors[0] and "ConnectError" in errors[0]
+    aicore.reset_token()
