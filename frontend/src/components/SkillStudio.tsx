@@ -185,7 +185,7 @@ export default function SkillStudio() {
           <div className="flex flex-col gap-3">
             {draftErrors.length > 0 && (
               <div role="alert" className="rounded-md border border-danger-line bg-danger-bg px-3 py-2 text-[15px] text-fault">
-                <p className="font-bold">Draft ditolak (hierarki Tier tidak boleh dilonggarkan):</p>
+                <p className="font-bold">Draft ditolak, periksa isian berikut:</p>
                 <ul className="list-disc pl-5">
                   {draftErrors.map((e) => <li key={e}>{e}</li>)}
                 </ul>
