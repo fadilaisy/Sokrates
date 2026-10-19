@@ -1,0 +1,43 @@
+# Railway Configuration for SkillForge
+# Dual-service setup: Backend (Python FastAPI) + Frontend (Vite static)
+
+# Backend Service
+[[services]]
+name = "backend"
+source = "."
+build.dockerfile = "Dockerfile"
+
+[services.health]
+path = "/health"
+interval_seconds = 30
+timeout_seconds = 10
+
+[services.ports]
+http = 8000
+
+[services.env]
+PORT = "8000"
+GEMINI_API_KEY = ""
+GEMINI_MODEL = "gemini-3.5-flash"
+AICORE_CLIENT_ID = ""
+AICORE_CLIENT_SECRET = ""
+AI_API_URL = ""
+
+# Frontend Service
+[[services]]
+name = "frontend"
+source = "./frontend"
+build.dockerfile = "frontend/Dockerfile"
+
+[services.health]
+path = "/health"
+interval_seconds = 30
+timeout_seconds = 10
+
+[services.ports]
+http = 3000
+
+[services.env]
+PORT = "3000"
+BACKEND_URL = "http://backend:8000"
+VITE_API_BASE = "/api"
