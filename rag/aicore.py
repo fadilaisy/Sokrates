@@ -42,6 +42,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from urllib.parse import urlsplit
 from typing import Dict, List, Optional, Tuple
 
 import httpx
@@ -126,7 +127,11 @@ def get_token(timeout: float = 20.0) -> str:
         except httpx.HTTPStatusError as exc:
             raise _status_error("AI Core login", exc) from None
         except Exception as exc:
-            raise AICoreError(f"AI Core login failed: {type(exc).__name__}") from None
+            # Host and error only (never the client id/secret) so a wrong
+            # AICORE_AUTH_URL or a DNS/network failure is visible in the logs.
+            host = urlsplit(url).hostname or url[:80]
+            raise AICoreError(f"AI Core login to {host} failed: {type(exc).__name__}: "
+                              f"{str(exc)[:200]}") from None
         token = body.get("access_token")
         if not token:
             raise AICoreError("AI Core login returned no access_token")

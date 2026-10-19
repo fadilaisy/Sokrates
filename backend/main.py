@@ -29,6 +29,7 @@ Docs:   http://localhost:8000/docs
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import re
@@ -90,8 +91,17 @@ def _safe_gemini_error(exc: Exception) -> str:
 
 
 def _active_model() -> str:
-    """Model that answers _call_gemini first (AI Core when configured, else Gemini)."""
-    return aicore.model_label() if aicore.configured() else GEMINI_MODEL
+    """Model that answered the last _call_gemini in this request; before any call,
+    the one tried first (AI Core when configured, else Gemini)."""
+    return _answered_by.get() or (aicore.model_label() if aicore.configured() else GEMINI_MODEL)
+
+
+# Set by _call_gemini to the model that actually produced the text, so a reply
+# served by the Gemini backup isn't labelled as GPT-5.4.
+_answered_by: contextvars.ContextVar[str] = contextvars.ContextVar("answered_by", default="")
+# Gemini overload/quota/server errors worth one retry before giving up.
+_GEMINI_RETRY_STATUS = {429, 500, 502, 503, 504}
+GEMINI_RETRY_DELAY = float(os.getenv("GEMINI_RETRY_DELAY", "2"))
 
 # Async HTTP client for Gemini API
 _gemini_client: httpx.AsyncClient | None = (
@@ -484,6 +494,7 @@ async def _call_gemini(prompt: str, max_tokens: int = 512, *, interactive: bool 
             # GPT-5.x counts hidden reasoning against the limit, so give it headroom.
             text = await asyncio.to_thread(aicore.ask, prompt, max_tokens=max(max_tokens, 2048))
             _gemini_cache_put(cache_key, text)
+            _answered_by.set(aicore.model_label())
             return text
         except aicore.AICoreError as exc:
             print(f"[aicore] {exc} — falling back to Gemini", file=sys.stderr)
@@ -504,25 +515,33 @@ async def _call_gemini(prompt: str, max_tokens: int = 512, *, interactive: bool 
         "generationConfig": gemini_generation_config(max_tokens, GEMINI_MODEL),
     }
 
-    try:
-        response = await _gemini_client.post(
-            GEMINI_API_URL,
-            json=payload,
-            headers={"Content-Type": "application/json",
-                     "x-goog-api-key": GEMINI_API_KEY},
-        )
-        response.raise_for_status()
-        text, finish = gemini_text(response.json())
-        if text:
-            _gemini_cache_put(cache_key, text)
-            return text
-        print(f"[gemini] empty reply (finishReason={finish})", file=sys.stderr)
-        return (f"[Gemini: tidak ada teks dalam respons (finishReason={finish})] "
-                "Silakan tinjau skenario solver secara manual.")
-    except Exception as exc:
-        err = _safe_gemini_error(exc)
-        print(f"[gemini] {err}", file=sys.stderr)
-        return f"[Gemini error: {err}] Silakan tinjau skenario solver secara manual."
+    for attempt in range(2):
+        try:
+            response = await _gemini_client.post(
+                GEMINI_API_URL,
+                json=payload,
+                headers={"Content-Type": "application/json",
+                         "x-goog-api-key": GEMINI_API_KEY},
+            )
+            response.raise_for_status()
+            text, finish = gemini_text(response.json())
+            if text:
+                _gemini_cache_put(cache_key, text)
+                _answered_by.set(GEMINI_MODEL)
+                return text
+            print(f"[gemini] empty reply (finishReason={finish})", file=sys.stderr)
+            return (f"[Gemini: tidak ada teks dalam respons (finishReason={finish})] "
+                    "Silakan tinjau skenario solver secara manual.")
+        except Exception as exc:
+            err = _safe_gemini_error(exc)
+            print(f"[gemini] {err}", file=sys.stderr)
+            transient = (isinstance(exc, httpx.HTTPStatusError)
+                         and exc.response.status_code in _GEMINI_RETRY_STATUS)
+            if attempt == 0 and transient:
+                await asyncio.sleep(GEMINI_RETRY_DELAY)
+                continue
+            return f"[Gemini error: {err}] Silakan tinjau skenario solver secara manual."
+    return "[Gemini error: retry exhausted] Silakan tinjau skenario solver secara manual."
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1011,6 +1030,14 @@ async def post_chat(body: ChatRequest) -> ChatResponse:
     # Gemini 3.x thinking tokens count against maxOutputTokens; 300 cut replies
     # mid-sentence ("...dalam status"). 1024 leaves room for a 3-sentence answer.
     reply = await _call_gemini(prompt, max_tokens=1024)
+    if reply.startswith("[Gemini"):
+        # Both AI Core and the Gemini backup failed: say so plainly instead of
+        # showing the provider's raw error text in the chat bubble.
+        print(f"[chat] no model answered: {reply[:200]}", file=sys.stderr)
+        return ChatResponse(
+            reply=("AI Supervisor sedang tidak bisa menjawab karena layanan AI sedang sibuk "
+                   "atau tidak terjangkau. Coba kirim ulang pertanyaan sebentar lagi."),
+            model_used="unavailable", sources=[])
     reply, sources = _cite_chat_sources(reply, packed)
     return ChatResponse(reply=reply, model_used=_active_model(), sources=sources)
 

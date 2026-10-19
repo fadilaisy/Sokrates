@@ -89,3 +89,32 @@ def test_call_gemini_returns_joined_text(gemini_only):
                                                    "content": {"parts": [{"text": "A"}, {"text": "B"}]}}]}))
     gemini_only.setattr(m, "_gemini_client", fake)
     assert asyncio.run(m._call_gemini("p-ok")) == "AB"
+
+
+def test_call_gemini_retries_once_on_503(gemini_only):
+    class _Seq:
+        def __init__(self, resps):
+            self.resps, self.calls = list(resps), 0
+
+        async def post(self, url, json=None, headers=None):
+            self.calls += 1
+            return self.resps.pop(0)
+
+    busy = _resp(503, {"error": {"status": "UNAVAILABLE", "message": "high demand"}})
+    ok = _resp(200, {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": "OK"}]}}]})
+    fake = _Seq([busy, ok])
+    gemini_only.setattr(m, "_gemini_client", fake)
+    gemini_only.setattr(m, "GEMINI_RETRY_DELAY", 0)
+    assert asyncio.run(m._call_gemini("p-retry")) == "OK"
+    assert fake.calls == 2
+
+
+def test_chat_hides_raw_provider_error(gemini_only):
+    async def failing(prompt, max_tokens=512, *, interactive=True):
+        return "[Gemini error: HTTP 503: UNAVAILABLE] Silakan tinjau skenario solver secara manual."
+
+    gemini_only.setattr(m, "_call_gemini", failing)
+    gemini_only.setattr(m, "_chat_sources", lambda message, state: [])
+    out = asyncio.run(m.post_chat(m.ChatRequest(message="sop mesin getar")))
+    assert "Gemini" not in out.reply and "503" not in out.reply
+    assert out.model_used == "unavailable"
