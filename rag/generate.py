@@ -261,7 +261,7 @@ def answer_from_retrieval(query: str, retrieval: Dict[str, Any], *, store: Optio
             "message": ("Sumber yang ditemukan tidak cukup untuk menjawab dengan pasti." if status == "insufficient"
                         else None),
             "answer": answer, "claims": accepted, "rejected_claims": rejected,
-            "sources": [_public_source(p) for p in packed], "injection_flags": injection,
+            "sources": _highlighted_sources(packed, accepted), "injection_flags": injection,
             "provider": res.provider, "model": res.model, "fallback_errors": errors,
             "latency_ms": round((time.perf_counter() - t0) * 1000, 1)}
 
@@ -269,6 +269,20 @@ def answer_from_retrieval(query: str, retrieval: Dict[str, Any], *, store: Optio
 def _public_source(p: dict) -> dict:
     return {k: p[k] for k in ("sid", "chunk_id", "doc_id", "doc_title", "doc_type", "page", "bbox", "citation",
                               "constraint_tier", "forced_safety", "expanded", "injection_flagged", "text")}
+
+
+def _highlighted_sources(packed: List[dict], accepted: List[dict]) -> List[dict]:
+    """Public sources plus the sentences each one's accepted claims rely on, for manual verification."""
+    from .highlight import highlight_spans, quote
+
+    out = []
+    for p in packed:
+        src = _public_source(p)
+        claims = [c["text"] for c in accepted if p["sid"] in c["sources"]]
+        spans = highlight_spans(src["text"], claims)
+        src["highlights"], src["quote"], src["cited"] = spans, quote(src["text"], spans), bool(claims)
+        out.append(src)
+    return out
 
 
 def answer(incident: Dict[str, Any], query: str, *, store: Optional[Store] = None,

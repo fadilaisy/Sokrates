@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { api, formatIDR } from "../lib/api";
 import { cn } from "../lib/utils";
 import { changeKind, shortHash, timeRange, wibTime } from "../lib/shift";
+import { CitedText, SourceCitations } from "./Citations";
 import { useCockpit } from "./store";
 import { AssistantFace, Btn, Card, Mono, Spinner } from "./ui";
 
@@ -355,8 +356,9 @@ export function ChatDrawer() {
                   <Spinner className="size-5" /> {m.text}
                 </span>
               ) : (
-                <p>{m.text}</p>
+                <CitedText text={m.text} />
               )}
+              <SourceCitations sources={m.sources} className="mt-3" />
               {m.kind === "result" && m.scenario && (
                 <div className="mt-3 flex flex-col gap-2 rounded-lg border-2 border-accent-blue bg-surface p-3">
                   <p className="text-[16px] font-semibold">{m.scenario.name_id}</p>

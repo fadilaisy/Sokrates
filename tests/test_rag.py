@@ -235,3 +235,68 @@ def test_api_end_to_end(corpus):
     dis = c.post("/api/disrupt", json={"machine_id": "CNC-02", "disruption_type": "OVERHEAT",
                                        "start_hour": 2, "end_hour": 5}).json()
     assert dis["sources"] and dis["grounding_abstained"] is False and len(dis["scenarios"]) == 3
+
+
+# ── citation highlights ─────────────────────────────────────────────────────
+
+def test_highlight_spans_pick_supporting_sentence():
+    from rag.highlight import highlight_spans, segments
+
+    text = ("Recovery procedure.\nStop the spindle immediately.\n"
+            "Let the spindle cool for at least 20 minutes with the enclosure door open. "
+            "Check the fan filter for clogging.")
+    assert len(segments(text)) == 4
+    spans = highlight_spans(text, ["Biarkan spindle dingin minimal 20 menit dengan pintu terbuka [S1]."])
+    assert [text[s:e] for s, e in spans] == [
+        "Let the spindle cool for at least 20 minutes with the enclosure door open."]
+    assert highlight_spans(text, ["Jadwal kalibrasi printer label gudang."]) == []
+    assert segments("Tekanan minimal 2.5 bar. Lanjutkan.") == [(0, 24), (25, 35)]
+
+
+def test_generation_sources_carry_highlights(corpus, monkeypatch):
+    monkeypatch.setattr(generate, "available_providers", lambda: ["gemini"])
+    monkeypatch.setattr(generate, "complete", _fake_llm([
+        {"text": "Biarkan spindle dingin minimal 20 menit dengan pintu enclosure terbuka.", "sources": ["S1", "S2"]},
+    ]))
+    ans = generate.answer({"machine_id": "CNC-02", "fault_code": "Alarm 108"}, "langkah pemulihan overheat")
+    cited = [s for s in ans["sources"] if s["highlights"]]
+    assert cited
+    for s in cited:
+        for a, b in s["highlights"]:
+            assert "20" in s["text"][a:b] or "cool" in s["text"][a:b].lower()
+        assert s["quote"]
+
+
+def test_chat_returns_only_cited_sources_with_highlights(corpus, monkeypatch):
+    from fastapi.testclient import TestClient
+    import backend.main as m
+
+    seen = {}
+
+    async def fake_llm(prompt, max_tokens=512):
+        seen["prompt"] = prompt
+        return ("Biarkan spindle dingin minimal 20 menit dengan pintu enclosure terbuka [S1]. "
+                "CNC-02 sedang berjalan normal [S9].")
+
+    monkeypatch.setattr(m, "_call_gemini", fake_llm)
+    r = TestClient(m.app).post("/api/chat", json={"message": "Langkah pemulihan overheat CNC-02?"})
+    assert r.status_code == 200
+    body = r.json()
+    assert '<source id="S1"' in seen["prompt"]
+    assert "[S9]" not in body["reply"] and "[S1]" in body["reply"]
+    assert [s["sid"] for s in body["sources"]] == ["S1"]
+    src = body["sources"][0]
+    assert src["doc_title"] and src["page"] and src["citation"]
+    assert src["highlights"] and src["quote"] == " … ".join(src["text"][a:b] for a, b in src["highlights"])
+
+
+def test_chat_without_citations_has_no_sources(corpus, monkeypatch):
+    from fastapi.testclient import TestClient
+    import backend.main as m
+
+    async def fake_llm(prompt, max_tokens=512):
+        return "Semua mesin berjalan normal."
+
+    monkeypatch.setattr(m, "_call_gemini", fake_llm)
+    body = TestClient(m.app).post("/api/chat", json={"message": "Mesin mana yang butuh perhatian?"}).json()
+    assert body["sources"] == [] and body["reply"] == "Semua mesin berjalan normal."

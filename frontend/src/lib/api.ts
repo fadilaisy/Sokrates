@@ -157,6 +157,12 @@ export interface RagSource {
   text?: string;
   breakdown?: ScoreBreakdown | null;
   sid?: string;
+  /** [start, end] character offsets into `text` of the sentences the answer relies on. */
+  highlights?: number[][];
+  /** The highlighted sentences joined, for a short preview. */
+  quote?: string;
+  /** False when the passage was retrieved but no accepted claim cites it. */
+  cited?: boolean;
 }
 
 export interface RagDoc {
@@ -407,7 +413,7 @@ export const api = {
       body: JSON.stringify({ supervisor_description }),
     }),
   chat: (message: string) =>
-    req<{ reply: string; model_used: string }>("/api/chat", {
+    req<{ reply: string; model_used: string; sources?: RagSource[] }>("/api/chat", {
       method: "POST",
       body: JSON.stringify({ message }),
     }),
