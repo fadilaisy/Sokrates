@@ -1046,95 +1046,124 @@ async def post_skills_draft(body: SkillDraftRequest) -> SkillDraftResponse:
             validation_errors=validation_errors,
         )
 
-    # Fallback template if no LLM is configured
-    if _gemini_client is None and not aicore.configured():
-        return SkillDraftResponse(
-            skill_md=_create_fallback_skill_md(
-                body.machine_type,
-                body.failure_mode,
-                body.sla_class_a_penalty_per_hour_idr,
-                body.sla_class_b_penalty_per_hour_idr,
-                body.sla_class_c_penalty_per_hour_idr,
-            ),
-            sla_penalties={
-                "schema_version": "1.0",
-                "order_classes": {
-                    "A": {"penalty_per_hour_idr": body.sla_class_a_penalty_per_hour_idr,
-                          "max_penalty_idr": min(body.sla_class_a_penalty_per_hour_idr * 8, 150_000_000)},
-                    "B": {"penalty_per_hour_idr": body.sla_class_b_penalty_per_hour_idr,
-                          "max_penalty_idr": body.sla_class_b_penalty_per_hour_idr * 20},
-                    "C": {"penalty_per_hour_idr": body.sla_class_c_penalty_per_hour_idr,
-                          "max_penalty_idr": body.sla_class_c_penalty_per_hour_idr * 20},
-                },
-                "operational_costs": {
-                    "overtime_cost_per_hour_idr": body.overtime_cost_per_hour_idr,
-                    "changeover_cost_idr": body.changeover_cost_idr,
-                },
-            },
-            hooks=_create_fallback_hooks(body.safety_thresholds),
-            interlocks=_create_fallback_interlocks(body.safety_thresholds),
-            validation_errors=[],
-        )
+    # The structured files are built here, not by the LLM: Tier 1 interlocks come
+    # from the base skill on disk (tightened by the user's thresholds), so a model
+    # can never relax them, and there is no large JSON reply to parse.
+    sla_penalties = _draft_sla_penalties(body)
+    hooks = _draft_hooks()
+    interlocks = _draft_interlocks(body.safety_thresholds)
 
-    # Call Gemini for skill generation
+    skill_md = ""
+    if _gemini_client is not None or aicore.configured():
+        skill_md = await _draft_skill_md_llm(body, interlocks)
+    if not skill_md:
+        skill_md = _create_fallback_skill_md(body.machine_type, body.failure_mode)
+
+    return SkillDraftResponse(
+        skill_md=skill_md,
+        sla_penalties=sla_penalties,
+        hooks=hooks,
+        interlocks=interlocks,
+        validation_errors=[],
+    )
+
+
+_DRAFT_BASE_SKILL = "cnc_milling"
+
+
+def _draft_sla_penalties(body: SkillDraftRequest) -> dict:
+    return {
+        "schema_version": "1.0",
+        "order_classes": {
+            "A": {"penalty_per_hour_idr": body.sla_class_a_penalty_per_hour_idr,
+                  "max_penalty_idr": min(body.sla_class_a_penalty_per_hour_idr * 8, 150_000_000)},
+            "B": {"penalty_per_hour_idr": body.sla_class_b_penalty_per_hour_idr,
+                  "max_penalty_idr": body.sla_class_b_penalty_per_hour_idr * 20},
+            "C": {"penalty_per_hour_idr": body.sla_class_c_penalty_per_hour_idr,
+                  "max_penalty_idr": body.sla_class_c_penalty_per_hour_idr * 20},
+        },
+        "operational_costs": {
+            "overtime_cost_per_hour_idr": body.overtime_cost_per_hour_idr,
+            "changeover_cost_idr": body.changeover_cost_idr,
+        },
+    }
+
+
+def _draft_hooks() -> list[dict]:
+    """The base skill's telemetry hooks (early warnings below the Tier 1 limits)."""
+    path = _ROOT / "skills" / _DRAFT_BASE_SKILL / "hooks.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _create_fallback_hooks({})
+
+
+def _draft_interlocks(thresholds: dict[str, float]) -> list[dict]:
+    """Base Tier 1 interlocks, with each threshold tightened to the user's value
+    when that value is stricter. Relaxed values were already rejected upstream."""
+    path = _ROOT / "skills" / _DRAFT_BASE_SKILL / "rules" / "safety_interlocks.json"
+    try:
+        base_rules = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _create_fallback_interlocks(thresholds)
+    out = []
+    for rule in base_rules:
+        rule = dict(rule)
+        parsed = _parse_condition(rule.get("condition", ""))
+        user_val = thresholds.get(parsed[0]) if parsed else None
+        if parsed and isinstance(parsed[2], float) and isinstance(user_val, (int, float)) \
+                and not isinstance(user_val, bool):
+            metric, op, base_val = parsed
+            stricter = (op in (">", ">=") and user_val < base_val) or \
+                       (op in ("<", "<=") and user_val > base_val)
+            if stricter:
+                rule["condition"] = f"{metric} {op} {user_val:g}"
+                rule["threshold_value"] = user_val
+        if rule.get("tier") == 1:
+            rule["override_allowed"] = False
+        out.append(rule)
+    return out
+
+
+async def _draft_skill_md_llm(body: SkillDraftRequest, interlocks: list[dict]) -> str:
+    """Ask the LLM for SKILL.md as plain markdown. Returns "" on any failure."""
+    rules = "\n".join(f"- {r.get('id')}: {r.get('condition')} → {r.get('action')}"
+                       for r in interlocks if r.get("tier") == 1)
     prompt = (
         "Anda adalah AI Supervisor untuk SkillForge, platform Declarative Skill Playbook "
         "untuk industri manufaktur Indonesia.\n\n"
-        f"User ingin membuat skill playbook dengan konfigurasi berikut:\n"
+        "Tulis file SKILL.md (markdown saja, tanpa code fence, tanpa JSON) untuk skill berikut:\n"
         f"- Tipe mesin: {body.machine_type}\n"
         f"- Mode gangguan: {body.failure_mode}\n"
-        f"- SLA Class A penalty/hour: Rp {body.sla_class_a_penalty_per_hour_idr:,}\n"
-        f"- SLA Class B penalty/hour: Rp {body.sla_class_b_penalty_per_hour_idr:,}\n"
-        f"- SLA Class C penalty/hour: Rp {body.sla_class_c_penalty_per_hour_idr:,}\n"
-        f"- Biaya lembur/jam: Rp {body.overtime_cost_per_hour_idr:,}\n"
-        f"- Biaya changeover: Rp {body.changeover_cost_idr:,}\n"
-        f"- Safety thresholds: {body.safety_thresholds}\n\n"
-        "Buat 4 file JSON berikut sebagai output JSON (bukan markdown):\n"
-        "1. SKILL.md - dalam format markdown dengan YAML header\n"
-        "2. sla_penalties.json - struktur penalty per class\n"
-        "3. hooks.json - 3-5 hooks untuk monitoring telemetry\n"
-        "4. safety_interlocks.json - tier 1 safety rules\n\n"
-        "Format output: JSON object dengan keys: skill_md, sla_penalties, hooks, interlocks"
+        f"- SLA Class A/B/C penalty per jam: Rp {body.sla_class_a_penalty_per_hour_idr:,} / "
+        f"Rp {body.sla_class_b_penalty_per_hour_idr:,} / Rp {body.sla_class_c_penalty_per_hour_idr:,}\n"
+        f"- Biaya lembur/jam: Rp {body.overtime_cost_per_hour_idr:,}; "
+        f"biaya changeover: Rp {body.changeover_cost_idr:,}\n"
+        f"- Aturan Tier 1 (tidak boleh diubah):\n{rules}\n\n"
+        "Mulai dengan '# SKILL.md', lalu bagian: Konteks Keterampilan, Hierarki Batasan "
+        "(Tier 1 Safety, Tier 2 Quality/SLA, Tier 3 Cost), Respons Gangguan untuk mode "
+        "gangguan di atas, dan Protokol Eskalasi. Bahasa Indonesia, ringkas (maksimal 60 baris)."
     )
-
     try:
-        result_text = await _call_gemini(prompt, max_tokens=4096)
-        # Try to parse as JSON
-        import re
-        import json as j
-        json_match = re.search(r'\{[\s\S]*\}', result_text)
-        if json_match:
-            result = j.loads(json_match.group())
-            skill_md = result.get("skill_md", "")
-            sla = result.get("sla_penalties", {})
-            hooks = result.get("hooks", [])
-            interlocks = result.get("interlocks", [])
-            # Gemini often returns wrong shapes — fall back to the template
-            # rather than 500ing on response validation.
-            if isinstance(skill_md, str) and isinstance(sla, dict) \
-                    and isinstance(hooks, list) and isinstance(interlocks, list):
-                return SkillDraftResponse(
-                    skill_md=skill_md,
-                    sla_penalties=sla,
-                    hooks=hooks,
-                    interlocks=interlocks,
-                    validation_errors=[],
-                )
-        return SkillDraftResponse(
-            skill_md=_create_fallback_skill_md(body.machine_type, body.failure_mode),
-            sla_penalties={},
-            hooks=[],
-            interlocks=[],
-            validation_errors=["Failed to parse Gemini response as JSON"],
-        )
-    except Exception as e:
-        return SkillDraftResponse(
-            skill_md=_create_fallback_skill_md(body.machine_type, body.failure_mode),
-            sla_penalties={},
-            hooks=[],
-            interlocks=[],
-            validation_errors=[f"Gemini error: {_safe_gemini_error(e)}"],
-        )
+        text = (await _call_gemini(prompt, max_tokens=4096)).strip()
+    except Exception as exc:
+        print(f"[skills/draft] LLM failed: {_safe_gemini_error(exc)}", file=sys.stderr)
+        return ""
+    # _call_gemini reports its own failures as "[Gemini ...]" text, not exceptions.
+    if not text or text.startswith("[Gemini"):
+        print(f"[skills/draft] no usable SKILL.md from LLM: {text[:120]!r}", file=sys.stderr)
+        return ""
+    fenced = re.fullmatch(r"```(?:markdown|md)?\s*\n([\s\S]*?)\n?```", text)
+    if fenced:
+        text = fenced.group(1).strip()
+    if text.startswith("{"):
+        # Model ignored "no JSON" — accept a well-formed {"skill_md": ...}, else give up.
+        try:
+            text = str(json.loads(text).get("skill_md") or "").strip()
+        except (ValueError, AttributeError):
+            print("[skills/draft] LLM returned unparseable JSON", file=sys.stderr)
+            return ""
+    return text
 
 
 def _create_fallback_skill_md(machine_type: str, failure_mode: str, *args) -> str:
