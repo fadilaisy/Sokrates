@@ -41,7 +41,7 @@ const TEST_FRAMES = [
 ];
 
 export function TelemetryPanel() {
-  const { state, live, wsStatus, lastAnalysis, safety, sendTelemetry } = useCockpit();
+  const { state, live, wsStatus, lastAnalysis, safety, sendTelemetry, plcOn } = useCockpit();
   const machines = state?.work_centers ?? [];
   const shown = machines.filter((w) => w.status.toUpperCase() === "RUNNING" || live[w.id] || safety?.machine_id === w.id).slice(0, 4);
   return (
@@ -76,7 +76,7 @@ export function TelemetryPanel() {
       )}
       {lastAnalysis?.analysis && <p className="text-[14px] text-muted-ink">AI: {lastAnalysis.analysis}</p>}
       <div className="flex flex-wrap gap-2 border-t border-line pt-3">
-        <span className="w-full text-[14px] text-muted-ink">Uji telemetri (demo, ganti dengan bridge Wokwi):</span>
+        <span className="w-full text-[14px] text-muted-ink">Uji telemetri manual:</span>
         {TEST_FRAMES.map((t) => (
           <button
             key={t.label}
@@ -88,7 +88,79 @@ export function TelemetryPanel() {
           </button>
         ))}
       </div>
+      <PlcControls />
+      {plcOn && <PlcAlarmCard />}
     </Card>
+  );
+}
+
+/** Simulated PLC: the machines stream their own tags and alarm codes; a scenario makes one drift into a fault. */
+function PlcControls() {
+  const { plcOn, setPlcOn, plcStatus, plcInfo, startPlcScenario } = useCockpit();
+  const faults = plcInfo?.scenarios.filter((s) => s.id !== "normal") ?? [];
+  return (
+    <div className="flex flex-col gap-2 border-t border-line pt-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[15px] font-semibold">PLC (simulasi)</span>
+        <button
+          type="button"
+          onClick={() => setPlcOn(!plcOn)}
+          className={cn("min-h-10 rounded-md border px-3 text-[14px] font-semibold", plcOn ? "border-ok-line bg-ok-bg text-running" : "border-line hover:bg-page")}
+        >
+          {plcOn ? (plcStatus === "open" ? "Tersambung · putuskan" : "Menyambung…") : "Sambungkan PLC"}
+        </button>
+      </div>
+      {plcOn && (
+        <div className="flex flex-wrap gap-2">
+          {faults.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              onClick={() => startPlcScenario(s.id)}
+              className={cn("min-h-12 rounded-md border px-3 text-left text-[14px] font-semibold hover:bg-page", plcInfo?.scenario === s.id ? "border-warn" : "border-line")}
+            >
+              {s.label}
+              <Mono className="block text-[13px] font-normal text-muted-ink">{s.alarm_code}</Mono>
+            </button>
+          ))}
+          {plcInfo && plcInfo.scenario !== "normal" && (
+            <button type="button" onClick={() => startPlcScenario("normal")} className="min-h-12 rounded-md border border-line px-3 text-[14px] hover:bg-page">
+              Pulihkan normal
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The alarm a machine just raised, with how it was fixed last time (from the maintenance ledger). */
+function PlcAlarmCard() {
+  const { plcAlarm } = useCockpit();
+  if (!plcAlarm) return null;
+  const fix = plcAlarm.past_fixes[0];
+  const doc = plcAlarm.documents[0];
+  return (
+    <div className="flex flex-col gap-1.5 rounded-md border border-warn bg-page px-3 py-2 text-[14px]">
+      <p className="font-semibold">
+        <Mono>{plcAlarm.machine_id} · {plcAlarm.code}</Mono> {plcAlarm.text}
+      </p>
+      {fix ? (
+        <>
+          <p className="text-muted-ink">
+            Pernah terjadi di {fix.machine_id} (<Mono>{fix.case_id}</Mono>){fix.root_cause ? `: ${fix.root_cause}` : ""}
+          </p>
+          {fix.fix_steps.length > 0 && (
+            <ol className="list-decimal pl-5">
+              {fix.fix_steps.slice(0, 3).map((step) => <li key={step}>{step}</li>)}
+            </ol>
+          )}
+        </>
+      ) : (
+        <p className="text-muted-ink">Belum ada kasus serupa di riwayat perawatan.</p>
+      )}
+      {doc?.citation && <p className="text-muted-ink">Referensi: {doc.citation}</p>}
+    </div>
   );
 }
 

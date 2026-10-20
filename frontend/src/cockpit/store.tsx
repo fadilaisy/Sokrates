@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { api, ApiError, formatIDR, WS_TELEMETRY } from "../lib/api";
-import type { ApproveReceipt, DisruptResponse, DriftDetail, LedgerEntry, RagSource, SapState, Scenario, ShiftMetrics, TelemetryFrame } from "../lib/api";
+import { api, ApiError, formatIDR, WS_PLC, WS_TELEMETRY } from "../lib/api";
+import type { ApproveReceipt, DisruptResponse, DriftDetail, LedgerEntry, PlcAlarmFrame, PlcInfo, PlcMachine, RagSource, SapState, Scenario, ShiftMetrics, TelemetryFrame } from "../lib/api";
 import { normalizeStatus, windowLabel } from "../lib/shift";
 import { isMuted, playSound, setMuted, unlockAudio } from "../lib/sound";
 import type { MachineStatus } from "../lib/shift";
@@ -85,6 +85,13 @@ interface CockpitValue {
   safety: SafetyAlert | null;
   sendTelemetry: (machine_id: string, metric: string, value: number) => void;
   runFullAnalysis: () => Promise<void>;
+  // simulated PLC feed
+  plcOn: boolean;
+  setPlcOn: (v: boolean) => void;
+  plcStatus: WsStatus;
+  plcInfo: PlcInfo | null;
+  plcAlarm: PlcAlarmFrame | null;
+  startPlcScenario: (id: string) => Promise<void>;
   // ledger
   ledgerOpen: boolean;
   setLedgerOpen: (v: boolean) => void;
@@ -161,6 +168,11 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   const [lastAnalysis, setLastAnalysis] = useState<TelemetryFrame | null>(null);
   const [safety, setSafety] = useState<SafetyAlert | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+
+  const [plcOn, setPlcOn] = useState(false);
+  const [plcStatus, setPlcStatus] = useState<WsStatus>("closed");
+  const [plcInfo, setPlcInfo] = useState<PlcInfo | null>(null);
+  const [plcAlarm, setPlcAlarm] = useState<PlcAlarmFrame | null>(null);
 
   const [ledgerOpen, setLedgerOpen] = useState(false);
   const [verifying, setVerifying] = useState(false);
@@ -282,6 +294,58 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     window.location.hash = page;
   }, [page]);
 
+  // ── frames from /ws/telemetry and /ws/plc ──────────────────────────────────
+  const applyFrame = useCallback((data: string) => {
+    let f: TelemetryFrame;
+    try {
+      f = JSON.parse(data) as TelemetryFrame;
+    } catch {
+      return;
+    }
+    if (f.event === "telemetry_analysis" && f.machine_id && f.metric && typeof f.value === "number") {
+      const { machine_id, metric, value } = f;
+      setLive((m) => ({ ...m, [machine_id]: { ...(m[machine_id] ?? {}), [metric]: value } }));
+      setLastAnalysis(f);
+      if (f.severity === "CRITICAL" && f.rule_triggered) {
+        setSafety({ machine_id, rule: f.rule_triggered, metric, value, message: f.analysis ?? "", timestamp: f.timestamp });
+      }
+    }
+    if (f.event === "safety_alert" && f.machine_id) {
+      const id = f.machine_id;
+      setSafety((cur) => ({
+        machine_id: id,
+        rule: f.rule_triggered ?? cur?.rule ?? "SAFE",
+        metric: cur?.metric ?? "",
+        value: cur?.value ?? 0,
+        message: f.message ?? cur?.message ?? "",
+        timestamp: f.timestamp,
+      }));
+    }
+  }, []);
+
+  const applyPlcFrame = useCallback((data: string) => {
+    let f: { event?: string; machines?: PlcMachine[] };
+    try {
+      f = JSON.parse(data);
+    } catch {
+      return;
+    }
+    if (f.event === "plc_scan" && f.machines) {
+      const running = f.machines.filter((m) => m.run);
+      setLive((cur) => {
+        const next = { ...cur };
+        for (const m of running) next[m.machine_id] = { ...(cur[m.machine_id] ?? {}), ...m.tags };
+        return next;
+      });
+      return;
+    }
+    if (f.event === "plc_alarm") {
+      setPlcAlarm(f as unknown as PlcAlarmFrame);
+      return;
+    }
+    applyFrame(data);
+  }, [applyFrame]);
+
   // ── telemetry websocket ──────────────────────────────────────────────────
   useEffect(() => {
     let stopped = false;
@@ -303,31 +367,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       };
       ws.onmessage = (ev) => {
         if (wsRef.current !== ws) return;
-        let f: TelemetryFrame;
-        try {
-          f = JSON.parse(ev.data) as TelemetryFrame;
-        } catch {
-          return;
-        }
-        if (f.event === "telemetry_analysis" && f.machine_id && f.metric && typeof f.value === "number") {
-          const { machine_id, metric, value } = f;
-          setLive((m) => ({ ...m, [machine_id]: { ...(m[machine_id] ?? {}), [metric]: value } }));
-          setLastAnalysis(f);
-          if (f.severity === "CRITICAL" && f.rule_triggered) {
-            setSafety({ machine_id, rule: f.rule_triggered, metric, value, message: f.analysis ?? "", timestamp: f.timestamp });
-          }
-        }
-        if (f.event === "safety_alert" && f.machine_id) {
-          const id = f.machine_id;
-          setSafety((cur) => ({
-            machine_id: id,
-            rule: f.rule_triggered ?? cur?.rule ?? "SAFE",
-            metric: cur?.metric ?? "",
-            value: cur?.value ?? 0,
-            message: f.message ?? cur?.message ?? "",
-            timestamp: f.timestamp,
-          }));
-        }
+        applyFrame(ev.data);
       };
     };
     connect();
@@ -336,7 +376,46 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       if (retry) window.clearTimeout(retry);
       wsRef.current?.close();
     };
-  }, []);
+  }, [applyFrame]);
+
+  // ── simulated PLC feed (on demand: every scan is a server push) ─────────────
+  useEffect(() => {
+    if (!plcOn) return;
+    let stopped = false;
+    let retry: number | undefined;
+    let ws: WebSocket | null = null;
+    const connect = () => {
+      setPlcStatus("connecting");
+      ws = new WebSocket(WS_PLC);
+      ws.onopen = () => setPlcStatus("open");
+      ws.onmessage = (ev) => applyPlcFrame(ev.data);
+      ws.onclose = () => {
+        if (stopped) return;
+        setPlcStatus("closed");
+        retry = window.setTimeout(connect, 5000);
+      };
+    };
+    connect();
+    api.plc().then(setPlcInfo).catch(() => undefined);
+    return () => {
+      stopped = true;
+      if (retry) window.clearTimeout(retry);
+      ws?.close();
+      setPlcStatus("closed");
+    };
+  }, [plcOn, applyPlcFrame]);
+
+  const startPlcScenario = useCallback(async (id: string) => {
+    try {
+      const info = await api.plcScenario(id);
+      setPlcInfo(info);
+      setPlcAlarm(null);
+      setSafety(null);
+      setPlcOn(true);
+    } catch (e) {
+      showToast(`Skenario PLC gagal: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [showToast]);
 
   const sendTelemetry = useCallback((machine_id: string, metric: string, value: number) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -634,6 +713,8 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       setSafety(null);
       setLive({});
       setRecalcVersions(null);
+      setPlcAlarm(null);
+      api.plcScenario("normal").then(setPlcInfo).catch(() => undefined);
       showToast(`State dimuat ulang ke SAP v${s._meta.version}. Audit ledger tetap utuh.`);
       await load();
     } catch (e) {
@@ -652,6 +733,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       injecting, injectDrill,
       displayStatus, live,
       wsStatus, lastAnalysis, safety, sendTelemetry, runFullAnalysis,
+      plcOn, setPlcOn, plcStatus, plcInfo, plcAlarm, startPlcScenario,
       ledgerOpen, setLedgerOpen, verifying, verifyResult, verify,
       chatOpen, chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat,
       muted, toggleMute, toast, reset, resetting,
@@ -663,7 +745,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     [
       state, metrics, online, aiConfigured, error, ledger, sapVersion, page, phase, detectStep, params, result, receipt, runDisruption,
       approvalFor, approving, conflict, approver, openApproval, closeApproval, confirmApproval, injecting, injectDrill, displayStatus, live, wsStatus,
-      lastAnalysis, safety, sendTelemetry, runFullAnalysis, ledgerOpen, verifying, verifyResult, verify, chatOpen,
+      lastAnalysis, safety, sendTelemetry, runFullAnalysis, plcOn, plcStatus, plcInfo, plcAlarm, startPlcScenario, ledgerOpen, verifying, verifyResult, verify, chatOpen,
       chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat, muted, toggleMute, toast, reset, resetting,
       skillStudioOpen, skillStudioState, skillStudioFormData, skillStudioDraft, skillStudioLintResult,
     ],

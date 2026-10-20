@@ -14,6 +14,8 @@ GET  /api/ledger             Full immutable audit ledger
 GET  /api/ledger/verify      SHA-256 hash-chain integrity check
 POST /api/skills/generate    Generate SKILL.md from natural language description
 WS   /ws/telemetry           Real-time telemetry streaming + AI analysis
+WS   /ws/plc                 Simulated PLC feed: tags + alarm codes → analysis, past fixes
+GET  /api/plc                Simulated PLC scenarios; POST /api/plc/scenario starts one
 GET  /health                 Health check
 
 RAG (rag/api.py)
@@ -39,7 +41,7 @@ import traceback
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 # ── Load .env before everything else ─────────────────────────────────────────
 from dotenv import load_dotenv
@@ -71,6 +73,7 @@ from backend.metrics import compute_metrics, events_for_approval
 from knowledge.maintenance_ledger import MaintenanceLedger
 from knowledge.case_index import case_id_for_doc
 from knowledge.proactive_agent import ProactiveAgent
+from plc_adapter.simulator import SCENARIOS as PLC_SCENARIOS, SimulatedPLC
 from rag.store import get_store
 from rag.generate import answer_from_retrieval
 
@@ -1735,66 +1738,7 @@ async def ws_telemetry(websocket: WebSocket) -> None:
                 })
                 continue
 
-            severity, rule_triggered = _classify_telemetry(metric, value)
-
-            analysis_prompt = (
-                f"Anda adalah AI Supervisor CNC shop floor PT Karawang Precision Manufacturing.\n"
-                f"Telemetri masuk dari mesin {machine_id}:\n"
-                f"  Metrik             : {metric}\n"
-                f"  Nilai              : {value}\n"
-                f"  Tingkat keparahan  : {severity}\n"
-                + (f"  Aturan terpicu     : {rule_triggered}\n" if rule_triggered else "")
-                + "\nBerikan analisis singkat (1-2 kalimat) dalam Bahasa Indonesia tentang kondisi "
-                  "ini dan tindakan yang harus segera diambil operator. "
-                  "Jawab HANYA analisisnya, tanpa kata pengantar."
-            )
-
-            if severity == "OK":
-                # Normal readings don't need an LLM — save quota for real alerts.
-                analysis = f"{machine_id}: {metric} = {value} dalam batas normal."
-            else:
-                analysis = await _call_gemini(analysis_prompt, max_tokens=150, interactive=False)
-
-            await websocket.send_json({
-                "event":          "telemetry_analysis",
-                "machine_id":     machine_id,
-                "metric":         metric,
-                "value":          value,
-                "severity":       severity,
-                "rule_triggered": rule_triggered,
-                "analysis":       analysis,
-                "timestamp":      datetime.now(timezone.utc).isoformat(),
-            })
-
-            # Proactive flow: abnormal telemetry → ledger entry → similar cases → playbook → mechanic.
-            if severity != "OK":
-                res = await _telemetry_to_playbook(machine_id, metric, value, severity, rule_triggered)
-                if res is not None:
-                    fl = res["flow"]
-                    await websocket.send_json({
-                        "event": "maintenance_playbook",
-                        "machine_id": machine_id,
-                        "entry_id": res["entry"]["id"],
-                        "mechanic": fl["mechanic"],
-                        "message": fl["message"],
-                        "confidence": fl["playbook"]["confidence"],
-                        "supporting_cases": fl["playbook"]["supporting_cases"],
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    })
-
-            # Extra safety alert for CRITICAL conditions
-            if severity == "CRITICAL":
-                await websocket.send_json({
-                    "event":           "safety_alert",
-                    "machine_id":      machine_id,
-                    "rule_triggered":  rule_triggered,
-                    "action_required": "IMMEDIATE_STOP",
-                    "message": (
-                        f"⚠️ BAHAYA: Aturan keselamatan {rule_triggered} terpicu pada "
-                        f"{machine_id}. Hentikan mesin segera dan hubungi Safety Officer!"
-                    ),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
+            await _analyze_reading(websocket.send_json, machine_id, metric, value)
 
     except WebSocketDisconnect:
         pass
@@ -1809,6 +1753,76 @@ async def ws_telemetry(websocket: WebSocket) -> None:
             })
         except Exception:
             pass
+
+
+async def _analyze_reading(
+    send: Callable[[dict[str, Any]], Awaitable[None]],
+    machine_id: str,
+    metric: str,
+    value: float,
+    error_codes: Optional[list[str]] = None,
+) -> None:
+    """Classify one reading and send the analysis, playbook and safety frames for it."""
+    severity, rule_triggered = _classify_telemetry(metric, value)
+
+    analysis_prompt = (
+        f"Anda adalah AI Supervisor CNC shop floor PT Karawang Precision Manufacturing.\n"
+        f"Telemetri masuk dari mesin {machine_id}:\n"
+        f"  Metrik             : {metric}\n"
+        f"  Nilai              : {value}\n"
+        f"  Tingkat keparahan  : {severity}\n"
+        + (f"  Aturan terpicu     : {rule_triggered}\n" if rule_triggered else "")
+        + "\nBerikan analisis singkat (1-2 kalimat) dalam Bahasa Indonesia tentang kondisi "
+          "ini dan tindakan yang harus segera diambil operator. "
+          "Jawab HANYA analisisnya, tanpa kata pengantar."
+    )
+
+    if severity == "OK":
+        # Normal readings don't need an LLM — save quota for real alerts.
+        analysis = f"{machine_id}: {metric} = {value} dalam batas normal."
+    else:
+        analysis = await _call_gemini(analysis_prompt, max_tokens=150, interactive=False)
+
+    await send({
+        "event":          "telemetry_analysis",
+        "machine_id":     machine_id,
+        "metric":         metric,
+        "value":          value,
+        "severity":       severity,
+        "rule_triggered": rule_triggered,
+        "analysis":       analysis,
+        "timestamp":      datetime.now(timezone.utc).isoformat(),
+    })
+
+    # Proactive flow: abnormal telemetry → ledger entry → similar cases → playbook → mechanic.
+    if severity != "OK":
+        res = await _telemetry_to_playbook(machine_id, metric, value, severity, rule_triggered, error_codes)
+        if res is not None:
+            fl = res["flow"]
+            await send({
+                "event": "maintenance_playbook",
+                "machine_id": machine_id,
+                "entry_id": res["entry"]["id"],
+                "mechanic": fl["mechanic"],
+                "message": fl["message"],
+                "confidence": fl["playbook"]["confidence"],
+                "supporting_cases": fl["playbook"]["supporting_cases"],
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+    # Extra safety alert for CRITICAL conditions
+    if severity == "CRITICAL":
+        await send({
+            "event":           "safety_alert",
+            "machine_id":      machine_id,
+            "rule_triggered":  rule_triggered,
+            "action_required": "IMMEDIATE_STOP",
+            "message": (
+                f"⚠️ BAHAYA: Aturan keselamatan {rule_triggered} terpicu pada "
+                f"{machine_id}. Hentikan mesin segera dan hubungi Safety Officer!"
+            ),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
 
 
 def _classify_telemetry(metric: str, value: float) -> tuple[str, str | None]:
@@ -2023,7 +2037,8 @@ _telemetry_last: dict[tuple[str, str], float] = {}
 
 
 async def _telemetry_to_playbook(
-    machine_id: str, metric: str, value: float, severity: str, rule: str | None
+    machine_id: str, metric: str, value: float, severity: str, rule: str | None,
+    error_codes: Optional[list[str]] = None,
 ) -> dict[str, Any] | None:
     """Abnormal telemetry becomes a ledger entry and runs the flow (debounced per machine+metric)."""
     key = (machine_id, metric)
@@ -2041,10 +2056,124 @@ async def _telemetry_to_playbook(
             "symptom": f"{severity}: {metric} = {value}" + (f" ({rule})" if rule else "") + f" — {phrase}",
             "reported_by": "telemetry-hook", "source": "telemetry", "language": "en",
             "severity": "CRITICAL" if severity == "CRITICAL" else "WARNING",
+            # A PLC alarm code makes the similar-case search an exact fault-code match.
+            "error_codes": list(error_codes or []),
         }, use_llm=False)
     except Exception as exc:  # never let the flow break the telemetry socket
         print(f"[maintenance] proactive flow failed: {exc}", file=sys.stderr)
         return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Simulated PLC — machines report their own tags and alarm codes
+# ─────────────────────────────────────────────────────────────────────────────
+
+_plc = SimulatedPLC(ramp_s=float(os.getenv("PLC_RAMP_S", "30")))
+_PLC_SCAN_S = float(os.getenv("PLC_SCAN_S", "1.0"))
+_SEVERITY_RANK = {"OK": 0, "WARNING": 1, "CRITICAL": 2}
+
+
+class PlcScenarioRequest(BaseModel):
+    scenario: str = Field(..., example="cnc04_overheat")
+
+
+@app.get("/api/plc", summary="Simulated PLC: active scenario and the ones available")
+async def get_plc() -> dict[str, Any]:
+    return _plc.info()
+
+
+@app.post("/api/plc/scenario", summary="Start a simulated PLC fault scenario (or 'normal')")
+async def post_plc_scenario(body: PlcScenarioRequest) -> dict[str, Any]:
+    if body.scenario not in PLC_SCENARIOS:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Skenario PLC '{body.scenario}' tidak dikenal. Pilihan: {', '.join(PLC_SCENARIOS)}",
+        )
+    _plc.start(body.scenario)
+    return _plc.info()
+
+
+def _alarm_references(code: str, text: str) -> dict[str, Any]:
+    """Past fixes for an alarm code (exact code match first) and the plant documents that cover it."""
+    res = _agent.search(f"{code} {text}", top_k=8)
+    cases = sorted(res["cases"], key=lambda c: not c["exact_match"])[:3]
+    return {
+        "past_fixes": [{
+            "case_id": c["case_id"],
+            "machine_id": c["case"].get("machine_id"),
+            "symptom": c["case"].get("symptom"),
+            "root_cause": c["case"].get("root_cause"),
+            "fix_steps": list(c["case"].get("fix_steps") or []),
+            "exact_match": c["exact_match"],
+            "citation": c["citation"],
+        } for c in cases],
+        "documents": [{k: d.get(k) for k in ("doc_id", "doc_title", "page", "citation", "excerpt")}
+                      for d in res["documents"][:2]],
+    }
+
+
+@app.websocket("/ws/plc")
+async def ws_plc(websocket: WebSocket) -> None:
+    """
+    Simulated PLC feed. Server → client every PLC_SCAN_S seconds:
+        {event: "plc_scan", scenario, machines: [{machine_id, status, run, fault, tags, alarm}], timestamp}
+    When a machine raises a new alarm code:
+        {event: "plc_alarm", machine_id, code, text, past_fixes, documents, timestamp}
+    When a tag reaches a worse severity than before, the same frames as /ws/telemetry
+    (telemetry_analysis, maintenance_playbook, safety_alert), with the alarm code
+    passed to the playbook so it matches past cases on the exact code.
+    """
+    await websocket.accept()
+    peak: dict[tuple[str, str], str] = {}
+    alarms: dict[str, Optional[str]] = {}
+    generation = None
+    try:
+        while True:
+            info = _plc.info()
+            if (info["scenario"], info["run"]) != generation:
+                # A new scenario starts from a clean slate, so re-running a demo alerts again.
+                generation = (info["scenario"], info["run"])
+                peak.clear()
+                alarms.clear()
+            scan = _plc.scan(_sap.get_state().get("work_centers", []))
+            await websocket.send_json({
+                "event": "plc_scan",
+                "scenario": info["scenario"],
+                "machines": scan,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            for m in scan:
+                mid, alarm = m["machine_id"], m["alarm"]
+                code = alarm["code"] if alarm else None
+                if code and alarms.get(mid) != code:
+                    try:
+                        refs = await run_in_threadpool(_alarm_references, code, alarm["text"])
+                    except Exception as exc:  # the feed must keep scanning without references
+                        print(f"[plc] alarm lookup failed: {exc}", file=sys.stderr)
+                        refs = {"past_fixes": [], "documents": []}
+                    await websocket.send_json({
+                        "event": "plc_alarm", "machine_id": mid, "code": code, "text": alarm["text"],
+                        **refs, "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+                alarms[mid] = code
+                if not m["run"]:
+                    continue  # a stopped spindle reads 0 bar coolant; that is not a low-pressure fault
+                for metric, value in m["tags"].items():
+                    sev, _rule = _classify_telemetry(metric, value)
+                    # Only escalations trigger analysis: noise around a threshold must not re-alert.
+                    if _SEVERITY_RANK[sev] > _SEVERITY_RANK[peak.get((mid, metric), "OK")]:
+                        peak[(mid, metric)] = sev
+                        await _analyze_reading(websocket.send_json, mid, metric, value,
+                                               [code] if code else None)
+            await asyncio.sleep(_PLC_SCAN_S)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        print(f"[ws] plc socket failed: {exc}\n{traceback.format_exc()}", file=sys.stderr)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
