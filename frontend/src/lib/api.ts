@@ -1,5 +1,6 @@
 export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "http://localhost:8000";
 export const WS_TELEMETRY = API_BASE.replace(/^http/, "ws") + "/ws/telemetry";
+export const WS_PLC = API_BASE.replace(/^http/, "ws") + "/ws/plc";
 
 /** Error with the HTTP status and parsed body, so callers can react to 409 drift etc. */
 export class ApiError extends Error {
@@ -41,6 +42,51 @@ export interface TelemetryFrame {
   action_required?: string;
   message?: string;
   timestamp?: string;
+}
+
+/** One machine in a simulated PLC scan: its tags, run/fault bits and active alarm code. */
+export interface PlcMachine {
+  machine_id: string;
+  status: string;
+  run: boolean;
+  fault: boolean;
+  tags: Record<string, number>;
+  alarm: { code: string; text: string } | null;
+}
+
+export interface PlcPastFix {
+  case_id: string;
+  machine_id: string | null;
+  symptom: string | null;
+  root_cause: string | null;
+  fix_steps: string[];
+  exact_match: string[];
+}
+
+/** Sent once when a machine raises a new alarm code, with past fixes for that code. */
+export interface PlcAlarmFrame {
+  event: "plc_alarm";
+  machine_id: string;
+  code: string;
+  text: string;
+  past_fixes: PlcPastFix[];
+  documents: { doc_id: string; doc_title: string | null; page: number | null; citation: string | null }[];
+  timestamp: string;
+}
+
+export interface PlcScenarioInfo {
+  id: string;
+  label: string;
+  machine_id: string | null;
+  alarm_code: string | null;
+}
+
+export interface PlcInfo {
+  scenario: string;
+  run: number;
+  elapsed_s: number;
+  ramp_s: number;
+  scenarios: PlcScenarioInfo[];
 }
 
 export interface WorkCenter {
@@ -406,6 +452,9 @@ export const api = {
       { method: "POST", body: JSON.stringify(b) },
     ),
   ledger: () => req<LedgerEntry[]>("/api/ledger"),
+  plc: () => req<PlcInfo>("/api/plc"),
+  plcScenario: (scenario: string) =>
+    req<PlcInfo>("/api/plc/scenario", { method: "POST", body: JSON.stringify({ scenario }) }),
   verify: () => req<{ valid: boolean; total_entries: number; first_broken_index: number | null; message: string }>("/api/ledger/verify"),
   generateSkill: (supervisor_description: string) =>
     req<{ skill_md: string; model_used: string }>("/api/skills/generate", {
