@@ -2,7 +2,7 @@
 // Browsers keep audio silent until the first user interaction, so the
 // provider calls unlockAudio() on the first click or keypress.
 
-export type SoundKind = "disruption" | "ledger";
+export type SoundKind = "telemetry" | "disruption" | "ledger";
 
 const MUTE_KEY = "sf-sound-muted";
 // One event often arrives through two paths (e.g. telemetry + safety_alert);
@@ -10,12 +10,13 @@ const MUTE_KEY = "sf-sound-muted";
 const COOLDOWN_MS = 1500;
 
 let ctx: AudioContext | null = null;
-// The disruption alarm is a recorded paging sound; the synthesised tones
-// below are only a fallback if the file can't play.
-const alarm = typeof Audio !== "undefined" ? new Audio("/sounds/disruption.mp3") : null;
+// Live telemetry problems (PLC alarms such as ALM-410, safety alerts) play a
+// recorded paging sound; the disruption drill keeps the two-tone beep. The
+// beep is also the fallback if the file can't play.
+const alarm = typeof Audio !== "undefined" ? new Audio("/sounds/paging.mp3") : null;
 if (alarm) alarm.preload = "auto";
 let muted = readMuted();
-const lastPlayed: Record<SoundKind, number> = { disruption: 0, ledger: 0 };
+const lastPlayed: Record<SoundKind, number> = { telemetry: 0, disruption: 0, ledger: 0 };
 
 function readMuted(): boolean {
   try {
@@ -70,10 +71,10 @@ export function playSound(kind: SoundKind) {
   if (muted || !ctx || ctx.state !== "running") return;
   const now = Date.now();
   if (now - lastPlayed[kind] < COOLDOWN_MS) return;
+  // A beep must not play over a page that is still sounding.
+  if (alarm && !alarm.paused && kind !== "ledger") return;
   lastPlayed[kind] = now;
-  if (kind === "disruption" && alarm) {
-    // Let a page that is still sounding finish instead of restarting it.
-    if (!alarm.paused) return;
+  if (kind === "telemetry" && alarm) {
     alarm.currentTime = 0;
     alarm.play().catch(() => playTones(kind));
     return;
@@ -82,7 +83,7 @@ export function playSound(kind: SoundKind) {
 }
 
 function playTones(kind: SoundKind) {
-  if (kind === "disruption") {
+  if (kind === "telemetry" || kind === "disruption") {
     // urgent two-tone alarm, played twice
     tone(880, 0, 0.18, "square", 0.15);
     tone(660, 0.2, 0.18, "square", 0.15);

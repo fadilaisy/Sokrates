@@ -281,7 +281,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
 
   const safetyKey = safety ? `${safety.machine_id}|${safety.rule}|${safety.timestamp ?? ""}` : null;
   useEffect(() => {
-    if (safetyKey) playSound("disruption");
+    if (safetyKey) playSound("telemetry");
   }, [safetyKey]);
 
   useEffect(() => {
@@ -340,6 +340,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       return;
     }
     if (f.event === "plc_alarm") {
+      playSound("telemetry");
       setPlcAlarm(f as unknown as PlcAlarmFrame);
       return;
     }
