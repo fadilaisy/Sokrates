@@ -85,6 +85,8 @@ interface CockpitValue {
   safety: SafetyAlert | null;
   sendTelemetry: (machine_id: string, metric: string, value: number) => void;
   runFullAnalysis: () => Promise<void>;
+  /** Seconds left before a critical alert starts the analysis by itself; null when no countdown runs. */
+  autoIn: number | null;
   // simulated PLC feed
   plcOn: boolean;
   setPlcOn: (v: boolean) => void;
@@ -127,6 +129,9 @@ interface CockpitValue {
 }
 
 const Ctx = createContext<CockpitValue | null>(null);
+
+/** A critical alert waits this long (so the alarm is seen) before the agent analyses it by itself. */
+const AUTO_START_S = 2;
 
 // oxlint-disable-next-line react/only-export-components
 export function useCockpit(): CockpitValue {
@@ -458,12 +463,40 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     [showToast],
   );
 
+  // A tap on the countdown and the timer can land in the same render; only the first one starts.
+  const startedFor = useRef<SafetyAlert | null>(null);
   const runFullAnalysis = useCallback(async () => {
-    if (!safety) return;
+    if (!safety || startedFor.current === safety) return;
+    startedFor.current = safety;
     const m = safety.machine_id;
     setSafety(null);
     await runDisruption({ ...DEMO_DISRUPTION, machine_id: m, disruption_type: safety.metric.includes("vibration") ? "VIBRATION" : "OVERHEAT" });
   }, [safety, runDisruption]);
+
+  // Proactive start: a critical alert counts down and then analyses on its own. The key leaves out
+  // the timestamp so repeated frames for the same fault do not restart the count. Not on the
+  // maintenance page, where a mechanic is reading the playbook and must not be pulled away.
+  const [autoIn, setAutoIn] = useState<number | null>(null);
+  const autoKey =
+    safety && (phase === "normal" || phase === "resolved") && page !== "maintenance" ? `${safety.machine_id}|${safety.rule}` : null;
+  const runFullRef = useRef(runFullAnalysis);
+  runFullRef.current = runFullAnalysis;
+  useEffect(() => {
+    if (!autoKey) {
+      setAutoIn(null);
+      return;
+    }
+    let left = AUTO_START_S;
+    setAutoIn(left);
+    const t = window.setInterval(() => {
+      left -= 1;
+      if (left > 0) return setAutoIn(left);
+      window.clearInterval(t);
+      setAutoIn(null);
+      void runFullRef.current();
+    }, 1000);
+    return () => window.clearInterval(t);
+  }, [autoKey]);
 
   // ── approval with optimistic lock ────────────────────────────────────────
   const openApproval = useCallback((s: Scenario) => {
@@ -732,7 +765,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       approvalFor, approving, conflict, approver, setApprover, openApproval, closeApproval, confirmApproval,
       injecting, injectDrill,
       displayStatus, live,
-      wsStatus, lastAnalysis, safety, sendTelemetry, runFullAnalysis,
+      wsStatus, lastAnalysis, safety, sendTelemetry, runFullAnalysis, autoIn,
       plcOn, setPlcOn, plcStatus, plcInfo, plcAlarm, startPlcScenario,
       ledgerOpen, setLedgerOpen, verifying, verifyResult, verify,
       chatOpen, chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat,
@@ -745,7 +778,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     [
       state, metrics, online, aiConfigured, error, ledger, sapVersion, page, phase, detectStep, params, result, receipt, runDisruption,
       approvalFor, approving, conflict, approver, openApproval, closeApproval, confirmApproval, injecting, injectDrill, displayStatus, live, wsStatus,
-      lastAnalysis, safety, sendTelemetry, runFullAnalysis, plcOn, plcStatus, plcInfo, plcAlarm, startPlcScenario, ledgerOpen, verifying, verifyResult, verify, chatOpen,
+      lastAnalysis, safety, sendTelemetry, runFullAnalysis, autoIn, plcOn, plcStatus, plcInfo, plcAlarm, startPlcScenario, ledgerOpen, verifying, verifyResult, verify, chatOpen,
       chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat, muted, toggleMute, toast, reset, resetting,
       skillStudioOpen, skillStudioState, skillStudioFormData, skillStudioDraft, skillStudioLintResult,
     ],

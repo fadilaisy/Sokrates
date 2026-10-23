@@ -93,7 +93,7 @@ function FreePlay() {
   );
 }
 
-const STEP_LABELS = ["Memuat skill cnc_milling", "Menjalankan CP-SAT solver", "Menyusun 3 skenario + ringkasan Gemini"];
+const STEP_LABELS = ["Memuat skill cnc_milling", "Menjalankan CP-SAT solver", "Menyusun 3 skenario + ringkasan AI"];
 
 function Detecting() {
   const { params, detectStep } = useCockpit();
@@ -259,7 +259,7 @@ function Metric({ label, value }: { label: string; value: string }) {
 }
 
 function SafetyAlertView() {
-  const { safety, runFullAnalysis, state, live } = useCockpit();
+  const { safety, runFullAnalysis, autoIn, state, live } = useCockpit();
   if (!safety) return null;
   const w = state?.work_centers.find((x) => x.id === safety.machine_id);
   const t = { ...(w?.telemetry ?? {}), ...(live[safety.machine_id] ?? {}) };
@@ -278,18 +278,23 @@ function SafetyAlertView() {
           </Mono>
           <p className="text-[20px] font-bold">{safety.machine_id} melewati batas aman. Jaga jarak dan hentikan mesin sesuai SOP.</p>
         </div>
-        <Btn variant="danger-inverse" size="lg" onClick={runFullAnalysis}>
-          Jalankan analisis penuh
-        </Btn>
       </div>
       <div className="grid gap-4 md:grid-cols-3">
         <Readout label={`Suhu motor · ${safety.machine_id}`} value={`${fmt1(temp)} °C`} limit="batas 95 °C" hot={tempHot} />
         <Readout label={`Vibrasi · ${safety.machine_id}`} value={`${fmt1(vib)} mm/s`} limit="batas 8,0 mm/s" hot={vibHot} />
-        <div className="flex flex-col gap-1 rounded-lg border border-line bg-page px-5 py-4">
+        {/* The agent starts on its own when the count ends; a tap starts it now. */}
+        <button
+          type="button"
+          onClick={runFullAnalysis}
+          className="flex flex-col gap-1 rounded-lg border-2 border-navy bg-page px-5 py-4 text-left hover:bg-surface"
+        >
           <span className="text-[15px] text-muted-ink">AI Supervisor</span>
-          <span className="text-[32px] font-bold">Siaga</span>
-          <span className="text-[15px] text-muted-ink">{safety.message || "Tekan “Jalankan analisis penuh” untuk membuat 3 skenario."}</span>
-        </div>
+          <span className="text-[32px] font-bold" aria-live="polite">
+            {autoIn != null ? `Menganalisis dalam ${autoIn}` : "Mulai analisis"}
+          </span>
+          <span className="text-[15px] font-semibold text-navy">Ketuk untuk mulai sekarang</span>
+          {safety.message && <span className="line-clamp-2 text-[14px] text-muted-ink">{safety.message}</span>}
+        </button>
       </div>
     </>
   );
