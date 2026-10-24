@@ -44,13 +44,16 @@ export interface TelemetryFrame {
   timestamp?: string;
 }
 
-/** One machine in a simulated PLC scan: its tags, run/fault bits and active alarm code. */
+/** One machine in a PLC scan: tags, writable setpoints, interlock bits and the active alarm code. */
 export interface PlcMachine {
   machine_id: string;
   status: string;
   run: boolean;
   fault: boolean;
   tags: Record<string, number>;
+  setpoints: Record<string, number>;
+  estop: boolean;
+  lockout: boolean;
   alarm: { code: string; text: string } | null;
 }
 
@@ -63,6 +66,18 @@ export interface PlcPastFix {
   exact_match: string[];
 }
 
+/** A setpoint change the limits file proposes for an alarm or a trend. */
+export interface PlcProposedAction {
+  action_id: string;
+  machine_id: string;
+  label: string;
+  tag: string;
+  value: number;
+  current: number | null;
+  autonomous: boolean;
+  write_enabled: boolean;
+}
+
 /** Sent once when a machine raises a new alarm code, with past fixes for that code. */
 export interface PlcAlarmFrame {
   event: "plc_alarm";
@@ -71,7 +86,56 @@ export interface PlcAlarmFrame {
   text: string;
   past_fixes: PlcPastFix[];
   documents: { doc_id: string; doc_title: string | null; page: number | null; citation: string | null }[];
+  proposed_action: PlcProposedAction | null;
   timestamp: string;
+}
+
+/** A tag trending towards its limit before any alarm, with the time left. */
+export interface PlcPredictionFrame {
+  event: "plc_prediction";
+  machine_id: string;
+  metric: string;
+  label: string | null;
+  unit: string | null;
+  current: number;
+  slope_per_min: number;
+  warning: number | null;
+  critical: number | null;
+  eta_warning_s: number | null;
+  eta_critical_s: number | null;
+  proposed_action: PlcProposedAction | null;
+  timestamp: string;
+}
+
+export interface PlcCheck {
+  id: string;
+  label: string;
+  ok: boolean;
+  detail: string;
+}
+
+/** Outcome of a setpoint write: every pre-action check, the read-back, and the ledger receipt. */
+export interface PlcActionResult {
+  ok: boolean;
+  machine_id: string;
+  tag: string;
+  value: number;
+  before: number | null;
+  after?: number;
+  approved_by: string;
+  autonomous: boolean;
+  action_id: string | null;
+  checks: PlcCheck[];
+  error?: string;
+  receipt_id: string;
+  sha256_hash: string;
+  timestamp: string;
+}
+
+export interface PlcAutonomy {
+  enabled: boolean;
+  by: string | null;
+  since: string | null;
 }
 
 export interface PlcScenarioInfo {
@@ -82,11 +146,14 @@ export interface PlcScenarioInfo {
 }
 
 export interface PlcInfo {
-  scenario: string;
-  run: number;
-  elapsed_s: number;
-  ramp_s: number;
-  scenarios: PlcScenarioInfo[];
+  driver: string;
+  scenario?: string;
+  run?: number;
+  elapsed_s?: number;
+  ramp_s?: number;
+  mitigated?: boolean;
+  scenarios?: PlcScenarioInfo[];
+  autonomy: PlcAutonomy;
 }
 
 export interface WorkCenter {
@@ -455,6 +522,12 @@ export const api = {
   plc: () => req<PlcInfo>("/api/plc"),
   plcScenario: (scenario: string) =>
     req<PlcInfo>("/api/plc/scenario", { method: "POST", body: JSON.stringify({ scenario }) }),
+  plcAction: (b: { machine_id: string; tag: string; value: number; approved_by: string; action_id?: string; reason?: string }) =>
+    req<PlcActionResult>("/api/plc/actions", { method: "POST", body: JSON.stringify(b) }),
+  plcAutonomy: (enabled: boolean, by: string) =>
+    req<PlcInfo>("/api/plc/autonomy", { method: "POST", body: JSON.stringify({ enabled, by }) }),
+  plcInterlock: (b: { machine_id: string; estop?: boolean; lockout?: boolean }) =>
+    req<{ machine_id: string; estop: boolean; lockout: boolean }>("/api/plc/interlock", { method: "POST", body: JSON.stringify(b) }),
   verify: () => req<{ valid: boolean; total_entries: number; first_broken_index: number | null; message: string }>("/api/ledger/verify"),
   generateSkill: (supervisor_description: string) =>
     req<{ skill_md: string; model_used: string }>("/api/skills/generate", {

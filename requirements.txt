@@ -8,6 +8,7 @@ pydantic>=2.7.0
 httpx>=0.27.0
 websockets>=12.0
 pytest>=8.0.0
+asyncua>=1.1.5  # OPC UA client for real PLCs (plc_adapter/opcua_driver.py, PLC_DRIVER=opcua)
 
 # ── RAG layer (rag/) ──────────────────────────────────────────────────────────
 pymupdf>=1.24.0,<2  # 2.0 changes table text extraction; RAG golden set g5 fails on it
