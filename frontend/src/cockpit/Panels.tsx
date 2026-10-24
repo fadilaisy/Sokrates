@@ -165,8 +165,9 @@ function PlcAlarmCard() {
 }
 
 export function WhatIfPanel() {
-  const { runDisruption, phase, injectDrill, injecting, result } = useCockpit();
-  const busy = phase === "detecting";
+  const { runDisruption, phase, injectDrill, injecting, result, autoIn } = useCockpit();
+  // During an alert countdown the agent is about to analyse; a what-if now would race it.
+  const busy = phase === "detecting" || autoIn != null;
   return (
     <Card className="flex flex-col gap-3 p-4">
       <h2 className="text-[17px] font-semibold">Gangguan / What-if</h2>
