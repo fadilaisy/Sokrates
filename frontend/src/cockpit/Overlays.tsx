@@ -1,10 +1,12 @@
 import { ArrowRight, ShieldCheck, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { api, formatIDR } from "../lib/api";
 import { cn } from "../lib/utils";
 import { changeKind, shortHash, timeRange, wibTime } from "../lib/shift";
 import { CitedText, SourceCitations } from "./Citations";
+import { ledgerDetail, ledgerSubject } from "./ledgerDetail";
 import { useCockpit } from "./store";
 import { AssistantFace, Btn, Card, Mono, Spinner } from "./ui";
 
@@ -205,12 +207,43 @@ function CloseBtn({ onClick }: { onClick: () => void }) {
   );
 }
 
+/** A small description beside a ledger entry. Portalled so the drawer's scroll area cannot clip it. */
+function LedgerTip({ lines, rect }: { lines: string[]; rect: DOMRect }) {
+  const width = 320;
+  const style: CSSProperties = {};
+  if (rect.left - width - 16 >= 8) {
+    // Room on the left of the drawer: sit beside the entry.
+    style.left = rect.left - width - 12;
+    style.width = width;
+    if (rect.top > window.innerHeight * 0.6) style.bottom = window.innerHeight - rect.bottom;
+    else style.top = rect.top;
+  } else {
+    // Phone: the drawer fills the screen, so sit under (or over) the entry instead.
+    style.left = rect.left;
+    style.width = rect.width;
+    if (rect.bottom > window.innerHeight * 0.6) style.bottom = window.innerHeight - rect.top + 6;
+    else style.top = rect.bottom + 6;
+  }
+  return createPortal(
+    <div role="tooltip" id="ledger-tip" style={style} className="pointer-events-none fixed z-[60] flex flex-col gap-1 rounded-md bg-navy px-3 py-2 text-[14px] leading-snug text-white shadow-xl">
+      {lines.map((l, i) => (
+        <p key={i}>{l}</p>
+      ))}
+    </div>,
+    document.body,
+  );
+}
+
 export function LedgerDrawer() {
   const { ledgerOpen, setLedgerOpen, ledger, verify, verifying, verifyResult, approver } = useCockpit();
   const [filter, setFilter] = useState("ALL");
+  const [tip, setTip] = useState<{ id: string; lines: string[]; rect: DOMRect } | null>(null);
   const [reverting, setReverting] = useState<string | null>(null);
   const [revertError, setRevertError] = useState<string | null>(null);
-  const close = () => setLedgerOpen(false);
+  const close = () => {
+    setTip(null);
+    setLedgerOpen(false);
+  };
   const types = [...new Set(ledger.map((e) => e.action_type))].sort();
   const entries = [...ledger].reverse().filter((e) => filter === "ALL" || e.action_type === filter);
 
@@ -256,20 +289,36 @@ export function LedgerDrawer() {
           Revert gagal: {revertError}
         </p>
       )}
-      <ol className="flex flex-1 flex-col gap-2.5 overflow-y-auto">
+      <ol className="flex flex-1 flex-col gap-2.5 overflow-y-auto" onScroll={() => setTip(null)}>
         {entries.length === 0 && <li className="text-[15px] text-muted-ink">Tidak ada entri untuk filter ini.</li>}
         {entries.map((e, i) => {
           const rejected =
             e.action_type === "APPROVAL_REJECTED_DRIFT" || e.action_type === "REVERT_REJECTED_DRIFT" || e.action_type === "PLC_WRITE_BLOCKED" || e.action_type === "PLC_WRITE_FAILED" || e.action_type === "PLC_WRITE_UNCONFIRMED";
           const plc = e.action_type.startsWith("PLC_");
           const canRevert = e.action_type === "SCENARIO_APPROVED";
+          const subject = ledgerSubject(e);
+          const lines = ledgerDetail(e);
+          const show = (el: HTMLElement) => lines.length && setTip({ id: e.id, lines, rect: el.getBoundingClientRect() });
+          const hide = () => setTip((cur) => (cur?.id === e.id ? null : cur));
           return (
             <li
               key={e.id}
-              className={cn("flex flex-col gap-1 rounded-md px-4 py-3", rejected ? "border border-danger-line bg-danger-bg" : i === 0 ? "border border-ok-line bg-ok-bg" : "bg-page")}
+              tabIndex={lines.length ? 0 : undefined}
+              aria-describedby={tip?.id === e.id ? "ledger-tip" : undefined}
+              onMouseEnter={(ev) => show(ev.currentTarget)}
+              onMouseLeave={hide}
+              onFocus={(ev) => show(ev.currentTarget)}
+              onBlur={hide}
+              // Touch screens have no hover: a tap shows the description; tapping elsewhere hides it.
+              onClick={(ev) => show(ev.currentTarget)}
+              className={cn(
+                "flex cursor-default flex-col gap-1 rounded-md px-4 py-3 outline-none focus-visible:ring-2 focus-visible:ring-navy",
+                rejected ? "border border-danger-line bg-danger-bg" : i === 0 ? "border border-ok-line bg-ok-bg" : "bg-page",
+              )}
             >
               <span className={cn("text-[16px] font-semibold", rejected && "text-fault")}>
-                {ACTION_LABEL[e.action_type] ?? e.action_type} · {String(e.scenario_chosen ?? e.skill_id ?? "").replace("scenario_", "Skenario ").toUpperCase().replace("SKENARIO", "Skenario")}
+                {ACTION_LABEL[e.action_type] ?? e.action_type}
+                {subject && ` · ${subject}`}
               </span>
               {plc ? (
                 <span className="text-[14px] text-muted-ink">
@@ -280,8 +329,11 @@ export function LedgerDrawer() {
                 </span>
               ) : (
                 <span className="text-[14px] text-muted-ink">
-                  {wibTime(e.timestamp)} · {String(e.approved_by ?? "").replace("Production Supervisor — ", "")} · SAP v{e.sap_version_before}
-                  {rejected ? " ≠ " : " → "}v{e.sap_version_after}
+                  {wibTime(e.timestamp)}
+                  {e.approved_by && ` · ${String(e.approved_by).replace("Production Supervisor — ", "")}`}
+                  {e.sap_version_before != null && e.sap_version_after != null
+                    ? ` · SAP v${e.sap_version_before}${rejected ? " ≠ " : " → "}v${e.sap_version_after}`
+                    : e.sap_version != null && ` · SAP v${String(e.sap_version)}`}
                   {rejected && " · tidak ada penulisan"}
                 </span>
               )}
@@ -290,7 +342,10 @@ export function LedgerDrawer() {
                 <span className="mt-1">
                   <Btn
                     variant="secondary"
-                    onClick={() => revert(e.id)}
+                    onClick={(ev) => {
+                      ev.stopPropagation();
+                      void revert(e.id);
+                    }}
                     disabled={reverting !== null}
                   >
                     {reverting === e.id ? <Spinner className="size-5" /> : null}
@@ -302,6 +357,7 @@ export function LedgerDrawer() {
           );
         })}
       </ol>
+      {tip && <LedgerTip lines={tip.lines} rect={tip.rect} />}
       {verifyResult && (
         <p
           role="status"
