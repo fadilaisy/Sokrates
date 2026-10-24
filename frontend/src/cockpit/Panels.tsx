@@ -1,4 +1,5 @@
 import { cn } from "../lib/utils";
+import type { PlcActionResult } from "../lib/api";
 import { fmt1, shortHash, telemetryOf, windowLabel } from "../lib/shift";
 import { DEMO_DISRUPTION, useCockpit } from "./store";
 import { Btn, Card, Mono, StatusBadge } from "./ui";
@@ -100,12 +101,23 @@ export function TelemetryPanel() {
   );
 }
 
-const fmtEta = (s: number | null) => (s == null ? "–" : s < 90 ? `${Math.round(s)} detik` : `${Math.round(s / 60)} menit`);
+// A fitted line can reach the limit a moment before the reading does; say "any moment" rather than "~0 s".
+const fmtEta = (s: number | null) =>
+  s == null ? "–" : s < 5 ? "sebentar lagi" : s < 90 ? `dalam ~${Math.round(s)} detik` : `dalam ~${Math.round(s / 60)} menit`;
+
+const OUTCOME_LABEL: Record<PlcActionResult["outcome"], string> = {
+  applied: "Ditulis ke PLC",
+  blocked: "Diblokir, tidak ditulis",
+  failed: "Gagal ditulis",
+  unconfirmed: "Ditulis, belum terkonfirmasi",
+};
 
 /** Simulated PLC: the machines stream their own tags and alarm codes; a scenario makes one drift into a fault. */
 function PlcControls() {
-  const { plcOn, setPlcOn, plcStatus, plcInfo, startPlcScenario, setPlcAutonomy, plcMachines, setPlcLockout } = useCockpit();
-  const faults = plcInfo?.scenarios?.filter((s) => s.id !== "normal") ?? [];
+  const { plcOn, setPlcOn, plcStatus, plcInfo, plcOffline, startPlcScenario, setPlcAutonomy, plcMachines, setPlcLockout } = useCockpit();
+  // Fault scenarios and the lockout test exist only on the simulator; a real line never offers them.
+  const simulated = plcInfo?.driver === "simulated";
+  const faults = simulated ? (plcInfo?.scenarios?.filter((s) => s.id !== "normal") ?? []) : [];
   const active = faults.find((s) => s.id === plcInfo?.scenario);
   const target = active?.machine_id ? plcMachines[active.machine_id] : undefined;
   const autonomy = plcInfo?.autonomy;
@@ -121,7 +133,12 @@ function PlcControls() {
           {plcOn ? (plcStatus === "open" ? "Tersambung · putuskan" : "Menyambung…") : "Sambungkan PLC"}
         </button>
       </div>
-      {plcOn && (
+      {plcOn && plcOffline && (
+        <p role="status" className="rounded-md border border-danger-line bg-danger-bg px-3 py-2 text-[14px] text-fault">
+          PLC offline: server tidak bisa membaca PLC ({plcOffline.error}). Mencoba lagi setiap scan; penulisan diblokir.
+        </p>
+      )}
+      {plcOn && simulated && (
         <div className="flex flex-wrap gap-2">
           {faults.map((s) => (
             <button
@@ -157,7 +174,7 @@ function PlcControls() {
             Hanya aksi pra-disetujui di file batas (turunkan feed override ke 50% saat motor spindel panas), hanya ke arah aman, dan
             hanya jika semua pemeriksaan lolos. Setiap aksi tercatat di audit ledger.
           </p>
-          {target && (
+          {simulated && target && (
             <button
               type="button"
               onClick={() => setPlcLockout(target.machine_id, !target.lockout)}
@@ -209,8 +226,8 @@ function PlcPredictionCard() {
       <p>
         Sekarang {fmt1(p.current)}
         {p.unit} ({rate}). Mencapai batas peringatan {p.warning}
-        {p.unit} dalam ~{fmtEta(p.eta_warning_s)}, batas kritis {p.critical}
-        {p.unit} dalam ~{fmtEta(p.eta_critical_s)}.
+        {p.unit} {fmtEta(p.eta_warning_s)}, batas kritis {p.critical}
+        {p.unit} {fmtEta(p.eta_critical_s)}.
       </p>
       <ProposedAction machineId={p.machine_id} />
       <Btn variant="secondary" onClick={() => planMaintenance(p.machine_id)} disabled={phase === "detecting"}>
@@ -258,7 +275,8 @@ function PlcActionReceipt() {
   return (
     <div className={cn("flex flex-col gap-1.5 rounded-md border px-3 py-2 text-[14px]", a.ok ? "border-ok-line bg-ok-bg" : "border-danger-line bg-danger-bg")}>
       <p className={cn("font-semibold", !a.ok && "text-fault")}>
-        {a.ok ? "Ditulis ke PLC" : "Diblokir"} · <Mono>{a.machine_id}</Mono> {a.tag} {a.before ?? "?"} → {a.ok ? a.after : a.value}
+        {OUTCOME_LABEL[a.outcome] ?? (a.ok ? OUTCOME_LABEL.applied : OUTCOME_LABEL.blocked)} · <Mono>{a.machine_id}</Mono> {a.tag}{" "}
+        {a.before ?? "?"} → {a.after ?? a.value}
       </p>
       <p className="text-muted-ink">
         {a.autonomous ? "Autonomi terbatas" : `Disetujui ${a.approved_by.replace("Production Supervisor — ", "")}`} · ledger{" "}
@@ -268,6 +286,7 @@ function PlcActionReceipt() {
         {a.checks.map((c) => (
           <li key={c.id} className={cn("flex gap-2", !c.ok && "font-semibold text-fault")}>
             <span aria-hidden>{c.ok ? "✓" : "✗"}</span>
+            <span className="sr-only">{c.ok ? "lulus:" : "gagal:"}</span>
             <span>
               {c.label} <span className="text-muted-ink">· {c.detail}</span>
             </span>

@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
+import math
 import os
 import re
 import sys
@@ -76,7 +77,7 @@ from knowledge.maintenance_ledger import MaintenanceLedger
 from knowledge.case_index import case_id_for_doc
 from knowledge.proactive_agent import ProactiveAgent
 from plc_adapter.driver import PlcWriteError
-from plc_adapter.limits import MachineLimits, pre_action_checks
+from plc_adapter.limits import MachineLimits, already_applied, pre_action_checks
 from plc_adapter.opcua_driver import OpcUaDriver
 from plc_adapter.predictor import TrendPredictor
 from plc_adapter.simulator import SCENARIOS as PLC_SCENARIOS, SimulatedPLC
@@ -2074,11 +2075,29 @@ async def _telemetry_to_playbook(
 # Simulated PLC — machines report their own tags and alarm codes
 # ─────────────────────────────────────────────────────────────────────────────
 
+_PLC_DRIVERS = ("simulated", "opcua")
+
+
 def _make_plc_driver() -> Any:
     """PLC_DRIVER=opcua talks to real controllers (see plc_adapter/opcua_driver.py); default is the simulator."""
-    if os.getenv("PLC_DRIVER", "simulated").lower() == "opcua":
-        return OpcUaDriver.from_files(os.environ["PLC_OPCUA_ENDPOINT"], os.environ["PLC_OPCUA_MAP"])
-    return SimulatedPLC(ramp_s=float(os.getenv("PLC_RAMP_S", "120")))
+    kind = os.getenv("PLC_DRIVER", "simulated").strip().lower() or "simulated"
+    if kind not in _PLC_DRIVERS:
+        # Never fall back to the simulator: fake temperatures on a plant screen are worse than no start.
+        raise RuntimeError(f"PLC_DRIVER={kind!r} is not supported; use one of: {', '.join(_PLC_DRIVERS)}")
+    if kind == "simulated":
+        return SimulatedPLC(ramp_s=float(os.getenv("PLC_RAMP_S", "120")))
+    missing = [v for v in ("PLC_OPCUA_ENDPOINT", "PLC_OPCUA_MAP") if not os.getenv(v, "").strip()]
+    if missing:
+        raise RuntimeError(f"PLC_DRIVER=opcua needs {' and '.join(missing)} (see .env.example and docs/PLC.md)")
+    map_path = Path(os.environ["PLC_OPCUA_MAP"].strip())
+    if not map_path.is_file():
+        raise RuntimeError(f"PLC_OPCUA_MAP={map_path} does not exist; copy config/opcua_map.example.json and edit it")
+    return OpcUaDriver.from_files(os.environ["PLC_OPCUA_ENDPOINT"].strip(), str(map_path))
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    return default if not raw else raw in ("1", "true", "yes", "on")
 
 
 _plc = _make_plc_driver()
@@ -2086,6 +2105,7 @@ _plc_limits = MachineLimits()
 _PLC_SCAN_S = float(os.getenv("PLC_SCAN_S", "1.0"))
 _SEVERITY_RANK = {"OK": 0, "WARNING": 1, "CRITICAL": 2}
 _PLC_AUTONOMY_ACTOR = "SkillForge · autonomi terbatas"
+# Autonomy lives in this process and starts off after every restart: a restart never re-arms it.
 _plc_autonomy: dict[str, Any] = {
     "enabled": bool(_plc_limits.raw.get("autonomy", {}).get("default_enabled", False)),
     "by": None,
@@ -2093,6 +2113,11 @@ _plc_autonomy: dict[str, Any] = {
 }
 # One write at a time across every socket and request: checks and write must see the same machine.
 _plc_write_lock = asyncio.Lock()
+
+
+def _plc_writes_enabled() -> bool:
+    """PLC_WRITES_ENABLED: writes are on by default for the simulator and off for real controllers."""
+    return _env_flag("PLC_WRITES_ENABLED", getattr(_plc, "name", "") == "simulated")
 
 
 def _plc_simulated() -> SimulatedPLC:
@@ -2103,7 +2128,7 @@ def _plc_simulated() -> SimulatedPLC:
 
 
 def _plc_info() -> dict[str, Any]:
-    return {**_plc.info(), "autonomy": dict(_plc_autonomy)}
+    return {**_plc.info(), "autonomy": dict(_plc_autonomy), "writes_enabled": _plc_writes_enabled()}
 
 
 async def _plc_scan() -> list[dict[str, Any]]:
@@ -2172,25 +2197,38 @@ async def post_plc_autonomy(body: PlcAutonomyRequest) -> dict[str, Any]:
     entry = _ledger.append({
         "action_type": "PLC_AUTONOMY_ENABLED" if body.enabled else "PLC_AUTONOMY_DISABLED",
         "approved_by": body.by,
-        "autonomous_actions": [
-            {"action_id": aid, "tag": a["tag"], "value": a["value"]}
-            for aid, a in _plc_limits.raw.get("defaults", {}).get("actions", {}).items() if a.get("autonomous")
-        ],
+        # What autonomy may now do, per machine, from the same merged limits the checks use.
+        "autonomous_actions": _plc_limits.autonomous_actions(),
     })
     return {**_plc_info(), "receipt_id": entry["id"], "sha256_hash": entry["sha256_hash"]}
+
+
+def _plc_result(action_type: str, outcome: str, record: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    entry = _ledger.append({"action_type": action_type, **record, **extra})
+    return {"ok": outcome == "applied", "outcome": outcome, **record, **extra, "receipt_id": entry["id"],
+            "sha256_hash": entry["sha256_hash"], "timestamp": entry["timestamp"]}
 
 
 async def _execute_plc_action(
     machine_id: str, tag: str, value: float, *, approved_by: str,
     action_id: Optional[str] = None, reason: Optional[str] = None, autonomous: bool = False,
 ) -> dict[str, Any]:
-    """Pre-action checks, then the write, then a read-back; every outcome lands in the audit ledger."""
+    """
+    Pre-action checks, then the write, then a read-back; every outcome lands in the audit ledger:
+    applied, blocked (a check failed, nothing written), failed (the write errored; state unknown)
+    or unconfirmed (written, but the read-back differs: the PLC may have changed).
+    """
     async with _plc_write_lock:
-        row = next((r for r in await _plc_scan() if r["machine_id"] == machine_id), None)
+        try:
+            row = next((r for r in await _plc_scan() if r["machine_id"] == machine_id), None)
+        except Exception as exc:  # a PLC outage blocks the write (check "plc"), it never 500s
+            print(f"[plc] scan before write failed: {exc}", file=sys.stderr)
+            row = None
         wc = next((w for w in _sap.get_state().get("work_centers", []) if w.get("id") == machine_id), {})
         checks = pre_action_checks(
             _plc_limits, machine_id=machine_id, tag=tag, value=value, row=row,
             sap_status=wc.get("status"), approved_by=approved_by, autonomous=autonomous, action_id=action_id,
+            writes_enabled=_plc_writes_enabled(),
         )
         before = (row or {}).get("setpoints", {}).get(tag)
         record = {
@@ -2199,22 +2237,21 @@ async def _execute_plc_action(
             "reason": reason, "driver": _plc.name,
         }
         if not all(c["ok"] for c in checks):
-            entry = _ledger.append({"action_type": "PLC_WRITE_BLOCKED", **record, "checks": checks})
-            return {"ok": False, **record, "checks": checks, "receipt_id": entry["id"],
-                    "sha256_hash": entry["sha256_hash"], "timestamp": entry["timestamp"]}
+            return _plc_result("PLC_WRITE_BLOCKED", "blocked", record, checks=checks)
         try:
-            after = await run_in_threadpool(_plc.write, machine_id, tag, value)
-        except PlcWriteError as exc:
-            entry = _ledger.append({"action_type": "PLC_WRITE_FAILED", **record, "checks": checks, "error": str(exc)})
-            return {"ok": False, **record, "checks": checks, "error": str(exc), "receipt_id": entry["id"],
-                    "sha256_hash": entry["sha256_hash"], "timestamp": entry["timestamp"]}
-        checks.append({"id": "readback", "label": "Nilai terbaca ulang dari PLC sesuai",
-                       "ok": abs(after - value) < 1e-6, "detail": f"{after:g}"})
-        ok = checks[-1]["ok"]
-        entry = _ledger.append({"action_type": "PLC_WRITE_APPLIED" if ok else "PLC_WRITE_FAILED",
-                                **record, "after": after, "checks": checks})
-        return {"ok": ok, **record, "after": after, "checks": checks, "receipt_id": entry["id"],
-                "sha256_hash": entry["sha256_hash"], "timestamp": entry["timestamp"]}
+            after = float(await run_in_threadpool(_plc.write, machine_id, tag, value))
+        except Exception as exc:
+            print(f"[plc] write failed: {exc}", file=sys.stderr)
+            return _plc_result("PLC_WRITE_FAILED", "failed", record, checks=checks,
+                               error=f"{exc} — setpoint tidak pasti, periksa di HMI mesin")
+        # Float32 nodes read back with rounding (66.7 → 66.6999969); a relative tolerance absorbs that.
+        ok = math.isclose(after, value, rel_tol=1e-6, abs_tol=1e-6)
+        checks.append({"id": "readback", "label": "Nilai terbaca ulang dari PLC sesuai", "ok": ok,
+                       "detail": f"{after:g}" if ok else f"terbaca {after:g}, diminta {value:g}"})
+        if not ok:
+            return _plc_result("PLC_WRITE_UNCONFIRMED", "unconfirmed", record, after=after, checks=checks,
+                               error=f"PLC sekarang {after:g}, bukan {value:g}: setpoint sudah berubah, periksa di HMI")
+        return _plc_result("PLC_WRITE_APPLIED", "applied", record, after=after, checks=checks)
 
 
 @app.post("/api/plc/actions", summary="Write one setpoint after pre-action checks and a supervisor's approval")
@@ -2233,13 +2270,13 @@ def _plc_proposal(row: dict[str, Any], *, alarm_code: Optional[str] = None,
     if not action:
         return None
     current = row.get("setpoints", {}).get(action["tag"])
-    if current is not None and (current >= action["value"] if action["tag"] == "feed_hold" else current <= action["value"]):
+    if already_applied(action["direction"], current, action["value"]):
         return None
     machine = _plc_limits.machine(row["machine_id"]) or {}
     return {
         "action_id": action["action_id"], "machine_id": row["machine_id"], "label": action["label"],
-        "tag": action["tag"], "value": action["value"], "current": current,
-        "autonomous": bool(action.get("autonomous")), "write_enabled": bool(machine.get("write_enabled", True)),
+        "tag": action["tag"], "value": action["value"], "current": current, "direction": action["direction"],
+        "autonomous": bool(action.get("autonomous")), "write_enabled": bool(machine.get("write_enabled", False)),
     }
 
 
@@ -2262,8 +2299,60 @@ def _alarm_references(code: str, text: str) -> dict[str, Any]:
     }
 
 
-async def _plc_autonomous(send: Callable[[dict[str, Any]], Awaitable[None]],
-                          proposal: Optional[dict[str, Any]], trigger: str) -> None:
+# ── The PLC loop: one per process, whether or not a cockpit is open ─────────
+#
+# Scanning, prediction and limited autonomy run here, server-side. /ws/plc only
+# subscribes: each socket gets the latest state on connect and then every frame
+# the loop broadcasts. Autonomy and the simulator are per process, so run one
+# worker (the Dockerfile's uvicorn default).
+
+_plc_subscribers: set[asyncio.Queue] = set()
+_plc_latest: dict[str, Any] = {"generation": None, "scan": None, "offline": None, "alarms": {}, "predictions": {}}
+_plc_loop_task: Optional[asyncio.Task] = None
+_plc_side_tasks: set[asyncio.Task] = set()
+_PLC_PREDICTION_TTL_S = 15.0
+
+
+async def _plc_broadcast(frame: dict[str, Any]) -> None:
+    for q in list(_plc_subscribers):
+        if q.full():  # a stalled viewer loses its oldest frame, never blocks the loop
+            try:
+                q.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        q.put_nowait(frame)
+
+
+def _plc_generation() -> tuple[Any, ...]:
+    info = _plc.info()
+    return (id(_plc), info.get("scenario"), info.get("run"))
+
+
+def _plc_loop_running() -> bool:
+    t = _plc_loop_task
+    try:
+        return t is not None and not t.done() and t.get_loop() is asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+
+
+def _ensure_plc_loop() -> None:
+    global _plc_loop_task
+    if not _plc_loop_running():
+        _plc_loop_task = asyncio.get_running_loop().create_task(_plc_loop())
+
+
+def _plc_snapshot() -> list[dict[str, Any]]:
+    """What a viewer joining now needs: the line as it is, active alarms and fresh predictions."""
+    if not _plc_loop_running() or _plc_latest["generation"] != _plc_generation():
+        return []
+    now = time.monotonic()
+    head = _plc_latest["offline"] or _plc_latest["scan"]
+    return ([head] if head else []) + list(_plc_latest["alarms"].values()) + [
+        f for at, f in _plc_latest["predictions"].values() if now - at < _PLC_PREDICTION_TTL_S]
+
+
+async def _plc_autonomous(proposal: Optional[dict[str, Any]], trigger: str) -> None:
     """Limited autonomy: run a pre-approved action by itself, with the same checks as a human approval."""
     if not (_plc_autonomy["enabled"] and proposal and proposal["autonomous"]):
         return
@@ -2271,100 +2360,162 @@ async def _plc_autonomous(send: Callable[[dict[str, Any]], Awaitable[None]],
         proposal["machine_id"], proposal["tag"], proposal["value"], approved_by=_PLC_AUTONOMY_ACTOR,
         action_id=proposal["action_id"], reason=trigger, autonomous=True,
     )
-    await send({"event": "plc_action", **res})
+    await _plc_broadcast({"event": "plc_action", **res})
+
+
+def _plc_spawn(coro: Awaitable[None]) -> None:
+    # Analysis can wait on an LLM; it must not hold up the next scan or an autonomous write.
+    task = asyncio.ensure_future(coro)
+    _plc_side_tasks.add(task)
+    task.add_done_callback(_plc_side_tasks.discard)
+
+
+async def _plc_loop() -> None:
+    """Scan → alarm lookup → trend prediction → limited autonomy, every PLC_SCAN_S seconds."""
+    peak: dict[tuple[str, str], str] = {}
+    alarms: dict[str, Optional[str]] = {}
+    predicted_at: dict[tuple[str, str], float] = {}
+    predictor = TrendPredictor(horizon_s=float(os.getenv("PLC_PREDICT_HORIZON_S", "600")))
+    while True:
+        try:
+            gen = _plc_generation()
+            if gen != _plc_latest["generation"]:
+                # A new scenario starts from a clean slate, so re-running a demo alerts again.
+                peak.clear()
+                alarms.clear()
+                predicted_at.clear()
+                predictor.reset()
+                _plc_latest.update(generation=gen, scan=None, offline=None, alarms={}, predictions={})
+            await _plc_tick(gen[1], peak, alarms, predicted_at, predictor)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # the loop outlives any one bad scan
+            print(f"[plc] loop iteration failed: {exc}\n{traceback.format_exc()}", file=sys.stderr)
+        await asyncio.sleep(_PLC_SCAN_S)
+
+
+async def _plc_tick(scenario: Optional[str], peak: dict[tuple[str, str], str], alarms: dict[str, Optional[str]],
+                    predicted_at: dict[tuple[str, str], float], predictor: TrendPredictor) -> None:
+    try:
+        scan = await _plc_scan()
+    except Exception as exc:
+        # A plant network outage shows as "PLC offline" in the cockpit; the loop retries next scan.
+        print(f"[plc] scan failed: {exc}", file=sys.stderr)
+        frame = {"event": "plc_offline", "driver": _plc.name, "error": str(exc) or type(exc).__name__,
+                 "timestamp": datetime.now(timezone.utc).isoformat()}
+        _plc_latest["offline"] = frame
+        await _plc_broadcast(frame)
+        return
+    now = time.monotonic()
+    frame = {
+        "event": "plc_scan",
+        "scenario": scenario,
+        "machines": scan,
+        "autonomy": dict(_plc_autonomy),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    _plc_latest.update(scan=frame, offline=None)
+    await _plc_broadcast(frame)
+    for m in scan:
+        mid, alarm = m["machine_id"], m["alarm"]
+        code = alarm["code"] if alarm else None
+        if code and alarms.get(mid) != code:
+            try:
+                refs = await run_in_threadpool(_alarm_references, code, alarm["text"])
+            except Exception as exc:  # the feed must keep scanning without references
+                print(f"[plc] alarm lookup failed: {exc}", file=sys.stderr)
+                refs = {"past_fixes": [], "documents": []}
+            proposal = _plc_proposal(m, alarm_code=code)
+            alarm_frame = {
+                "event": "plc_alarm", "machine_id": mid, "code": code, "text": alarm["text"],
+                **refs, "proposed_action": proposal, "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            _plc_latest["alarms"][mid] = alarm_frame
+            await _plc_broadcast(alarm_frame)
+            if m["run"]:  # a stopped machine needs no load taken off it
+                await _plc_autonomous(proposal, f"alarm {code}")
+        elif not code:
+            _plc_latest["alarms"].pop(mid, None)
+        alarms[mid] = code
+        if not m["run"]:
+            continue  # a stopped spindle reads 0 bar coolant; that is not a low-pressure fault
+        tag_limits = _plc_limits.tag_limits(mid)
+        for metric, value in m["tags"].items():
+            sev, _rule = _classify_telemetry(metric, value)
+            if metric in tag_limits:
+                predictor.observe(mid, metric, now, value)
+                if sev == "OK" and now - predicted_at.get((mid, metric), -1e9) >= 5.0:
+                    pred = predictor.predict(mid, metric, tag_limits[metric])
+                    if pred is not None:
+                        first = (mid, metric) not in predicted_at
+                        predicted_at[(mid, metric)] = now
+                        proposal = _plc_proposal(m, metric=metric)
+                        pred_frame = {"event": "plc_prediction", **pred, "label": tag_limits[metric].get("label"),
+                                      "unit": tag_limits[metric].get("unit"), "proposed_action": proposal,
+                                      "timestamp": datetime.now(timezone.utc).isoformat()}
+                        _plc_latest["predictions"][(mid, metric)] = (now, pred_frame)
+                        await _plc_broadcast(pred_frame)
+                        if first:
+                            await _plc_autonomous(proposal, f"trend {metric}")
+            # Only escalations trigger analysis: noise around a threshold must not re-alert.
+            if _SEVERITY_RANK[sev] > _SEVERITY_RANK[peak.get((mid, metric), "OK")]:
+                peak[(mid, metric)] = sev
+                _plc_spawn(_analyze_reading(_plc_broadcast, mid, metric, value, [code] if code else None))
+
+
+@app.on_event("startup")
+async def _start_plc_loop() -> None:
+    _ensure_plc_loop()
+
+
+@app.on_event("shutdown")
+async def _stop_plc_loop() -> None:
+    task = _plc_loop_task
+    if task is not None and not task.done():
+        task.cancel()
+    close = getattr(_plc, "close", None)
+    if close is not None:
+        try:
+            await run_in_threadpool(close)
+        except Exception as exc:
+            print(f"[plc] driver close failed: {exc}", file=sys.stderr)
 
 
 @app.websocket("/ws/plc")
 async def ws_plc(websocket: WebSocket) -> None:
     """
-    PLC feed (simulated or OPC UA). Server → client every PLC_SCAN_S seconds:
+    PLC feed (simulated or OPC UA), a subscriber to the server's PLC loop. On connect: the latest
+    scan, active alarms and fresh predictions. Then, every PLC_SCAN_S seconds:
         {event: "plc_scan", scenario, machines: [{machine_id, status, run, fault, tags, setpoints,
          estop, lockout, alarm}], autonomy, timestamp}
+    or, while the PLC cannot be read:
+        {event: "plc_offline", driver, error, timestamp}
     While a tag trends towards its limit (before any alarm), at most every 5 s:
         {event: "plc_prediction", machine_id, metric, current, slope_per_min, eta_warning_s,
          eta_critical_s, proposed_action, timestamp}
     When a machine raises a new alarm code:
         {event: "plc_alarm", machine_id, code, text, past_fixes, documents, proposed_action, timestamp}
     When limited autonomy runs a pre-approved action:
-        {event: "plc_action", ok, machine_id, tag, value, before, after, checks, receipt_id, ...}
+        {event: "plc_action", ok, outcome, machine_id, tag, value, before, after, checks, receipt_id, ...}
     When a tag reaches a worse severity than before, the same frames as /ws/telemetry
     (telemetry_analysis, maintenance_playbook, safety_alert), with the alarm code
     passed to the playbook so it matches past cases on the exact code.
     """
     await websocket.accept()
-    send = websocket.send_json
-    peak: dict[tuple[str, str], str] = {}
-    alarms: dict[str, Optional[str]] = {}
-    predicted_at: dict[tuple[str, str], float] = {}
-    predictor = TrendPredictor(horizon_s=float(os.getenv("PLC_PREDICT_HORIZON_S", "600")))
-    generation = None
+    queue: asyncio.Queue = asyncio.Queue(maxsize=256)
+    for frame in _plc_snapshot():
+        queue.put_nowait(frame)
+    _plc_subscribers.add(queue)
+    _ensure_plc_loop()
     try:
         while True:
-            info = _plc.info()
-            gen = (info.get("scenario"), info.get("run"))
-            if gen != generation:
-                # A new scenario starts from a clean slate, so re-running a demo alerts again.
-                generation = gen
-                peak.clear()
-                alarms.clear()
-                predicted_at.clear()
-                predictor.reset()
-            scan = await _plc_scan()
-            now = time.monotonic()
-            await send({
-                "event": "plc_scan",
-                "scenario": info.get("scenario"),
-                "machines": scan,
-                "autonomy": dict(_plc_autonomy),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
-            for m in scan:
-                mid, alarm = m["machine_id"], m["alarm"]
-                code = alarm["code"] if alarm else None
-                if code and alarms.get(mid) != code:
-                    try:
-                        refs = await run_in_threadpool(_alarm_references, code, alarm["text"])
-                    except Exception as exc:  # the feed must keep scanning without references
-                        print(f"[plc] alarm lookup failed: {exc}", file=sys.stderr)
-                        refs = {"past_fixes": [], "documents": []}
-                    proposal = _plc_proposal(m, alarm_code=code)
-                    await send({
-                        "event": "plc_alarm", "machine_id": mid, "code": code, "text": alarm["text"],
-                        **refs, "proposed_action": proposal, "timestamp": datetime.now(timezone.utc).isoformat(),
-                    })
-                    await _plc_autonomous(send, proposal, f"alarm {code}")
-                alarms[mid] = code
-                if not m["run"]:
-                    continue  # a stopped spindle reads 0 bar coolant; that is not a low-pressure fault
-                tag_limits = _plc_limits.tag_limits(mid)
-                for metric, value in m["tags"].items():
-                    sev, _rule = _classify_telemetry(metric, value)
-                    if metric in tag_limits:
-                        predictor.observe(mid, metric, now, value)
-                        if sev == "OK" and now - predicted_at.get((mid, metric), -1e9) >= 5.0:
-                            pred = predictor.predict(mid, metric, tag_limits[metric])
-                            if pred is not None:
-                                first = (mid, metric) not in predicted_at
-                                predicted_at[(mid, metric)] = now
-                                proposal = _plc_proposal(m, metric=metric)
-                                await send({"event": "plc_prediction", **pred, "label": tag_limits[metric].get("label"),
-                                            "unit": tag_limits[metric].get("unit"), "proposed_action": proposal,
-                                            "timestamp": datetime.now(timezone.utc).isoformat()})
-                                if first:
-                                    await _plc_autonomous(send, proposal, f"trend {metric}")
-                    # Only escalations trigger analysis: noise around a threshold must not re-alert.
-                    if _SEVERITY_RANK[sev] > _SEVERITY_RANK[peak.get((mid, metric), "OK")]:
-                        peak[(mid, metric)] = sev
-                        await _analyze_reading(send, mid, metric, value, [code] if code else None)
-            await asyncio.sleep(_PLC_SCAN_S)
+            await websocket.send_json(await queue.get())
     except WebSocketDisconnect:
         pass
     except Exception as exc:
-        print(f"[ws] plc socket failed: {exc}\n{traceback.format_exc()}", file=sys.stderr)
-        try:
-            await websocket.close()
-        except Exception:
-            pass
+        print(f"[ws] plc socket failed: {exc}", file=sys.stderr)
+    finally:
+        _plc_subscribers.discard(queue)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

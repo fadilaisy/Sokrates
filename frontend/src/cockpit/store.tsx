@@ -63,7 +63,8 @@ interface CockpitValue {
   params: DisruptionParams | null;
   result: DisruptResponse | null;
   receipt: (ApproveReceipt & { scenario: Scenario }) | null;
-  runDisruption: (p: DisruptionParams) => Promise<void>;
+  /** Resolves true when the solver answered, false when the analysis failed (already toasted). */
+  runDisruption: (p: DisruptionParams) => Promise<boolean>;
   // approval
   approvalFor: Scenario | null;
   approving: boolean;
@@ -93,6 +94,8 @@ interface CockpitValue {
   plcStatus: WsStatus;
   plcInfo: PlcInfo | null;
   plcAlarm: PlcAlarmFrame | null;
+  /** Set while the backend cannot read the PLC (plant network down); cleared by the next scan. */
+  plcOffline: { error: string; timestamp: string } | null;
   startPlcScenario: (id: string) => Promise<void>;
   /** Latest PLC scan row per machine (setpoints, e-stop, lockout). */
   plcMachines: Record<string, PlcMachine>;
@@ -188,6 +191,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   const [plcStatus, setPlcStatus] = useState<WsStatus>("closed");
   const [plcInfo, setPlcInfo] = useState<PlcInfo | null>(null);
   const [plcAlarm, setPlcAlarm] = useState<PlcAlarmFrame | null>(null);
+  const [plcOffline, setPlcOffline] = useState<{ error: string; timestamp: string } | null>(null);
   const [plcMachines, setPlcMachines] = useState<Record<string, PlcMachine>>({});
   const [plcPrediction, setPlcPrediction] = useState<PlcPredictionFrame | null>(null);
   const [plcAction, setPlcAction] = useState<PlcActionResult | null>(null);
@@ -365,8 +369,20 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
         return next;
       });
       setPlcMachines(Object.fromEntries(machines.map((m) => [m.machine_id, m])));
+      setPlcOffline(null);
+      // Once the machine's alarm clears (e.g. after mitigation), its card goes too.
+      const alarmed = new Set(machines.filter((m) => m.alarm).map((m) => m.machine_id));
+      setPlcAlarm((cur) => (cur && !alarmed.has(cur.machine_id) ? null : cur));
       const autonomy = f.autonomy;
-      if (autonomy) setPlcInfo((cur) => (cur && cur.autonomy.enabled !== autonomy.enabled ? { ...cur, autonomy } : cur));
+      if (autonomy)
+        setPlcInfo((cur) =>
+          cur ? (JSON.stringify(cur.autonomy) === JSON.stringify(autonomy) ? cur : { ...cur, autonomy }) : { driver: "", autonomy },
+        );
+      return;
+    }
+    if (f.event === "plc_offline") {
+      const o = f as unknown as { error: string; timestamp: string };
+      setPlcOffline({ error: o.error, timestamp: o.timestamp });
       return;
     }
     if (f.event === "plc_alarm") {
@@ -437,7 +453,8 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       };
     };
     connect();
-    api.plc().then(setPlcInfo).catch(() => undefined);
+    // Keep autonomy from a scan frame that arrived first; the rest comes from the API.
+    api.plc().then((info) => setPlcInfo((cur) => ({ ...info, autonomy: cur?.autonomy ?? info.autonomy }))).catch(() => undefined);
     return () => {
       stopped = true;
       if (retry) window.clearTimeout(retry);
@@ -489,10 +506,12 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
         setResult(r);
         setSapVersion(r.sap_version);
         setPhase("proposing");
+        return true;
       } catch (e) {
         setPhase("normal");
         setError(e instanceof Error ? e.message : String(e));
         showToast("Analisis gagal. Periksa koneksi ke backend.");
+        return false;
       } finally {
         window.clearTimeout(t1);
         window.clearTimeout(t2);
@@ -520,10 +539,15 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       clearApplied(r);
       showToast(`${p.machine_id}: ${p.tag} ${r.before ?? "?"} → ${r.after}. Tercatat di audit ledger.`);
     } catch (e) {
-      // A blocked write comes back as 409 with every check, so the operator sees which one failed.
+      // A refused write comes back as 409 with every check, so the operator sees what happened.
       if (e instanceof ApiError && e.status === 409 && e.detail && typeof e.detail === "object") {
-        setPlcAction(e.detail as PlcActionResult);
-        showToast(`Penulisan ke ${p.machine_id} diblokir oleh pemeriksaan keselamatan.`);
+        const r = e.detail as PlcActionResult;
+        setPlcAction(r);
+        showToast(
+          r.outcome === "blocked"
+            ? `Penulisan ke ${p.machine_id} diblokir oleh pemeriksaan keselamatan.`
+            : `Penulisan ke ${p.machine_id} gagal: ${r.error ?? "periksa di HMI mesin"}.`,
+        );
       } else {
         showToast(`Penulisan PLC gagal: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -553,11 +577,14 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
 
   const planMaintenance = useCallback(async (machineId: string) => {
     // Next full hour of the shift (07:00 = hour 0), a 2-hour window, inside the 8-hour shift.
+    // Too late in the shift for a 2-hour window: the start of the next shift instead, never the past.
     const wibHour = (new Date().getUTCHours() + 7) % 24;
-    const start = Math.min(6, Math.max(0, wibHour - 7 + 1));
-    setPlcPrediction(null);
-    await runDisruption({ machine_id: machineId, disruption_type: "MAINTENANCE", start_hour: start, end_hour: start + 2 });
-  }, [runDisruption]);
+    const next = wibHour - 7 + 1;
+    const start = next >= 0 && next <= 6 ? next : 0;
+    if (start !== next) showToast(`Shift ini tidak cukup untuk 2 jam perawatan; dijadwalkan di awal shift berikutnya (07:00).`);
+    if (await runDisruption({ machine_id: machineId, disruption_type: "MAINTENANCE", start_hour: start, end_hour: start + 2 }))
+      setPlcPrediction(null);
+  }, [runDisruption, showToast]);
 
   // Proactive start: a critical alert counts down and then analyses on its own. The key leaves out
   // the timestamp so repeated frames for the same fault do not restart the count. Not on the
@@ -854,7 +881,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       injecting, injectDrill,
       displayStatus, live,
       wsStatus, lastAnalysis, safety, sendTelemetry, runFullAnalysis, autoIn,
-      plcOn, setPlcOn, plcStatus, plcInfo, plcAlarm, startPlcScenario,
+      plcOn, setPlcOn, plcStatus, plcInfo, plcAlarm, plcOffline, startPlcScenario,
       plcMachines, plcPrediction, plcAction, plcBusy, approvePlcAction, setPlcAutonomy, setPlcLockout, planMaintenance,
       ledgerOpen, setLedgerOpen, verifying, verifyResult, verify,
       chatOpen, chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat,
@@ -867,7 +894,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     [
       state, metrics, online, aiConfigured, error, ledger, sapVersion, page, phase, detectStep, params, result, receipt, runDisruption,
       approvalFor, approving, conflict, approver, openApproval, closeApproval, confirmApproval, injecting, injectDrill, displayStatus, live, wsStatus,
-      lastAnalysis, safety, sendTelemetry, runFullAnalysis, autoIn, plcOn, plcStatus, plcInfo, plcAlarm, startPlcScenario,
+      lastAnalysis, safety, sendTelemetry, runFullAnalysis, autoIn, plcOn, plcStatus, plcInfo, plcAlarm, plcOffline, startPlcScenario,
       plcMachines, plcPrediction, plcAction, plcBusy, approvePlcAction, setPlcAutonomy, setPlcLockout, planMaintenance, ledgerOpen, verifying, verifyResult, verify, chatOpen,
       chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat, muted, toggleMute, toast, reset, resetting,
       skillStudioOpen, skillStudioState, skillStudioFormData, skillStudioDraft, skillStudioLintResult,

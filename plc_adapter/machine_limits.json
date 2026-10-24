@@ -5,6 +5,7 @@
     "facility": "PT Karawang Precision Manufacturing"
   },
   "defaults": {
+    "_write_enabled": "A machine is read-only unless write_enabled is true (missing means false).",
     "write_enabled": true,
     "tags": {
       "motor_temp_celsius":         {"label": "Suhu motor spindel", "unit": "°C",   "warning": 85.0, "critical": 95.0, "direction": "rising"},
@@ -19,21 +20,21 @@
     "actions": {
       "reduce_feed_50": {
         "label": "Turunkan feed override ke 50% agar motor spindel mendingin",
-        "tag": "feed_override_percent", "value": 50.0,
+        "tag": "feed_override_percent", "value": 50.0, "direction": "reduce",
         "alarm_codes": ["ALM-410", "Alarm 108", "SP1241"],
         "metrics": ["motor_temp_celsius"],
         "autonomous": true
       },
       "reduce_spindle_60": {
         "label": "Turunkan spindle speed override ke 60% untuk menahan vibrasi bearing",
-        "tag": "spindle_speed_override_percent", "value": 60.0,
+        "tag": "spindle_speed_override_percent", "value": 60.0, "direction": "reduce",
         "alarm_codes": ["ALM-162"],
         "metrics": ["spindle_vibration_mm_per_s"],
         "autonomous": false
       },
       "feed_hold": {
         "label": "Feed hold: hentikan pemakanan sampai tekanan coolant pulih",
-        "tag": "feed_hold", "value": 1.0,
+        "tag": "feed_hold", "value": 1.0, "direction": "engage",
         "alarm_codes": ["Alarm 970", "ALM-441"],
         "metrics": ["coolant_pressure_bar"],
         "autonomous": false

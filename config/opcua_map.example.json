@@ -1,0 +1,21 @@
+{
+  "_comment": "Copy to config/opcua_map.json and set PLC_OPCUA_MAP=config/opcua_map.json. One entry per SAP work center id; leave out any node a machine does not have. alarm_code_map turns numeric controller codes into the codes in plc_adapter/machine_limits.json.",
+  "CNC-04": {
+    "tags": {
+      "motor_temp_celsius": "ns=2;s=CNC04.Spindle.MotorTemp",
+      "spindle_vibration_mm_per_s": "ns=2;s=CNC04.Spindle.Vibration",
+      "coolant_pressure_bar": "ns=2;s=CNC04.Coolant.Pressure"
+    },
+    "setpoints": {
+      "feed_override_percent": "ns=2;s=CNC04.FeedOverride",
+      "spindle_speed_override_percent": "ns=2;s=CNC04.SpindleOverride",
+      "feed_hold": "ns=2;s=CNC04.FeedHold"
+    },
+    "run": "ns=2;s=CNC04.Running",
+    "estop": "ns=2;s=CNC04.EStop",
+    "lockout": "ns=2;s=CNC04.Lockout",
+    "alarm_code": "ns=2;s=CNC04.AlarmCode",
+    "alarm_text": "ns=2;s=CNC04.AlarmText",
+    "alarm_code_map": {"410": "ALM-410", "162": "ALM-162", "970": "Alarm 970"}
+  }
+}

@@ -22,14 +22,58 @@ from typing import Any, Optional
 
 LIMITS_PATH = Path(__file__).with_name("machine_limits.json")
 
-# SAP statuses in which nothing may be written to a machine.
-BLOCKED_STATUSES = {"MAINTENANCE", "BREAKDOWN", "FAULT"}
+# SAP statuses in which a machine may be written to; anything else (MAINTENANCE,
+# BREAKDOWN, FAULT, missing or unknown) blocks the write.
+WRITABLE_STATUSES = {"RUNNING", "IDLE"}
+
+# How an action moves its setpoint: "reduce" lowers it (feed or speed override),
+# "engage" raises a 0/1 switch (feed hold). Both take load off the machine.
+DIRECTIONS = {"reduce", "engage"}
+
+
+class LimitsError(ValueError):
+    """The limits file is malformed; SkillForge refuses to start rather than guess."""
+
+
+def _number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
 class MachineLimits:
-    def __init__(self, path: Path = LIMITS_PATH) -> None:
-        self.raw: dict[str, Any] = json.loads(Path(path).read_text(encoding="utf-8"))
+    def __init__(self, path: Path = LIMITS_PATH, *, raw: Optional[dict[str, Any]] = None) -> None:
+        self.raw: dict[str, Any] = raw if raw is not None else json.loads(Path(path).read_text(encoding="utf-8"))
         self._defaults = self.raw.get("defaults", {})
+        self.validate()
+
+    def validate(self) -> None:
+        """Check every machine's merged limits, so a bad file fails at load and never mid-write."""
+        problems: list[str] = []
+        for mid in self.raw.get("machines", {}):
+            m = self.machine(mid) or {}
+            where = f"machines.{mid}"
+            if not isinstance(m.get("write_enabled", False), bool):
+                problems.append(f"{where}.write_enabled must be true or false")
+            for tag, t in m.get("tags", {}).items():
+                if not (_number(t.get("warning")) and _number(t.get("critical"))):
+                    problems.append(f"{where}.tags.{tag} needs numeric warning and critical")
+                if t.get("direction", "rising") not in ("rising", "falling"):
+                    problems.append(f"{where}.tags.{tag}.direction must be rising or falling")
+            setpoints = m.get("setpoints", {})
+            for tag, sp in setpoints.items():
+                if not all(_number(sp.get(k)) for k in ("min", "max", "max_step")):
+                    problems.append(f"{where}.setpoints.{tag} needs numeric min, max and max_step")
+                elif sp["min"] > sp["max"] or sp["max_step"] <= 0:
+                    problems.append(f"{where}.setpoints.{tag} has min > max or max_step <= 0")
+            for aid, a in m.get("actions", {}).items():
+                sp = setpoints.get(a.get("tag"))
+                if sp is None:
+                    problems.append(f"{where}.actions.{aid}.tag '{a.get('tag')}' is not a listed setpoint")
+                elif not _number(a.get("value")) or not (sp.get("min", 0) <= a["value"] <= sp.get("max", 0)):
+                    problems.append(f"{where}.actions.{aid}.value must be a number inside the setpoint's range")
+                if a.get("direction") not in DIRECTIONS:
+                    problems.append(f"{where}.actions.{aid}.direction must be one of {sorted(DIRECTIONS)}")
+        if problems:
+            raise LimitsError("machine_limits.json: " + "; ".join(problems))
 
     def machine(self, machine_id: str) -> Optional[dict[str, Any]]:
         """Effective limits for one machine (defaults merged with its overrides), or None if unlisted."""
@@ -68,6 +112,33 @@ class MachineLimits:
     def to_public(self) -> dict[str, Any]:
         return {mid: self.machine(mid) for mid in self.raw.get("machines", {})}
 
+    def autonomous_actions(self) -> dict[str, list[dict[str, Any]]]:
+        """Per writable machine, the actions limited autonomy may run (the merged view the checks use)."""
+        out: dict[str, list[dict[str, Any]]] = {}
+        for mid in self.raw.get("machines", {}):
+            m = self.machine(mid) or {}
+            if not m.get("write_enabled", False):
+                continue
+            acts = [{"action_id": aid, "tag": a["tag"], "value": a["value"], "direction": a["direction"]}
+                    for aid, a in m.get("actions", {}).items() if a.get("autonomous")]
+            if acts:
+                out[mid] = acts
+        return out
+
+
+def already_applied(direction: str, current: Optional[float], value: float) -> bool:
+    """True when the setpoint is already at (or past) the action's value in its safe direction."""
+    if current is None:
+        return False
+    return current >= value if direction == "engage" else current <= value
+
+
+def moves_safely(direction: str, current: Optional[float], value: float) -> bool:
+    """True when writing `value` over `current` moves the setpoint in the action's safe direction."""
+    if current is None:
+        return False
+    return value > current if direction == "engage" else value < current
+
 
 def _check(check_id: str, label: str, ok: bool, detail: str) -> dict[str, Any]:
     return {"id": check_id, "label": label, "ok": bool(ok), "detail": detail}
@@ -84,47 +155,62 @@ def pre_action_checks(
     approved_by: Optional[str],
     autonomous: bool = False,
     action_id: Optional[str] = None,
+    writes_enabled: bool = True,
 ) -> list[dict[str, Any]]:
     """Every check a write must pass, in the order an operator would read them."""
     m = limits.machine(machine_id)
     sp = (m or {}).get("setpoints", {}).get(tag)
     current = (row or {}).get("setpoints", {}).get(tag)
-    writable = bool(m and m.get("write_enabled", True))
+    writable = bool(m and m.get("write_enabled", False))
     if not m:
         machine_detail = "tidak ada di file batas"
     else:
-        machine_detail = "write_enabled" if writable else (m.get("note") or "write_enabled = false")
+        machine_detail = "boleh ditulis" if writable else (m.get("note") or "write_enabled = false")
+    action = (m or {}).get("actions", {}).get(action_id) if action_id else None
     checks = [
+        _check("server", "Penulisan PLC diaktifkan di server", writes_enabled,
+               "aktif" if writes_enabled else "PLC_WRITES_ENABLED mati"),
         _check("machine", "Mesin terdaftar di file batas dan boleh ditulis", writable, machine_detail),
         _check("setpoint", "Setpoint ada di daftar yang boleh diubah",
-               sp is not None, tag if sp else f"{tag} tidak diizinkan"),
+               sp is not None, f"diizinkan ({tag})" if sp else f"{tag} tidak diizinkan"),
     ]
+    if action_id:
+        checks.append(_check("action", "Sesuai aksi di file batas",
+                             bool(action) and action.get("tag") == tag and action.get("value") == value,
+                             action_id if action else f"aksi {action_id} tidak ada untuk {machine_id}"))
     if sp is not None:
-        lo, hi, step = sp.get("min"), sp.get("max"), sp.get("max_step")
+        lo, hi, step = sp["min"], sp["max"], sp["max_step"]
         checks.append(_check("range", "Nilai di dalam batas aman", lo <= value <= hi,
                              f"{value:g} (batas {lo:g}–{hi:g}{sp.get('unit', '')})"))
-        if current is not None and step is not None:
+        if current is None:
+            checks.append(_check("step", "Perubahan tidak melebihi langkah maksimum", False,
+                                 "setpoint sekarang tidak terbaca dari PLC"))
+        else:
             checks.append(_check("step", "Perubahan tidak melebihi langkah maksimum",
                                  abs(value - current) <= step,
                                  f"{current:g} → {value:g} (maks ±{step:g})"))
+            # A second approval of the same change (another tab, a double click) must not write again.
+            checks.append(_check("change", "Nilai berbeda dari setpoint sekarang", value != current,
+                                 "berubah" if value != current else f"sudah {current:g}"))
+    estop, lockout = (row or {}).get("estop", False), (row or {}).get("lockout", False)
+    status = str(sap_status or "").upper()
     checks += [
         _check("plc", "PLC terbaca", row is not None, "scan terakhir ada" if row else "mesin tidak terbaca di scan PLC"),
-        _check("estop", "Tidak ada emergency stop aktif", not (row or {}).get("estop", False),
-               "E-STOP aktif" if (row or {}).get("estop") else "aman"),
-        _check("lockout", "Tidak ada lockout/tagout", not (row or {}).get("lockout", False),
-               "LOTO terpasang" if (row or {}).get("lockout") else "aman"),
-        _check("sap_status", "Status SAP mengizinkan perubahan",
-               str(sap_status or "").upper() not in BLOCKED_STATUSES, str(sap_status or "?")),
+        # None means the controller has the bit but it could not be read: treat it as unsafe.
+        _check("estop", "Tidak ada emergency stop aktif", estop is False,
+               "aman" if estop is False else ("E-STOP aktif" if estop else "status e-stop tidak terbaca")),
+        _check("lockout", "Tidak ada lockout/tagout", lockout is False,
+               "aman" if lockout is False else ("LOTO terpasang" if lockout else "status lockout tidak terbaca")),
+        _check("sap_status", "Status SAP mengizinkan perubahan", status in WRITABLE_STATUSES, status or "?"),
     ]
     if autonomous:
-        action = (m or {}).get("actions", {}).get(action_id or "", {})
+        direction = (action or {}).get("direction", "reduce")
         checks += [
             _check("policy", "Aksi masuk daftar autonomi terbatas",
-                   bool(action.get("autonomous")) and action.get("tag") == tag and action.get("value") == value,
+                   bool(action and action.get("autonomous")) and action.get("tag") == tag and action.get("value") == value,
                    action_id or "tanpa aksi"),
-            _check("direction", "Hanya mengurangi beban (arah aman)",
-                   current is not None and value < current if tag != "feed_hold" else value >= 1,
-                   f"{current if current is None else format(current, 'g')} → {value:g}"),
+            _check("direction", "Hanya mengurangi beban (arah aman)", moves_safely(direction, current, value),
+                   f"{'?' if current is None else format(current, 'g')} → {value:g}"),
         ]
     else:
         checks.append(_check("approval", "Disetujui supervisor", bool((approved_by or "").strip()),

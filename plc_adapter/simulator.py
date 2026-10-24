@@ -15,7 +15,8 @@ seconds (slow enough that the trend is visible well before the alarm) and raise 
 code a real controller would show — the same codes as the maintenance seed
 cases, so the alarm finds past fixes. Writing the scenario's mitigating
 setpoint (e.g. feed override down to 50% for an overheating spindle) makes the
-tag settle back towards normal.
+tag settle back towards normal. While the scenario machine is stopped (e-stop
+or feed hold) the fault stops progressing and the reading holds where it was.
 
 Readings are a function of time since the scenario started, so any number of
 sockets can scan the same PLC.
@@ -112,8 +113,12 @@ class SimulatedPLC:
         self._setpoints: dict[str, dict[str, float]] = {}
         self._estop: dict[str, bool] = {}
         self._lockout: dict[str, bool] = {}
-        # When the scenario machine got its mitigating write (clock time), if it has.
+        # When the scenario machine got its mitigating write (clock time), and how far the fault had got.
         self._mitigated_at: Optional[float] = None
+        self._mitigated_p = 0.0
+        # Time the scenario machine spent stopped, during which the fault does not progress.
+        self._held_total = 0.0
+        self._held_since: Optional[float] = None
 
     @property
     def scenario(self) -> Scenario:
@@ -151,6 +156,7 @@ class SimulatedPLC:
                 self._estop[machine_id] = estop
             if lockout is not None:
                 self._lockout[machine_id] = lockout
+            self._update_hold()
 
     def write(self, machine_id: str, tag: str, value: float) -> float:
         if tag not in DEFAULT_SETPOINTS:
@@ -162,17 +168,36 @@ class SimulatedPLC:
             if (sc.machine_id == machine_id and sc.mitigation and self._mitigated_at is None
                     and _satisfies(sc.mitigation, tag, float(value))):
                 self._mitigated_at = self._clock()
+                self._mitigated_p = self._progress(self._mitigated_at)
+            self._update_hold()
             return sp[tag]
+
+    def _update_hold(self) -> None:
+        """Start or stop the pause clock when the scenario machine stops or restarts (call under the lock)."""
+        mid = self._scenario.machine_id
+        if not mid:
+            return
+        sp = self._setpoints.get(mid) or DEFAULT_SETPOINTS
+        held = sp["feed_hold"] >= 1 or self._estop.get(mid, False)
+        now = self._clock()
+        if held and self._held_since is None:
+            self._held_since = now
+        elif not held and self._held_since is not None:
+            self._held_total += now - self._held_since
+            self._held_since = None
+
+    def _progress(self, at: float) -> float:
+        """How far (0..1) the fault has got at clock time `at`, not counting time the machine was stopped."""
+        held = self._held_total + (max(0.0, at - self._held_since) if self._held_since is not None else 0.0)
+        return min(1.0, max(0.0, (at - self._started - held) / self.ramp_s))
 
     def _jitter(self, tag: str) -> float:
         amp = TAG_NOISE.get(tag, 0.0)
         return self._rng.uniform(-amp, amp) if self._noise and amp else 0.0
 
-    def _drift(self, start: float, at: float) -> float:
-        """Scenario tag value at clock time `at`: a steady creep from baseline to the fault value."""
-        sc = self._scenario
-        p = min(1.0, max(0.0, (at - self._started) / self.ramp_s))
-        return start + (sc.target - start) * p
+    def _drift(self, start: float, p: float) -> float:
+        """Scenario tag value at progress `p`: a steady creep from baseline to the fault value."""
+        return start + (self._scenario.target - start) * p
 
     def scan(self, work_centers: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """One PLC scan across the line: tags, setpoints, interlocks and the active alarm per machine."""
@@ -200,13 +225,11 @@ class SimulatedPLC:
                 alarm = None
                 if status == "RUNNING" and sc.machine_id == mid and sc.metric in base:
                     start = base[sc.metric]
-                    if self._mitigated_at is None:
-                        value = self._drift(start, now)
-                    elif sc.mitigation and sc.mitigation[0] == "feed_hold":
-                        # Feed hold stops the cut; the reading freezes where it was.
-                        value = self._drift(start, self._mitigated_at)
+                    if self._mitigated_at is None or (sc.mitigation and sc.mitigation[0] == "feed_hold"):
+                        # Feed hold or e-stop stops the cut; the reading holds while the machine is stopped.
+                        value = self._drift(start, self._progress(now))
                     else:
-                        peak = self._drift(start, self._mitigated_at)
+                        peak = self._drift(start, self._mitigated_p)
                         value = start + (peak - start) * math.exp(-(now - self._mitigated_at) / SETTLE_TAU_S)
                     tags[sc.metric] = value + (self._jitter(sc.metric) * 0.5 if running else 0.0)
                     rising = sc.target >= start

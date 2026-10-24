@@ -334,12 +334,274 @@ def test_opcua_driver_reads_tags_alarm_and_writes_a_setpoint():
 def test_predictor_does_not_fire_on_sensor_noise():
     import random
 
-    rng = random.Random(7)
-    p = TrendPredictor(horizon_s=600)
-    falling = {"warning": 2.5, "critical": 2.0, "direction": "falling"}
-    hits = 0
-    for t in range(3000):
-        p.observe("CNC-02", "coolant_pressure_bar", float(t), 4.1 + rng.uniform(-0.04, 0.04))
-        if t >= 10 and t % 5 == 0:
-            hits += p.predict("CNC-02", "coolant_pressure_bar", falling) is not None
-    assert hits == 0
+    from plc_adapter.simulator import TAG_NOISE
+
+    # Every limited tag at its simulator noise level, five seeds each: about 9,000 prediction checks.
+    cases = [("motor_temp_celsius", 81.2), ("spindle_vibration_mm_per_s", 3.5), ("coolant_pressure_bar", 4.1)]
+    limits = MachineLimits().tag_limits("CNC-04")
+    checks = hits = 0
+    for seed in range(5):
+        rng = random.Random(seed)
+        for metric, base in cases:
+            p = TrendPredictor(horizon_s=600)
+            amp = TAG_NOISE[metric]
+            for t in range(3000):
+                p.observe("CNC-04", metric, float(t), base + rng.uniform(-amp, amp))
+                if t >= 10 and t % 5 == 0:
+                    checks += 1
+                    hits += p.predict("CNC-04", metric, limits[metric]) is not None
+    assert checks > 8000 and hits == 0
+
+
+# ── review fixes: server-side loop, degraded PLC, typed writes, fail-closed limits ──
+
+import asyncio
+import time
+
+from plc_adapter.limits import LimitsError
+
+
+def _wait_for(pred, timeout=5.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_unknown_driver_and_missing_opcua_config_fail_loudly(monkeypatch, tmp_path):
+    monkeypatch.setenv("PLC_DRIVER", "opc-ua")
+    with pytest.raises(RuntimeError, match="PLC_DRIVER='opc-ua'"):
+        backend_main._make_plc_driver()
+    monkeypatch.setenv("PLC_DRIVER", "opcua")
+    monkeypatch.delenv("PLC_OPCUA_ENDPOINT", raising=False)
+    monkeypatch.delenv("PLC_OPCUA_MAP", raising=False)
+    with pytest.raises(RuntimeError, match="PLC_OPCUA_ENDPOINT and PLC_OPCUA_MAP"):
+        backend_main._make_plc_driver()
+    monkeypatch.setenv("PLC_OPCUA_ENDPOINT", "opc.tcp://127.0.0.1:4840")
+    monkeypatch.setenv("PLC_OPCUA_MAP", str(tmp_path / "missing.json"))
+    with pytest.raises(RuntimeError, match="opcua_map.example.json"):
+        backend_main._make_plc_driver()
+    monkeypatch.setenv("PLC_OPCUA_MAP", "config/opcua_map.example.json")
+    drv = backend_main._make_plc_driver()
+    assert drv.name == "opcua" and "CNC-04" in drv.node_map
+    monkeypatch.setenv("PLC_DRIVER", "simulated")
+    assert backend_main._make_plc_driver().name == "simulated"
+
+
+def test_limits_file_fails_closed():
+    good = MachineLimits().raw
+    bad = {**good, "defaults": {**good["defaults"], "setpoints": {"feed_override_percent": {"min": 50}}}}
+    with pytest.raises(LimitsError, match="needs numeric min, max and max_step"):
+        MachineLimits(raw=bad)
+    no_dir = {**good, "defaults": {**good["defaults"], "actions": {
+        "x": {"tag": "feed_hold", "value": 1.0, "label": "x"}}}}
+    with pytest.raises(LimitsError, match="direction"):
+        MachineLimits(raw=no_dir)
+    # A machine is read-only unless the file says otherwise.
+    unflagged = {**good, "defaults": {k: v for k, v in good["defaults"].items() if k != "write_enabled"}}
+    lim = MachineLimits(raw=unflagged)
+    row = {"setpoints": {"feed_override_percent": 100.0}, "estop": False, "lockout": False}
+    kw = dict(machine_id="CNC-04", tag="feed_override_percent", value=50, approved_by="Budi")
+    assert "machine" in _failed(pre_action_checks(lim, row=row, sap_status="RUNNING", **kw))
+    lim = MachineLimits()
+    for status_ in (None, "", "SETUP?", "BREAKDOWN"):
+        assert "sap_status" in _failed(pre_action_checks(lim, row=row, sap_status=status_, **kw))
+    # Unreadable setpoint, e-stop or lockout bit blocks; so does a repeat of the same value.
+    assert "step" in _failed(pre_action_checks(lim, row={**row, "setpoints": {}}, sap_status="RUNNING", **kw))
+    assert {"estop", "lockout"} <= _failed(pre_action_checks(lim, row={**row, "estop": None, "lockout": None},
+                                                            sap_status="RUNNING", **kw))
+    assert _failed(pre_action_checks(lim, row={**row, "setpoints": {"feed_override_percent": 50.0}},
+                                     sap_status="RUNNING", **kw)) == {"change"}
+    assert _failed(pre_action_checks(lim, row=row, sap_status="RUNNING", writes_enabled=False, **kw)) == {"server"}
+    assert _failed(pre_action_checks(lim, row=row, sap_status="RUNNING", action_id="reduce_spindle_60", **kw)) == {"action"}
+
+
+def test_estop_stops_the_fault_from_progressing():
+    clock = FakeClock()
+    plc = SimulatedPLC(ramp_s=40, clock=clock, noise=False)
+    plc.start("cnc04_overheat")
+    clock.t += 5  # 83.3 °C, below the 85 °C alarm
+    plc.set_interlock("CNC-04", estop=True)
+    held = _by_id(plc.scan(LINE))["CNC-04"]["tags"]["motor_temp_celsius"]
+    clock.t += 60
+    row = _by_id(plc.scan(LINE))["CNC-04"]
+    assert row["tags"]["motor_temp_celsius"] == pytest.approx(held) and row["alarm"] is None
+    plc.set_interlock("CNC-04", estop=False)
+    clock.t += 10
+    assert _by_id(plc.scan(LINE))["CNC-04"]["tags"]["motor_temp_celsius"] > held
+
+
+def _opcua_server():
+    import socket
+
+    from asyncua import ua
+    from asyncua.sync import Server
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    url = f"opc.tcp://127.0.0.1:{port}/skillforge/"
+    srv = Server()
+    srv.set_endpoint(url)
+    idx = srv.register_namespace("urn:skillforge:test")
+    obj = srv.nodes.objects.add_object(idx, "CNC04")
+    nodes = {
+        "temp": obj.add_variable(idx, "MotorTemp", 81.5),
+        "feed": obj.add_variable(idx, "FeedOverride", 100, varianttype=ua.VariantType.Int16),
+        "spindle": obj.add_variable(idx, "SpindleOverride", 100.0, varianttype=ua.VariantType.Float),
+        "hold": obj.add_variable(idx, "FeedHold", False),
+        "code": obj.add_variable(idx, "AlarmCode", 0, varianttype=ua.VariantType.Int32),
+    }
+    for k in ("feed", "spindle", "hold"):
+        nodes[k].set_writable()
+    srv.start()
+    return srv, url, nodes
+
+
+def test_opcua_bad_node_degrades_and_writes_respect_the_node_type():
+    from plc_adapter.driver import PlcWriteError
+    from plc_adapter.opcua_driver import OpcUaDriver
+
+    srv, url, n = _opcua_server()
+    try:
+        node_map = {"CNC-04": {
+            "tags": {"motor_temp_celsius": n["temp"].nodeid.to_string(), "spindle_vibration_mm_per_s": "ns=2;s=Typo"},
+            "setpoints": {"feed_override_percent": n["feed"].nodeid.to_string(),
+                          "spindle_speed_override_percent": n["spindle"].nodeid.to_string(),
+                          "feed_hold": n["hold"].nodeid.to_string()},
+            "estop": "ns=2;s=NoSuchEStop",
+            "alarm_code": n["code"].nodeid.to_string(),
+            "alarm_code_map": {"410": "ALM-410"},
+        }}
+        drv = OpcUaDriver(url, node_map)
+        row = drv.scan([{"id": "CNC-04", "status": "RUNNING"}])[0]
+        # The typo'd tag is left out, the rest of the machine still reads; an unreadable e-stop is None.
+        assert row["tags"] == {"motor_temp_celsius": 81.5}
+        assert row["estop"] is None and row["lockout"] is False
+        assert row["alarm"] is None  # 0 means no alarm
+        assert "ns=2;s=Typo" in drv.info()["unreadable_nodes"] and drv.info()["connected"]
+        n["code"].write_value(410, n["code"].read_data_type_as_variant_type())
+        assert drv.scan([{"id": "CNC-04", "status": "RUNNING"}])[0]["alarm"]["code"] == "ALM-410"
+        # Int16: a fractional value is refused before anything is written.
+        with pytest.raises(PlcWriteError, match="Int16"):
+            drv.write("CNC-04", "feed_override_percent", 50.7)
+        assert n["feed"].read_value() == 100
+        assert drv.write("CNC-04", "feed_override_percent", 50) == 50
+        # Float32 reads back rounded; the backend's tolerance must still call it applied.
+        after = drv.write("CNC-04", "spindle_speed_override_percent", 66.7)
+        assert after != 66.7 and __import__("math").isclose(after, 66.7, rel_tol=1e-6)
+        assert drv.write("CNC-04", "feed_hold", 1) == 1 and n["hold"].read_value() is True
+        with pytest.raises(PlcWriteError, match="boolean"):
+            drv.write("CNC-04", "feed_hold", 0.5)
+        drv.close()
+        assert not drv.info()["connected"]
+    finally:
+        srv.stop()
+
+
+def test_opcua_connection_loss_disconnects_and_reconnects():
+    from plc_adapter.opcua_driver import OpcUaDriver
+
+    srv, url, n = _opcua_server()
+    drv = OpcUaDriver(url, {"CNC-04": {"tags": {"motor_temp_celsius": n["temp"].nodeid.to_string()}}}, timeout_s=1)
+    try:
+        assert drv.scan([{"id": "CNC-04", "status": "RUNNING"}])[0]["tags"]["motor_temp_celsius"] == 81.5
+    finally:
+        srv.stop()
+    with pytest.raises(Exception):
+        drv.scan([{"id": "CNC-04", "status": "RUNNING"}])
+    assert not drv.info()["connected"]
+
+
+def test_write_error_and_readback_mismatch_are_ledgered(fresh_plc, monkeypatch):
+    from plc_adapter.driver import PlcWriteError
+
+    plc, _ = fresh_plc
+    body = {"machine_id": "CNC-04", "tag": "feed_override_percent", "value": 50, "approved_by": "Budi Santoso"}
+
+    def refuse(*a):
+        raise PlcWriteError("controller refused")
+    monkeypatch.setattr(plc, "write", refuse)
+    res = client.post("/api/plc/actions", json=body)
+    assert res.status_code == 409 and res.json()["detail"]["outcome"] == "failed"
+    assert _ledger_types()[-1] == "PLC_WRITE_FAILED"
+
+    def boom(*a):
+        raise RuntimeError("driver bug")
+    monkeypatch.setattr(plc, "write", boom)
+    res = client.post("/api/plc/actions", json=body)
+    assert res.status_code == 409 and "driver bug" in res.json()["detail"]["error"]
+    assert _ledger_types()[-1] == "PLC_WRITE_FAILED"
+
+    monkeypatch.setattr(plc, "write", lambda *a: 70.0)
+    res = client.post("/api/plc/actions", json=body)
+    detail = res.json()["detail"]
+    assert detail["outcome"] == "unconfirmed" and detail["after"] == 70 and not detail["checks"][-1]["ok"]
+    assert _ledger_types()[-1] == "PLC_WRITE_UNCONFIRMED"
+    assert client.get("/api/ledger/verify").json()["valid"]
+
+
+def test_plc_outage_blocks_writes_and_shows_offline(fresh_plc, monkeypatch):
+    plc, _ = fresh_plc
+
+    def down(*a):
+        raise ConnectionError("gateway unreachable")
+    monkeypatch.setattr(plc, "scan", down)
+    res = client.post("/api/plc/actions", json={"machine_id": "CNC-04", "tag": "feed_override_percent",
+                                                "value": 50, "approved_by": "Budi Santoso"})
+    assert res.status_code == 409 and "plc" in {c["id"] for c in res.json()["detail"]["checks"] if not c["ok"]}
+    with client.websocket_connect("/ws/plc") as ws:
+        f = ws.receive_json()
+        assert f["event"] == "plc_offline" and "gateway unreachable" in f["error"]
+        assert ws.receive_json()["event"] == "plc_offline"  # the socket stays open and keeps retrying
+
+
+def test_autonomy_blocked_by_lockout_is_ledgered(fresh_plc):
+    plc, clock = fresh_plc
+    client.post("/api/plc/autonomy", json={"enabled": True, "by": "Budi Santoso"})
+    client.post("/api/plc/scenario", json={"scenario": "cnc04_overheat"})
+    client.post("/api/plc/interlock", json={"machine_id": "CNC-04", "lockout": True})
+    clock.t += 10
+    with client.websocket_connect("/ws/plc") as ws:
+        act = next(f for f in (ws.receive_json() for _ in range(60)) if f["event"] == "plc_action")
+    assert act["outcome"] == "blocked" and {c["id"] for c in act["checks"] if not c["ok"]} == {"lockout"}
+    assert "PLC_WRITE_BLOCKED" in _ledger_types() and plc.info()["mitigated"] is False
+    client.post("/api/plc/scenario", json={"scenario": "normal"})
+
+
+def test_concurrent_approvals_write_once(fresh_plc, monkeypatch):
+    monkeypatch.setattr(backend_main, "_plc_write_lock", asyncio.Lock())
+
+    async def both():
+        return await asyncio.gather(*[backend_main._execute_plc_action(
+            "CNC-04", "feed_override_percent", 50, approved_by="Budi Santoso") for _ in range(2)])
+    results = asyncio.run(both())
+    assert sorted(r["outcome"] for r in results) == ["applied", "blocked"]
+    blocked = next(r for r in results if r["outcome"] == "blocked")
+    assert {c["id"] for c in blocked["checks"] if not c["ok"]} == {"change"}
+
+
+def test_autonomy_runs_with_no_cockpit_open_and_once_for_many_viewers(fresh_plc, monkeypatch, tmp_path):
+    plc, clock = fresh_plc
+    # Startup indexes maintenance cases; keep that off the shared RAG index other tests read.
+    agent = ProactiveAgent(MaintenanceLedger(tmp_path / "m.jsonl"), store=Store(tmp_path / "rag.sqlite3"))
+    monkeypatch.setattr(backend_main, "_agent", agent)
+    seen = len(_ledger_types())
+
+    def writes():
+        return [t for t in _ledger_types()[seen:] if str(t).startswith("PLC_WRITE")]
+    with TestClient(app) as c:  # startup starts the PLC loop
+        c.post("/api/plc/autonomy", json={"enabled": True, "by": "Budi Santoso"})
+        c.post("/api/plc/scenario", json={"scenario": "cnc04_overheat"})
+        clock.t += 10
+        assert _wait_for(lambda: plc.info()["mitigated"]), "autonomy did not act without a socket"
+        assert writes() == ["PLC_WRITE_APPLIED"]
+        # A new viewer joins after the fact and still sees the alarm the loop already handled.
+        with c.websocket_connect("/ws/plc") as a, c.websocket_connect("/ws/plc") as b:
+            for ws in (a, b):
+                frames = [ws.receive_json() for _ in range(2)]
+                assert frames[0]["event"] == "plc_scan"
+        assert writes() == ["PLC_WRITE_APPLIED"]
+        c.post("/api/plc/scenario", json={"scenario": "normal"})

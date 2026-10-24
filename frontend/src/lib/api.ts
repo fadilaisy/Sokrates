@@ -52,8 +52,9 @@ export interface PlcMachine {
   fault: boolean;
   tags: Record<string, number>;
   setpoints: Record<string, number>;
-  estop: boolean;
-  lockout: boolean;
+  /** null: the controller has the bit but it could not be read (blocks every write). */
+  estop: boolean | null;
+  lockout: boolean | null;
   alarm: { code: string; text: string } | null;
 }
 
@@ -74,6 +75,7 @@ export interface PlcProposedAction {
   tag: string;
   value: number;
   current: number | null;
+  direction: "reduce" | "engage";
   autonomous: boolean;
   write_enabled: boolean;
 }
@@ -117,6 +119,8 @@ export interface PlcCheck {
 /** Outcome of a setpoint write: every pre-action check, the read-back, and the ledger receipt. */
 export interface PlcActionResult {
   ok: boolean;
+  /** blocked: a check failed, nothing written. failed: the write errored. unconfirmed: written, read-back differs. */
+  outcome: "applied" | "blocked" | "failed" | "unconfirmed";
   machine_id: string;
   tag: string;
   value: number;
@@ -154,6 +158,7 @@ export interface PlcInfo {
   mitigated?: boolean;
   scenarios?: PlcScenarioInfo[];
   autonomy: PlcAutonomy;
+  writes_enabled?: boolean;
 }
 
 export interface WorkCenter {
