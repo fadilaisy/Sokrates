@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { cn } from "../lib/utils";
 import type { PlcActionResult } from "../lib/api";
 import { fmt1, shortHash, telemetryOf, windowLabel } from "../lib/shift";
@@ -42,7 +43,7 @@ const TEST_FRAMES = [
 ];
 
 export function TelemetryPanel() {
-  const { state, live, wsStatus, lastAnalysis, safety, sendTelemetry, plcOn } = useCockpit();
+  const { state, live, wsStatus, lastAnalysis, safety, sendTelemetry } = useCockpit();
   const machines = state?.work_centers ?? [];
   const shown = machines.filter((w) => w.status.toUpperCase() === "RUNNING" || live[w.id] || safety?.machine_id === w.id).slice(0, 4);
   return (
@@ -89,14 +90,34 @@ export function TelemetryPanel() {
           </button>
         ))}
       </div>
+    </Card>
+  );
+}
+
+/** The PLC block under the schedule: controls on the left, what the machines are saying on the right. */
+export function PlcPanel() {
+  const { plcOn, plcPrediction, plcAlarm, plcAction } = useCockpit();
+  const quiet = !plcPrediction && !plcAlarm && !plcAction;
+  return (
+    <Card className="grid gap-4 p-4 lg:grid-cols-[minmax(0,380px)_minmax(0,1fr)]">
       <PlcControls />
-      {plcOn && (
-        <>
-          <PlcPredictionCard />
-          <PlcAlarmCard />
-          <PlcActionReceipt />
-        </>
-      )}
+      <div className="flex min-w-0 flex-col gap-3">
+        {!plcOn ? (
+          <p className="text-[14px] text-muted-ink">
+            Sambungkan PLC untuk membaca tag mesin langsung, melihat prediksi sebelum alarm, dan mengirim aksi yang sudah disetujui.
+          </p>
+        ) : quiet ? (
+          <p className="rounded-md bg-page px-3 py-2 text-[14px] text-muted-ink">
+            Belum ada prediksi atau alarm. Semua mesin terbaca normal; pilih skenario untuk demo.
+          </p>
+        ) : (
+          <>
+            <PlcPredictionCard />
+            <PlcAlarmCard />
+            <PlcActionReceipt />
+          </>
+        )}
+      </div>
     </Card>
   );
 }
@@ -122,9 +143,9 @@ function PlcControls() {
   const target = active?.machine_id ? plcMachines[active.machine_id] : undefined;
   const autonomy = plcInfo?.autonomy;
   return (
-    <div className="flex flex-col gap-2 border-t border-line pt-3">
+    <div className="flex min-w-0 flex-col gap-2">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[15px] font-semibold">PLC {plcInfo?.driver === "opcua" ? "(OPC UA)" : "(simulasi)"}</span>
+        <h2 className="text-[17px] font-semibold">PLC {plcInfo?.driver === "opcua" ? "(OPC UA)" : "(simulasi)"}</h2>
         <button
           type="button"
           onClick={() => setPlcOn(!plcOn)}
@@ -268,10 +289,17 @@ function PlcAlarmCard() {
   );
 }
 
-/** What the last write did: every pre-action check, the read-back, who approved it, and the ledger hash. */
+/** What the last write did: the outcome, a one-line check summary (every check on demand), and the ledger hash. */
 function PlcActionReceipt() {
   const { plcAction: a } = useCockpit();
   if (!a) return null;
+  return <ActionReceipt key={a.receipt_id} a={a} />;
+}
+
+function ActionReceipt({ a }: { a: PlcActionResult }) {
+  const failed = a.checks.filter((c) => !c.ok);
+  // A refused write opens on its own, so the operator sees which check stopped it.
+  const [open, setOpen] = useState(failed.length > 0);
   return (
     <div className={cn("flex flex-col gap-1.5 rounded-md border px-3 py-2 text-[14px]", a.ok ? "border-ok-line bg-ok-bg" : "border-danger-line bg-danger-bg")}>
       <p className={cn("font-semibold", !a.ok && "text-fault")}>
@@ -282,17 +310,31 @@ function PlcActionReceipt() {
         {a.autonomous ? "Autonomi terbatas" : `Disetujui ${a.approved_by.replace("Production Supervisor — ", "")}`} · ledger{" "}
         <Mono>{shortHash(a.sha256_hash)}</Mono>
       </p>
-      <ul className="flex flex-col gap-0.5">
-        {a.checks.map((c) => (
-          <li key={c.id} className={cn("flex gap-2", !c.ok && "font-semibold text-fault")}>
-            <span aria-hidden>{c.ok ? "✓" : "✗"}</span>
-            <span className="sr-only">{c.ok ? "lulus:" : "gagal:"}</span>
-            <span>
-              {c.label} <span className="text-muted-ink">· {c.detail}</span>
-            </span>
-          </li>
-        ))}
-      </ul>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        className="flex min-h-10 items-center gap-2 self-start rounded-md text-left font-semibold underline-offset-2 hover:underline"
+      >
+        <span className={cn(failed.length > 0 && "text-fault")}>
+          {a.checks.length - failed.length}/{a.checks.length} pemeriksaan lolos
+          {failed.length > 0 && ` · gagal: ${failed.map((c) => c.label.toLowerCase()).join(", ")}`}
+        </span>
+        <span className="text-muted-ink">· {open ? "sembunyikan" : "lihat detail"}</span>
+      </button>
+      {open && (
+        <ul className="flex flex-col gap-0.5">
+          {a.checks.map((c) => (
+            <li key={c.id} className={cn("flex gap-2", !c.ok && "font-semibold text-fault")}>
+              <span aria-hidden>{c.ok ? "✓" : "✗"}</span>
+              <span className="sr-only">{c.ok ? "lulus:" : "gagal:"}</span>
+              <span>
+                {c.label} <span className="text-muted-ink">· {c.detail}</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
       {a.error && <p className="text-fault">{a.error}</p>}
     </div>
   );

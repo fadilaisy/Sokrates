@@ -7,7 +7,7 @@ import type { MachineStatus } from "../lib/shift";
 import { AgentArea } from "./AgentArea";
 import { ApprovalModal, ChatDrawer, LedgerBar, LedgerDrawer } from "./Overlays";
 import { MaintenancePage } from "./MaintenancePage";
-import { MachineStrip, TelemetryPanel, WhatIfPanel } from "./Panels";
+import { MachineStrip, PlcPanel, TelemetryPanel, WhatIfPanel } from "./Panels";
 import { Header } from "./Shell";
 import { ShiftGantt } from "./ShiftGantt";
 import { DEMO_DISRUPTION, useCockpit } from "./store";
@@ -225,8 +225,8 @@ function CockpitPage() {
     <>
       <Header />
       <MachineStrip />
-      <div className="grid gap-4 xl:grid-cols-[1fr_360px]">
-        <Card className="flex flex-col gap-2 p-4">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <Card className="flex min-w-0 flex-col gap-2 p-4">
           <h2 className="text-[17px] font-semibold">Gantt · jadwal shift 1</h2>
           <ShiftGantt
             state={state}
@@ -240,6 +240,7 @@ function CockpitPage() {
           <WhatIfPanel />
         </div>
       </div>
+      <PlcPanel />
       <AgentArea />
       <LedgerBar />
       <ApprovalModal />
