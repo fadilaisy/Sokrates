@@ -109,7 +109,7 @@ function DashboardPage() {
         </div>
       </Card>
 
-      <Card className="flex flex-col gap-4 bg-page p-5">
+      <Card className="flex flex-col gap-4 p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-[24px] font-bold">Jadwal produksi · Shift 1</h2>
           <Btn size="lg" onClick={() => runDisruption(DEMO_DISRUPTION)}>
