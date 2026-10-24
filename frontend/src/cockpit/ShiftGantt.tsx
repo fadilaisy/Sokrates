@@ -16,8 +16,8 @@ interface Bar {
 }
 
 const BAR_STYLE: Record<BarKind, string> = {
-  order: "bg-page border border-line text-navy",
-  rescheduled: "bg-[#e3ecf7] border border-accent-blue text-navy",
+  order: "bg-[#d4e1f0] border border-accent-blue text-navy font-semibold",
+  rescheduled: "bg-accent-blue border border-accent-blue text-white font-semibold",
   maintenance: "bg-warn-bg border border-warn text-warn",
   disruption: "bg-danger-bg border border-danger-line text-fault",
   proposed: "bg-surface border-2 border-dashed border-accent-blue text-navy",
@@ -113,7 +113,7 @@ export function ShiftGantt({
             <span role="rowheader" className="flex items-center font-mono text-[15px] font-medium">
               {r.id}
             </span>
-            <div className="relative rounded-sm bg-surface" style={{ height: r.lanes.length * 36 + 8 }}>
+            <div className="relative rounded-sm bg-[#f4f6f9]" style={{ height: r.lanes.length * 36 + 8 }}>
               {end > SHIFT_END && (
                 <div
                   className="absolute inset-y-0 bg-[repeating-linear-gradient(135deg,transparent_0_6px,rgba(72,98,132,.07)_6px_12px)]"
