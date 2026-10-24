@@ -144,6 +144,12 @@ const ACTION_LABEL: Record<string, string> = {
   REVERT_REJECTED_DRIFT: "Revert ditolak · drift SAP",
   SKILLS_LOADED: "Skill dimuat",
   SKILL_APPROVED: "Skill disetujui",
+  PLC_WRITE_APPLIED: "Setpoint PLC ditulis",
+  PLC_WRITE_BLOCKED: "Penulisan PLC diblokir",
+  PLC_WRITE_FAILED: "Penulisan PLC gagal",
+  PLC_WRITE_UNCONFIRMED: "Penulisan PLC belum terkonfirmasi",
+  PLC_AUTONOMY_ENABLED: "Autonomi terbatas diaktifkan",
+  PLC_AUTONOMY_DISABLED: "Autonomi terbatas dimatikan",
 };
 
 export function LedgerBar() {
@@ -253,7 +259,9 @@ export function LedgerDrawer() {
       <ol className="flex flex-1 flex-col gap-2.5 overflow-y-auto">
         {entries.length === 0 && <li className="text-[15px] text-muted-ink">Tidak ada entri untuk filter ini.</li>}
         {entries.map((e, i) => {
-          const rejected = e.action_type === "APPROVAL_REJECTED_DRIFT" || e.action_type === "REVERT_REJECTED_DRIFT";
+          const rejected =
+            e.action_type === "APPROVAL_REJECTED_DRIFT" || e.action_type === "REVERT_REJECTED_DRIFT" || e.action_type === "PLC_WRITE_BLOCKED" || e.action_type === "PLC_WRITE_FAILED" || e.action_type === "PLC_WRITE_UNCONFIRMED";
+          const plc = e.action_type.startsWith("PLC_");
           const canRevert = e.action_type === "SCENARIO_APPROVED";
           return (
             <li
@@ -263,11 +271,20 @@ export function LedgerDrawer() {
               <span className={cn("text-[16px] font-semibold", rejected && "text-fault")}>
                 {ACTION_LABEL[e.action_type] ?? e.action_type} · {String(e.scenario_chosen ?? e.skill_id ?? "").replace("scenario_", "Skenario ").toUpperCase().replace("SKENARIO", "Skenario")}
               </span>
-              <span className="text-[14px] text-muted-ink">
-                {wibTime(e.timestamp)} · {String(e.approved_by ?? "").replace("Production Supervisor — ", "")} · SAP v{e.sap_version_before}
-                {rejected ? " ≠ " : " → "}v{e.sap_version_after}
-                {rejected && " · tidak ada penulisan"}
-              </span>
+              {plc ? (
+                <span className="text-[14px] text-muted-ink">
+                  {wibTime(e.timestamp)} · {String(e.approved_by ?? "").replace("Production Supervisor — ", "")}
+                  {e.machine_id ? ` · ${String(e.machine_id)} ${String(e.tag)} ${String(e.before ?? "?")} → ${String(e.after ?? e.value)}` : ""}
+                  {e.action_type === "PLC_WRITE_BLOCKED" && " · tidak ada penulisan"}
+                  {(e.action_type === "PLC_WRITE_FAILED" || e.action_type === "PLC_WRITE_UNCONFIRMED") && " · setpoint tidak pasti, periksa di HMI"}
+                </span>
+              ) : (
+                <span className="text-[14px] text-muted-ink">
+                  {wibTime(e.timestamp)} · {String(e.approved_by ?? "").replace("Production Supervisor — ", "")} · SAP v{e.sap_version_before}
+                  {rejected ? " ≠ " : " → "}v{e.sap_version_after}
+                  {rejected && " · tidak ada penulisan"}
+                </span>
+              )}
               <Mono className="text-[14px]">{shortHash(e.sha256_hash)}</Mono>
               {canRevert && (
                 <span className="mt-1">

@@ -13,7 +13,7 @@ It bridges shop-floor disruptions (e.g. CNC motor overloads) with SAP S/4HANA:
 - `skills/` — Declarative skill playbooks (`SKILL.md`), tier-based constraint rules (`rules/`), and telemetry triggers (`hooks.json`).
 - `solver/` — Deterministic OR-Tools CP-SAT scheduling engine (Safety > Quality > Cost in IDR).
 - `erp_adapter/` — SAP S/4HANA OData mock/sandbox client with drift detection and append-only audit ledger.
-- `plc_adapter/` — Simulated PLC: each machine streams its own tags and alarm codes over `/ws/plc`. A demo scenario (e.g. CNC-04 spindle overheat, `ALM-410`) drifts one machine into a fault; the alarm pulls up past fixes for that code and runs the maintenance playbook. Replace `SimulatedPLC.scan()` with an OPC UA / Modbus / MQTT client to use real controllers.
+- `plc_adapter/` — PLC layer: a simulator and an OPC UA driver behind one interface. Machines stream tags and alarm codes over `/ws/plc`; trends predict faults before the alarm, alarms pull up past fixes, and setpoint changes from a per-machine limits file are written only after pre-action checks and a supervisor approval (or limited autonomy), each logged in the audit ledger. See `docs/PLC.md`.
 - `backend/` — FastAPI orchestration service powering incident streams, scenarios, and skill generation.
 - `rag/` — Metadata-augmented RAG: plant documents (manuals, SOPs, logs, K3) are OCR'd, chunked and indexed with machine / fault-code / tier metadata; an incident-aware scoring layer picks passages and every AI claim is cited. See `docs/RAG.md`.
 - `frontend/` — React Supervisor Cockpit with live Gantt chart, Bahasa Indonesia alerts, and 1-click approvals.

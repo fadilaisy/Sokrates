@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { api, ApiError, formatIDR, WS_PLC, WS_TELEMETRY } from "../lib/api";
-import type { ApproveReceipt, DisruptResponse, DriftDetail, LedgerEntry, PlcAlarmFrame, PlcInfo, PlcMachine, RagSource, SapState, Scenario, ShiftMetrics, TelemetryFrame } from "../lib/api";
+import type { ApproveReceipt, DisruptResponse, DriftDetail, LedgerEntry, PlcActionResult, PlcAlarmFrame, PlcInfo, PlcMachine, PlcPredictionFrame, PlcProposedAction, RagSource, SapState, Scenario, ShiftMetrics, TelemetryFrame } from "../lib/api";
 import { normalizeStatus, windowLabel } from "../lib/shift";
 import { isMuted, playSound, setMuted, unlockAudio } from "../lib/sound";
 import type { MachineStatus } from "../lib/shift";
@@ -63,7 +63,8 @@ interface CockpitValue {
   params: DisruptionParams | null;
   result: DisruptResponse | null;
   receipt: (ApproveReceipt & { scenario: Scenario }) | null;
-  runDisruption: (p: DisruptionParams) => Promise<void>;
+  /** Resolves true when the solver answered, false when the analysis failed (already toasted). */
+  runDisruption: (p: DisruptionParams) => Promise<boolean>;
   // approval
   approvalFor: Scenario | null;
   approving: boolean;
@@ -93,7 +94,19 @@ interface CockpitValue {
   plcStatus: WsStatus;
   plcInfo: PlcInfo | null;
   plcAlarm: PlcAlarmFrame | null;
+  /** Set while the backend cannot read the PLC (plant network down); cleared by the next scan. */
+  plcOffline: { error: string; timestamp: string } | null;
   startPlcScenario: (id: string) => Promise<void>;
+  /** Latest PLC scan row per machine (setpoints, e-stop, lockout). */
+  plcMachines: Record<string, PlcMachine>;
+  plcPrediction: PlcPredictionFrame | null;
+  plcAction: PlcActionResult | null;
+  plcBusy: boolean;
+  approvePlcAction: (p: PlcProposedAction) => Promise<void>;
+  setPlcAutonomy: (enabled: boolean) => Promise<void>;
+  setPlcLockout: (machineId: string, lockout: boolean) => Promise<void>;
+  /** Book a maintenance window for a machine the trend says will fault (solver + approval → SAP). */
+  planMaintenance: (machineId: string) => Promise<void>;
   // ledger
   ledgerOpen: boolean;
   setLedgerOpen: (v: boolean) => void;
@@ -178,6 +191,11 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   const [plcStatus, setPlcStatus] = useState<WsStatus>("closed");
   const [plcInfo, setPlcInfo] = useState<PlcInfo | null>(null);
   const [plcAlarm, setPlcAlarm] = useState<PlcAlarmFrame | null>(null);
+  const [plcOffline, setPlcOffline] = useState<{ error: string; timestamp: string } | null>(null);
+  const [plcMachines, setPlcMachines] = useState<Record<string, PlcMachine>>({});
+  const [plcPrediction, setPlcPrediction] = useState<PlcPredictionFrame | null>(null);
+  const [plcAction, setPlcAction] = useState<PlcActionResult | null>(null);
+  const [plcBusy, setPlcBusy] = useState(false);
 
   const [ledgerOpen, setLedgerOpen] = useState(false);
   const [verifying, setVerifying] = useState(false);
@@ -328,20 +346,43 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // Once a write lands, the proposal that asked for it is done; keep the cards from offering it again.
+  const clearApplied = useCallback((r: PlcActionResult) => {
+    if (!r.ok) return;
+    setPlcPrediction((cur) => (cur?.machine_id === r.machine_id ? null : cur));
+    setPlcAlarm((cur) => (cur?.machine_id === r.machine_id ? { ...cur, proposed_action: null } : cur));
+  }, []);
+
   const applyPlcFrame = useCallback((data: string) => {
-    let f: { event?: string; machines?: PlcMachine[] };
+    let f: { event?: string; machines?: PlcMachine[]; autonomy?: PlcInfo["autonomy"] };
     try {
       f = JSON.parse(data);
     } catch {
       return;
     }
     if (f.event === "plc_scan" && f.machines) {
-      const running = f.machines.filter((m) => m.run);
+      const machines = f.machines;
+      const running = machines.filter((m) => m.run);
       setLive((cur) => {
         const next = { ...cur };
         for (const m of running) next[m.machine_id] = { ...(cur[m.machine_id] ?? {}), ...m.tags };
         return next;
       });
+      setPlcMachines(Object.fromEntries(machines.map((m) => [m.machine_id, m])));
+      setPlcOffline(null);
+      // Once the machine's alarm clears (e.g. after mitigation), its card goes too.
+      const alarmed = new Set(machines.filter((m) => m.alarm).map((m) => m.machine_id));
+      setPlcAlarm((cur) => (cur && !alarmed.has(cur.machine_id) ? null : cur));
+      const autonomy = f.autonomy;
+      if (autonomy)
+        setPlcInfo((cur) =>
+          cur ? (JSON.stringify(cur.autonomy) === JSON.stringify(autonomy) ? cur : { ...cur, autonomy }) : { driver: "", autonomy },
+        );
+      return;
+    }
+    if (f.event === "plc_offline") {
+      const o = f as unknown as { error: string; timestamp: string };
+      setPlcOffline({ error: o.error, timestamp: o.timestamp });
       return;
     }
     if (f.event === "plc_alarm") {
@@ -349,8 +390,18 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       setPlcAlarm(f as unknown as PlcAlarmFrame);
       return;
     }
+    if (f.event === "plc_prediction") {
+      setPlcPrediction(f as unknown as PlcPredictionFrame);
+      return;
+    }
+    if (f.event === "plc_action") {
+      const r = f as unknown as PlcActionResult;
+      setPlcAction(r);
+      clearApplied(r);
+      return;
+    }
     applyFrame(data);
-  }, [applyFrame]);
+  }, [applyFrame, clearApplied]);
 
   // ── telemetry websocket ──────────────────────────────────────────────────
   useEffect(() => {
@@ -402,7 +453,8 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       };
     };
     connect();
-    api.plc().then(setPlcInfo).catch(() => undefined);
+    // Keep autonomy from a scan frame that arrived first; the rest comes from the API.
+    api.plc().then((info) => setPlcInfo((cur) => ({ ...info, autonomy: cur?.autonomy ?? info.autonomy }))).catch(() => undefined);
     return () => {
       stopped = true;
       if (retry) window.clearTimeout(retry);
@@ -416,6 +468,8 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       const info = await api.plcScenario(id);
       setPlcInfo(info);
       setPlcAlarm(null);
+      setPlcPrediction(null);
+      setPlcAction(null);
       setSafety(null);
       setPlcOn(true);
     } catch (e) {
@@ -452,10 +506,12 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
         setResult(r);
         setSapVersion(r.sap_version);
         setPhase("proposing");
+        return true;
       } catch (e) {
         setPhase("normal");
         setError(e instanceof Error ? e.message : String(e));
         showToast("Analisis gagal. Periksa koneksi ke backend.");
+        return false;
       } finally {
         window.clearTimeout(t1);
         window.clearTimeout(t2);
@@ -473,6 +529,62 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     setSafety(null);
     await runDisruption({ ...DEMO_DISRUPTION, machine_id: m, disruption_type: safety.metric.includes("vibration") ? "VIBRATION" : "OVERHEAT" });
   }, [safety, runDisruption]);
+
+  // ── PLC actions: approved writes, limited autonomy, demo lockout ──────────
+  const approvePlcAction = useCallback(async (p: PlcProposedAction) => {
+    setPlcBusy(true);
+    try {
+      const r = await api.plcAction({ machine_id: p.machine_id, tag: p.tag, value: p.value, approved_by: approver, action_id: p.action_id, reason: p.label });
+      setPlcAction(r);
+      clearApplied(r);
+      showToast(`${p.machine_id}: ${p.tag} ${r.before ?? "?"} → ${r.after}. Tercatat di audit ledger.`);
+    } catch (e) {
+      // A refused write comes back as 409 with every check, so the operator sees what happened.
+      if (e instanceof ApiError && e.status === 409 && e.detail && typeof e.detail === "object") {
+        const r = e.detail as PlcActionResult;
+        setPlcAction(r);
+        showToast(
+          r.outcome === "blocked"
+            ? `Penulisan ke ${p.machine_id} diblokir oleh pemeriksaan keselamatan.`
+            : `Penulisan ke ${p.machine_id} gagal: ${r.error ?? "periksa di HMI mesin"}.`,
+        );
+      } else {
+        showToast(`Penulisan PLC gagal: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    } finally {
+      setPlcBusy(false);
+      void load();
+    }
+  }, [approver, showToast, load, clearApplied]);
+
+  const setPlcAutonomy = useCallback(async (enabled: boolean) => {
+    try {
+      setPlcInfo(await api.plcAutonomy(enabled, approver));
+      void load();
+    } catch (e) {
+      showToast(`Autonomi gagal diubah: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [approver, showToast, load]);
+
+  const setPlcLockout = useCallback(async (machineId: string, lockout: boolean) => {
+    try {
+      const r = await api.plcInterlock({ machine_id: machineId, lockout });
+      setPlcMachines((cur) => (cur[machineId] ? { ...cur, [machineId]: { ...cur[machineId], lockout: r.lockout } } : cur));
+    } catch (e) {
+      showToast(`Lockout gagal diubah: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [showToast]);
+
+  const planMaintenance = useCallback(async (machineId: string) => {
+    // Next full hour of the shift (07:00 = hour 0), a 2-hour window, inside the 8-hour shift.
+    // Too late in the shift for a 2-hour window: the start of the next shift instead, never the past.
+    const wibHour = (new Date().getUTCHours() + 7) % 24;
+    const next = wibHour - 7 + 1;
+    const start = next >= 0 && next <= 6 ? next : 0;
+    if (start !== next) showToast(`Shift ini tidak cukup untuk 2 jam perawatan; dijadwalkan di awal shift berikutnya (07:00).`);
+    if (await runDisruption({ machine_id: machineId, disruption_type: "MAINTENANCE", start_hour: start, end_hour: start + 2 }))
+      setPlcPrediction(null);
+  }, [runDisruption, showToast]);
 
   // Proactive start: a critical alert counts down and then analyses on its own. The key leaves out
   // the timestamp so repeated frames for the same fault do not restart the count. Not on the
@@ -748,6 +860,8 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       setLive({});
       setRecalcVersions(null);
       setPlcAlarm(null);
+      setPlcPrediction(null);
+      setPlcAction(null);
       api.plcScenario("normal").then(setPlcInfo).catch(() => undefined);
       showToast(`State dimuat ulang ke SAP v${s._meta.version}. Audit ledger tetap utuh.`);
       await load();
@@ -767,7 +881,8 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       injecting, injectDrill,
       displayStatus, live,
       wsStatus, lastAnalysis, safety, sendTelemetry, runFullAnalysis, autoIn,
-      plcOn, setPlcOn, plcStatus, plcInfo, plcAlarm, startPlcScenario,
+      plcOn, setPlcOn, plcStatus, plcInfo, plcAlarm, plcOffline, startPlcScenario,
+      plcMachines, plcPrediction, plcAction, plcBusy, approvePlcAction, setPlcAutonomy, setPlcLockout, planMaintenance,
       ledgerOpen, setLedgerOpen, verifying, verifyResult, verify,
       chatOpen, chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat,
       muted, toggleMute, toast, reset, resetting,
@@ -779,7 +894,8 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     [
       state, metrics, online, aiConfigured, error, ledger, sapVersion, page, phase, detectStep, params, result, receipt, runDisruption,
       approvalFor, approving, conflict, approver, openApproval, closeApproval, confirmApproval, injecting, injectDrill, displayStatus, live, wsStatus,
-      lastAnalysis, safety, sendTelemetry, runFullAnalysis, autoIn, plcOn, plcStatus, plcInfo, plcAlarm, startPlcScenario, ledgerOpen, verifying, verifyResult, verify, chatOpen,
+      lastAnalysis, safety, sendTelemetry, runFullAnalysis, autoIn, plcOn, plcStatus, plcInfo, plcAlarm, plcOffline, startPlcScenario,
+      plcMachines, plcPrediction, plcAction, plcBusy, approvePlcAction, setPlcAutonomy, setPlcLockout, planMaintenance, ledgerOpen, verifying, verifyResult, verify, chatOpen,
       chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat, muted, toggleMute, toast, reset, resetting,
       skillStudioOpen, skillStudioState, skillStudioFormData, skillStudioDraft, skillStudioLintResult,
     ],
