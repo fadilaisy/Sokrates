@@ -18,3 +18,6 @@ from pathlib import Path
 _TMP = Path(tempfile.mkdtemp(prefix="sf_test_ledgers_"))
 os.environ.setdefault("AUDIT_LEDGER_PATH", str(_TMP / "audit_ledger.jsonl"))
 os.environ.setdefault("MAINTENANCE_LEDGER_PATH", str(_TMP / "maintenance_ledger.jsonl"))
+# Startup demo-document seeding writes into the process-wide RAG store; tests that
+# need it turn it on themselves (tests/test_seed_startup.py).
+os.environ.setdefault("RAG_AUTOSEED_DEMO", "0")
