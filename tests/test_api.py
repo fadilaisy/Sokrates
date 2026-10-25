@@ -67,6 +67,17 @@ def test_inject_mutates_state_and_stale_approve_conflicts():
     assert r.json()["detail"]["error"] == "DriftError"
 
 
+def test_approve_requires_an_approver_name():
+    d = client.post("/api/disrupt", json=DISRUPTION).json()
+    sc = next(s for s in d["scenarios"] if s["recommended"])
+    r = client.post("/api/approve", json={
+        "scenario_id": sc["id"], "scenario_data": sc,
+        "expected_sap_version": d["sap_version"], "approved_by": "",
+    })
+    assert r.status_code == 422
+    assert "SCENARIO_APPROVED" not in _ledger_types()[-1:]
+
+
 def test_revert_roundtrip_keeps_chain_valid():
     d = client.post("/api/disrupt", json=DISRUPTION).json()
     sc = next(s for s in d["scenarios"] if s["recommended"])

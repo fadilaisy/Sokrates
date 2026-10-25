@@ -4,10 +4,10 @@ import type { CSSProperties, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { api, formatIDR } from "../lib/api";
 import { cn } from "../lib/utils";
-import { changeKind, shortHash, timeRange, wibTime } from "../lib/shift";
+import { chainVerdict, changeKind, shortHash, timeRange, wibTime } from "../lib/shift";
 import { CitedText, SourceCitations } from "./Citations";
 import { ledgerDetail, ledgerSubject } from "./ledgerDetail";
-import { useCockpit } from "./store";
+import { DEFAULT_SIGNER, useCockpit } from "./store";
 import { AssistantFace, Btn, Card, Mono, Spinner } from "./ui";
 
 function useEscape(onClose: () => void, active: boolean) {
@@ -30,6 +30,7 @@ export function ApprovalModal() {
   if (!approvalFor) return null;
   const c = conflict;
   const letter = approvalFor.id.replace("scenario_", "").toUpperCase();
+  const named = approver.trim().length >= 3;
   return (
     <>
       <Scrim onClick={() => !approving && closeApproval()} />
@@ -108,8 +109,14 @@ export function ApprovalModal() {
                 onChange={(e) => setApprover(e.target.value)}
                 disabled={approving || !!c}
                 placeholder="Production Supervisor — Nama Anda"
+                aria-describedby={!c && !named ? "appr-name-hint" : undefined}
                 className="min-h-12 rounded-md border border-line bg-surface px-4 text-[16px] disabled:opacity-60"
               />
+              {!c && !named && (
+                <span id="appr-name-hint" className="text-[14px] text-muted-ink">
+                  Isi nama Anda untuk menyetujui
+                </span>
+              )}
             </label>
           </div>
 
@@ -125,7 +132,7 @@ export function ApprovalModal() {
                 <Btn onClick={() => openChat("recalc")}>Hitung ulang skenario</Btn>
               </>
             ) : (
-              <Btn onClick={confirmApproval} disabled={approving}>
+              <Btn onClick={confirmApproval} disabled={approving || !named}>
                 {approving ? <Spinner className="size-5" /> : null}
                 Setujui skenario ini
               </Btn>
@@ -248,12 +255,14 @@ export function LedgerDrawer() {
   };
   const types = [...new Set(ledger.map((e) => e.action_type))].sort();
   const entries = [...ledger].reverse().filter((e) => filter === "ALL" || e.action_type === filter);
+  const me = approver.trim().toLowerCase();
+  const mine = (e: (typeof ledger)[number]) => me.length >= 3 && String(e.approved_by ?? "").toLowerCase().includes(me);
 
   async function revert(entryId: string) {
     setReverting(entryId);
     setRevertError(null);
     try {
-      await api.revertLedger(entryId, approver);
+      await api.revertLedger(entryId, approver.trim() || DEFAULT_SIGNER);
       await verify();
     } catch (e) {
       setRevertError(e instanceof Error ? e.message : String(e));
@@ -321,6 +330,9 @@ export function LedgerDrawer() {
               <span className={cn("text-[16px] font-semibold", rejected && "text-fault")}>
                 {ACTION_LABEL[e.action_type] ?? e.action_type}
                 {subject && ` · ${subject}`}
+                {mine(e) && (
+                  <span className="ml-2 rounded-full bg-navy px-2 py-0.5 align-middle text-[12px] font-semibold text-white">Anda</span>
+                )}
               </span>
               {plc ? (
                 <span className="text-[14px] text-muted-ink">
@@ -364,11 +376,12 @@ export function LedgerDrawer() {
         <p
           role="status"
           className={cn(
-            "flex items-center gap-2.5 rounded-md border px-4 py-3 font-mono text-[15px]",
+            "flex flex-col gap-0.5 rounded-md border px-4 py-3 text-[15px] font-semibold",
             verifyResult.valid ? "border-ok-line bg-ok-bg text-running" : "border-danger-line bg-danger-bg text-fault",
           )}
         >
-          valid: {String(verifyResult.valid)} · {verifyResult.total_entries} entri terverifikasi
+          {chainVerdict(verifyResult)}
+          <Mono className="text-[12px] font-normal">hash terakhir {shortHash(ledger.at(-1)?.sha256_hash)}</Mono>
         </p>
       )}
       <Btn size="lg" onClick={verify} disabled={verifying}>

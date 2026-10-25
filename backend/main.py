@@ -221,7 +221,7 @@ class ApproveRequest(BaseModel):
     scenario_id: str             = Field(..., example="scenario_c")
     scenario_data: dict[str, Any]
     expected_sap_version: int
-    approved_by: str             = Field(..., example="Production Supervisor — Budi Santoso")
+    approved_by: str             = Field(..., min_length=3, example="Production Supervisor — Budi Santoso")
 
 
 class ApproveResponse(BaseModel):

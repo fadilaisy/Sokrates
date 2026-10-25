@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { API_BASE, maintApi } from "../lib/api";
 import type { DocRef, MaintCase, MaintChat, MaintFlow, MaintSearch, Playbook } from "../lib/api";
+import { chainVerdict } from "../lib/shift";
 import { cn } from "../lib/utils";
 import { Header } from "./Shell";
 import { SourceCitations } from "./Citations";
@@ -332,7 +333,7 @@ export function MaintenancePage() {
 
       <Section title="Playbook Terkirim" sub={`${cases.length} kasus di ledger · ${scanned} hasil scan · ${bahasa} berbahasa Indonesia/campuran`}>
         <div className="flex items-center gap-3">
-          <Btn variant="secondary" onClick={() => maintApi.verify().then((v) => setVerify(v.message)).catch((e) => setVerify(String(e)))}>
+          <Btn variant="secondary" onClick={() => maintApi.verify().then((v) => setVerify(chainVerdict(v))).catch((e) => setVerify(String(e)))}>
             Verifikasi rantai hash
           </Btn>
           {verify && <span className="text-[15px] text-running">{verify}</span>}

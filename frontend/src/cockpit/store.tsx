@@ -20,7 +20,17 @@ export interface DisruptionParams {
 /** The PRD's one-click demo: always CNC-02, hours 2–5, BREAKDOWN. */
 export const DEMO_DISRUPTION: DisruptionParams = { machine_id: "CNC-02", disruption_type: "BREAKDOWN", start_hour: 2, end_hour: 5 };
 
-export const APPROVER = "Production Supervisor — Budi Santoso";
+const APPROVER_KEY = "sf.approver";
+/** Signs PLC writes and reverts when nobody has typed a name yet. Scenario approval needs a real name. */
+export const DEFAULT_SIGNER = "Production Supervisor";
+
+function savedApprover(): string {
+  try {
+    return localStorage.getItem(APPROVER_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
 
 export interface SafetyAlert {
   machine_id: string;
@@ -111,7 +121,7 @@ interface CockpitValue {
   ledgerOpen: boolean;
   setLedgerOpen: (v: boolean) => void;
   verifying: boolean;
-  verifyResult: { valid: boolean; total_entries: number; message: string } | null;
+  verifyResult: { valid: boolean; total_entries: number; first_broken_index?: number | null; message: string } | null;
   verify: () => Promise<void>;
   // chat
   chatOpen: boolean;
@@ -178,7 +188,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   const [approvalFor, setApprovalFor] = useState<Scenario | null>(null);
   const [approving, setApproving] = useState(false);
   const [conflict, setConflict] = useState<DriftDetail | null>(null);
-  const [approver, setApprover] = useState(APPROVER);
+  const [approver, setApprover] = useState(savedApprover);
   const [injecting, setInjecting] = useState(false);
 
   const [live, setLive] = useState<Record<string, Record<string, number>>>({});
@@ -534,7 +544,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   const approvePlcAction = useCallback(async (p: PlcProposedAction) => {
     setPlcBusy(true);
     try {
-      const r = await api.plcAction({ machine_id: p.machine_id, tag: p.tag, value: p.value, approved_by: approver, action_id: p.action_id, reason: p.label });
+      const r = await api.plcAction({ machine_id: p.machine_id, tag: p.tag, value: p.value, approved_by: approver.trim() || DEFAULT_SIGNER, action_id: p.action_id, reason: p.label });
       setPlcAction(r);
       clearApplied(r);
       showToast(`${p.machine_id}: ${p.tag} ${r.before ?? "?"} → ${r.after}. Tercatat di audit ledger.`);
@@ -559,7 +569,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
 
   const setPlcAutonomy = useCallback(async (enabled: boolean) => {
     try {
-      setPlcInfo(await api.plcAutonomy(enabled, approver));
+      setPlcInfo(await api.plcAutonomy(enabled, approver.trim() || DEFAULT_SIGNER));
       void load();
     } catch (e) {
       showToast(`Autonomi gagal diubah: ${e instanceof Error ? e.message : String(e)}`);
@@ -631,6 +641,11 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     try {
       const r = await api.approve({ scenario_id: approvalFor.id, scenario_data: approvalFor, expected_sap_version: expected, approved_by: approver });
       setReceipt({ ...r, scenario: approvalFor });
+      try {
+        localStorage.setItem(APPROVER_KEY, approver.trim());
+      } catch {
+        /* private mode: the name is only kept for this visit */
+      }
       setSapVersion(r.sap_version_after);
       setApprovalFor(null);
       setConflict(null);
@@ -735,12 +750,12 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
           },
         ]);
       } else if (messages.length === 0 || chatMode !== "general") {
-        const firstName = approver.split("—").pop()?.trim().split(" ")[0] ?? "Budi";
+        const firstName = approver.split("—").pop()?.trim().split(" ")[0];
         setMessages([
           {
             id: msgSeq++,
             from: "ai",
-            text: `Halo, ${firstName}. Saya bisa menjelaskan status mesin, jadwal shift, dan skenario. Saya tidak mengubah apa pun tanpa persetujuan Anda.`,
+            text: `Halo${firstName ? `, ${firstName}` : ""}. Saya bisa menjelaskan status mesin, jadwal shift, dan skenario. Saya tidak mengubah apa pun tanpa persetujuan Anda.`,
           },
         ]);
       }

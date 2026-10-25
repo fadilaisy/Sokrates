@@ -52,7 +52,7 @@ def test_approve_rejects_forged_scenario():
     forged = copy.deepcopy(sc)
     forged["gantt_changes"][0]["to_machine"] = "CNC-05"   # MAINTENANCE in the mock
     res = client.post("/api/approve", json={"scenario_id": sc["id"], "scenario_data": forged,
-                                            "expected_sap_version": r["sap_version"], "approved_by": "t"})
+                                            "expected_sap_version": r["sap_version"], "approved_by": "Tester"})
     assert res.status_code == 409
     assert res.json()["detail"]["error"] == "ScenarioMismatch"
 
@@ -60,7 +60,7 @@ def test_approve_rejects_forged_scenario():
 def test_approve_rejects_unissued_scenario_id():
     r, _ = _disrupt_and_pick()
     res = client.post("/api/approve", json={"scenario_id": "scenario_zzz", "scenario_data": {"gantt_changes": []},
-                                            "expected_sap_version": r["sap_version"], "approved_by": "t"})
+                                            "expected_sap_version": r["sap_version"], "approved_by": "Tester"})
     assert res.status_code == 409
 
 
@@ -72,7 +72,7 @@ def test_approve_blocks_tier1_target_after_status_change():
     inj = client.post("/api/disrupt/inject", json={"machine_id": moved["to_machine"], "new_status": "FAULT",
                                                    "disruption_type": "MOTOR_OVERLOAD"}).json()
     res = client.post("/api/approve", json={"scenario_id": sc["id"], "scenario_data": sc,
-                                            "expected_sap_version": inj["sap_version_after"], "approved_by": "t"})
+                                            "expected_sap_version": inj["sap_version_after"], "approved_by": "Tester"})
     assert res.status_code == 409
     assert res.json()["detail"]["error"] == "Tier1Violation"
 
@@ -80,7 +80,7 @@ def test_approve_blocks_tier1_target_after_status_change():
 def test_revert_is_single_use_and_detects_drift():
     r, sc = _disrupt_and_pick()
     ok = client.post("/api/approve", json={"scenario_id": sc["id"], "scenario_data": sc,
-                                           "expected_sap_version": r["sap_version"], "approved_by": "t"})
+                                           "expected_sap_version": r["sap_version"], "approved_by": "Tester"})
     assert ok.status_code == 200
     entry = ok.json()["receipt_id"]
     # Another change lands after the approval -> reverting would clobber it.
@@ -91,7 +91,7 @@ def test_revert_is_single_use_and_detects_drift():
     # Fresh run without drift: first revert works, second is refused.
     r, sc = _disrupt_and_pick()
     ok = client.post("/api/approve", json={"scenario_id": sc["id"], "scenario_data": sc,
-                                           "expected_sap_version": r["sap_version"], "approved_by": "t"})
+                                           "expected_sap_version": r["sap_version"], "approved_by": "Tester"})
     entry = ok.json()["receipt_id"]
     assert client.post(f"/api/ledger/{entry}/revert", json={"id": entry}).status_code == 200
     assert client.post(f"/api/ledger/{entry}/revert", json={"id": entry}).status_code == 409
