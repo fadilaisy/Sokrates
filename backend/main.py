@@ -65,7 +65,7 @@ from erp_adapter.sap_client import DriftError, SAPClient
 import copy
 from erp_adapter.audit_ledger import AuditLedger
 from solver.schedule_solver import ScheduleSolver, TIER1_BLOCKED_STATUSES
-from skills.loader import SafetyInterlock, SkillRegistry
+from skills.loader import DEFAULT_SKILL_ID, SafetyInterlock, SkillRegistry
 from fastapi.concurrency import run_in_threadpool
 from rag.api import router as rag_router
 from rag.retrieve import Retriever
@@ -1770,7 +1770,10 @@ async def _analyze_reading(
     error_codes: Optional[list[str]] = None,
 ) -> None:
     """Classify one reading and send the analysis, playbook and safety frames for it."""
-    severity, rule_triggered = _classify_telemetry(metric, value)
+    alarm_code = error_codes[0] if error_codes else None
+    severity, rule_triggered = _classify_telemetry(metric, value, machine_id, alarm_code)
+    skill_id = _skills.route(machine_id, metric, alarm_code)
+    skill_name = _skills.skills.get(skill_id, {}).get("name") if skill_id else None
 
     analysis_prompt = (
         f"Anda adalah AI Supervisor CNC shop floor PT Karawang Precision Manufacturing.\n"
@@ -1779,6 +1782,7 @@ async def _analyze_reading(
         f"  Nilai              : {value}\n"
         f"  Tingkat keparahan  : {severity}\n"
         + (f"  Aturan terpicu     : {rule_triggered}\n" if rule_triggered else "")
+        + (f"  Skill yang dipakai : {skill_name}\n" if skill_name else "")
         + "\nBerikan analisis singkat (1-2 kalimat) dalam Bahasa Indonesia tentang kondisi "
           "ini dan tindakan yang harus segera diambil operator. "
           "Jawab HANYA analisisnya, tanpa kata pengantar."
@@ -1797,6 +1801,8 @@ async def _analyze_reading(
         "value":          value,
         "severity":       severity,
         "rule_triggered": rule_triggered,
+        "skill_id":       skill_id,
+        "skill_name":     skill_name,
         "analysis":       analysis,
         "timestamp":      datetime.now(timezone.utc).isoformat(),
     })
@@ -1832,25 +1838,42 @@ async def _analyze_reading(
         })
 
 
-def _classify_telemetry(metric: str, value: float) -> tuple[str, str | None]:
+def _classification_skills(skill_id: str | None) -> list[str]:
+    """The routed skill first, then the default skill: a routed skill can add rules, never drop one."""
+    ids = [skill_id] if skill_id else []
+    if DEFAULT_SKILL_ID not in ids:
+        ids.append(DEFAULT_SKILL_ID)
+    return ids
+
+
+def _classify_telemetry(
+    metric: str,
+    value: float,
+    machine_id: str | None = None,
+    alarm_code: str | None = None,
+) -> tuple[str, str | None]:
     """
     Map telemetry metric + value → (severity, safety_rule_id | None).
 
-    Phase 2: driven by skill files via SkillRegistry — Tier 1 interlocks from
-    rules/safety_interlocks.json decide CRITICAL, WARNING hooks from
-    hooks.json decide WARNING. Editing either JSON changes classification
-    without a code change or restart. Hardcoded table below is fallback only
-    when the skill files are missing/unreadable.
+    Driven by skill files via SkillRegistry: the skill routed for this reading
+    (skill.json trigger on machine, metric, alarm code) and the default skill.
+    Tier 1 interlocks from rules/safety_interlocks.json decide CRITICAL, WARNING
+    hooks from hooks.json decide WARNING. Editing either JSON changes
+    classification without a code change or restart. Hardcoded table below is
+    fallback only when the skill files are missing/unreadable.
     """
     telemetry = {metric: value}
     try:
-        interlock = _skills.evaluate_interlock("cnc_milling", telemetry)
-        if interlock is not None:
-            return "CRITICAL", interlock.id
-        for hook in _skills.evaluate_telemetry("cnc_milling", telemetry):
-            sev = str(getattr(hook, "severity", "WARNING")).upper()
-            if sev in ("CRITICAL", "WARNING"):
-                return sev, None
+        skill_ids = _classification_skills(_skills.route(machine_id, metric, alarm_code))
+        for skill_id in skill_ids:
+            interlock = _skills.evaluate_interlock(skill_id, telemetry)
+            if interlock is not None:
+                return "CRITICAL", interlock.id
+        for skill_id in skill_ids:
+            for hook in _skills.evaluate_telemetry(skill_id, telemetry):
+                sev = str(getattr(hook, "severity", "WARNING")).upper()
+                if sev in ("CRITICAL", "WARNING"):
+                    return sev, None
     except Exception:
         pass
     # ── Fallback: mirrors shipped skill files ─────────────────────────────────
@@ -2441,7 +2464,7 @@ async def _plc_tick(scenario: Optional[str], peak: dict[tuple[str, str], str], a
             continue  # a stopped spindle reads 0 bar coolant; that is not a low-pressure fault
         tag_limits = _plc_limits.tag_limits(mid)
         for metric, value in m["tags"].items():
-            sev, _rule = _classify_telemetry(metric, value)
+            sev, _rule = _classify_telemetry(metric, value, mid, code)
             if metric in tag_limits:
                 predictor.observe(mid, metric, now, value)
                 if sev == "OK" and now - predicted_at.get((mid, metric), -1e9) >= 5.0:
