@@ -126,6 +126,12 @@ export function shortHash(h: string | undefined | null): string {
   return `${h.slice(0, 4)}…${h.slice(-4)}`;
 }
 
+/** Hash-chain check result as a sentence a tester can read. */
+export function chainVerdict(v: { valid: boolean; total_entries?: number; first_broken_index?: number | null }): string {
+  if (v.valid) return `Rantai utuh: ${v.total_entries ?? 0} entri, tidak ada yang diubah`;
+  return v.first_broken_index != null ? `Rantai rusak di entri ${v.first_broken_index + 1}` : "Rantai rusak";
+}
+
 export function wibTime(iso: string | undefined): string {
   if (!iso) return "–";
   const d = new Date(iso);

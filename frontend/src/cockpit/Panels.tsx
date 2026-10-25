@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
+import { Volume2 } from "lucide-react";
 import { cn } from "../lib/utils";
 import type { PlcActionResult } from "../lib/api";
 import { fmt1, shortHash, telemetryOf, windowLabel } from "../lib/shift";
+import { audioReady, onAudioReady, playAlarmNow } from "../lib/sound";
 import { DEMO_DISRUPTION, useCockpit } from "./store";
 import { Btn, Card, Mono, StatusBadge } from "./ui";
 
@@ -146,13 +148,13 @@ function PlcControls() {
     <div className="flex min-w-0 flex-col gap-2">
       <div className="flex items-center justify-between gap-2">
         <h2 className="text-[17px] font-semibold">PLC {plcInfo?.driver === "opcua" ? "(OPC UA)" : "(simulasi)"}</h2>
-        <button
-          type="button"
+        <Btn
+          variant="secondary"
           onClick={() => setPlcOn(!plcOn)}
-          className={cn("min-h-10 rounded-md border px-3 text-[14px] font-semibold", plcOn ? "border-ok-line bg-ok-bg text-running" : "border-line hover:bg-page")}
+          className={cn("px-3 text-[14px]", plcOn && "border-ok-line bg-ok-bg text-running")}
         >
           {plcOn ? (plcStatus === "open" ? "Tersambung · putuskan" : "Menyambung…") : "Sambungkan PLC"}
-        </button>
+        </Btn>
       </div>
       {plcOn && plcOffline && (
         <p role="status" className="rounded-md border border-danger-line bg-danger-bg px-3 py-2 text-[14px] text-fault">
@@ -162,20 +164,20 @@ function PlcControls() {
       {plcOn && simulated && (
         <div className="flex flex-wrap gap-2">
           {faults.map((s) => (
-            <button
+            <Btn
               key={s.id}
-              type="button"
+              variant="secondary"
               onClick={() => startPlcScenario(s.id)}
-              className={cn("min-h-12 rounded-md border px-3 text-left text-[14px] font-semibold hover:bg-page", plcInfo?.scenario === s.id ? "border-warn" : "border-line")}
+              className={cn("flex-col items-start gap-0 px-3 text-left text-[14px]", plcInfo?.scenario === s.id && "border-warn")}
             >
               {s.label}
               <Mono className="block text-[13px] font-normal text-muted-ink">{s.alarm_code}</Mono>
-            </button>
+            </Btn>
           ))}
           {plcInfo?.scenario && plcInfo.scenario !== "normal" && (
-            <button type="button" onClick={() => startPlcScenario("normal")} className="min-h-12 rounded-md border border-line px-3 text-[14px] hover:bg-page">
+            <Btn variant="secondary" onClick={() => startPlcScenario("normal")} className="px-3 text-[14px]">
               Pulihkan normal
-            </button>
+            </Btn>
           )}
         </div>
       )}
@@ -183,26 +185,22 @@ function PlcControls() {
         <div className="flex flex-col gap-1.5 rounded-md bg-page px-3 py-2">
           <div className="flex items-center justify-between gap-2">
             <span className="text-[14px] font-semibold">Autonomi terbatas</span>
-            <button
-              type="button"
+            <Btn
+              variant="secondary"
               onClick={() => setPlcAutonomy(!autonomy.enabled)}
-              className={cn("min-h-10 rounded-md border px-3 text-[14px] font-semibold", autonomy.enabled ? "border-warn bg-surface text-warn" : "border-line hover:bg-surface")}
+              className={cn("px-3 text-[14px]", autonomy.enabled && "border-warn text-warn")}
             >
               {autonomy.enabled ? "Aktif · matikan" : "Mati · aktifkan"}
-            </button>
+            </Btn>
           </div>
           <p className="text-[13px] text-muted-ink">
             Hanya aksi pra-disetujui di file batas (turunkan feed override ke 50% saat motor spindel panas), hanya ke arah aman, dan
             hanya jika semua pemeriksaan lolos. Setiap aksi tercatat di audit ledger.
           </p>
           {simulated && target && (
-            <button
-              type="button"
-              onClick={() => setPlcLockout(target.machine_id, !target.lockout)}
-              className="min-h-10 self-start rounded-md border border-line px-3 text-[13px] hover:bg-surface"
-            >
+            <Btn variant="secondary" onClick={() => setPlcLockout(target.machine_id, !target.lockout)} className="self-start px-4 text-[14px]">
               {target.lockout ? `Lepas lockout ${target.machine_id}` : `Uji: pasang lockout ${target.machine_id}`}
-            </button>
+            </Btn>
           )}
         </div>
       )}
@@ -260,7 +258,8 @@ function PlcPredictionCard() {
 
 /** The alarm a machine just raised, with how it was fixed last time (from the maintenance ledger). */
 function PlcAlarmCard() {
-  const { plcAlarm } = useCockpit();
+  const { plcAlarm, muted } = useCockpit();
+  const canSound = useSyncExternalStore(onAudioReady, audioReady);
   if (!plcAlarm) return null;
   const fix = plcAlarm.past_fixes[0];
   const doc = plcAlarm.documents[0];
@@ -269,6 +268,12 @@ function PlcAlarmCard() {
       <p className="font-semibold">
         <Mono>{plcAlarm.machine_id} · {plcAlarm.code}</Mono> {plcAlarm.text}
       </p>
+      {!canSound && !muted && (
+        <Btn variant="secondary" className="self-start px-4 text-[14px]" onClick={playAlarmNow}>
+          <Volume2 className="size-5" aria-hidden />
+          Ketuk untuk menyalakan suara alarm
+        </Btn>
+      )}
       {fix ? (
         <>
           <p className="text-muted-ink">

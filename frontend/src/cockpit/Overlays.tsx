@@ -4,10 +4,10 @@ import type { CSSProperties, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { api, formatIDR } from "../lib/api";
 import { cn } from "../lib/utils";
-import { changeKind, shortHash, timeRange, wibTime } from "../lib/shift";
+import { chainVerdict, changeKind, shortHash, timeRange, wibTime } from "../lib/shift";
 import { CitedText, SourceCitations } from "./Citations";
 import { ledgerDetail, ledgerSubject } from "./ledgerDetail";
-import { useCockpit } from "./store";
+import { DEFAULT_SIGNER, useCockpit } from "./store";
 import { AssistantFace, Btn, Card, Mono, Spinner } from "./ui";
 
 function useEscape(onClose: () => void, active: boolean) {
@@ -30,88 +30,97 @@ export function ApprovalModal() {
   if (!approvalFor) return null;
   const c = conflict;
   const letter = approvalFor.id.replace("scenario_", "").toUpperCase();
+  const named = approver.trim().length >= 3;
   return (
     <>
       <Scrim onClick={() => !approving && closeApproval()} />
-      <div role="dialog" aria-modal="true" aria-labelledby="appr-title" className="fixed inset-0 z-50 grid place-items-center p-4 pointer-events-none">
-        <Card className="sf-fade-in pointer-events-auto flex w-full max-w-[720px] flex-col gap-4 p-6 shadow-2xl">
-          <h2 id="appr-title" className="text-[22px] font-bold">
+      <div role="dialog" aria-modal="true" aria-labelledby="appr-title" className="fixed inset-0 z-50 grid grid-cols-[minmax(0,1fr)] place-items-center overflow-y-auto p-4 pointer-events-none">
+        <Card className="sf-fade-in pointer-events-auto flex max-h-[calc(100dvh-2rem)] w-full max-w-[720px] flex-col gap-4 p-6 shadow-2xl">
+          <h2 id="appr-title" className="shrink-0 text-[22px] font-bold">
             {c ? "Tidak dapat disetujui · jadwal SAP berubah" : `Setujui skenario ${letter} · ${approvalFor.name_id}`}
           </h2>
-          <p className="text-[16px]">
+          <p className="shrink-0 text-[16px]">
             {c
               ? "Jadwal di SAP berubah setelah analisis dibuat. Tidak ada yang ditulis ke SAP. Hitung ulang agar skenario cocok dengan jadwal terbaru."
               : "Tinjau perubahan field sebelum ditulis ke SAP. Persetujuan adalah satu-satunya aksi tulis; semua langkah sebelumnya hanya analisis."}
           </p>
 
-          <div className="overflow-x-auto rounded-md border border-line">
-            <table className="w-full text-left text-[15px]">
-              <thead className="bg-page">
-                <tr>
-                  <th className="px-3 py-2 font-semibold">Order</th>
-                  <th className="px-3 py-2 font-semibold">Mesin</th>
-                  <th className="px-3 py-2 font-semibold">Jam</th>
-                  <th className="px-3 py-2 font-semibold">Perubahan</th>
-                  <th className="px-3 py-2 text-right font-semibold">Biaya</th>
-                </tr>
-              </thead>
-              <tbody>
-                {approvalFor.gantt_changes.map((g) => {
-                  const cost = (g.sla_penalty_idr ?? 0) + (g.overtime_cost_idr ?? 0) + (g.changeover_cost_idr ?? 0);
-                  return (
-                    <tr key={g.order_id} className={cn("border-t border-line", c && "bg-danger-bg")}>
-                      <td className="px-3 py-2.5 font-mono">{g.order_id}</td>
-                      <td className="px-3 py-2.5 font-mono">{g.from_machine === g.to_machine ? g.to_machine : `${g.from_machine} → ${g.to_machine}`}</td>
-                      <td className="px-3 py-2.5 font-mono">{timeRange(g.new_start_time, g.new_end_time)}</td>
-                      <td className={cn("px-3 py-2.5", c && "font-semibold text-fault")}>{c ? "Konflik" : changeKind(g)}</td>
-                      <td className="px-3 py-2.5 text-right font-mono">{formatIDR(cost)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
+            <div className="shrink-0 overflow-x-auto rounded-md border border-line">
+              <table className="w-full text-left text-[15px]">
+                <thead className="bg-page">
+                  <tr>
+                    <th className="px-3 py-2 font-semibold">Order</th>
+                    <th className="px-3 py-2 font-semibold">Mesin</th>
+                    <th className="px-3 py-2 font-semibold">Jam</th>
+                    <th className="px-3 py-2 font-semibold">Perubahan</th>
+                    <th className="px-3 py-2 text-right font-semibold">Biaya</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {approvalFor.gantt_changes.map((g) => {
+                    const cost = (g.sla_penalty_idr ?? 0) + (g.overtime_cost_idr ?? 0) + (g.changeover_cost_idr ?? 0);
+                    return (
+                      <tr key={g.order_id} className={cn("border-t border-line", c && "bg-danger-bg")}>
+                        <td className="px-3 py-2.5 font-mono">{g.order_id}</td>
+                        <td className="px-3 py-2.5 font-mono">{g.from_machine === g.to_machine ? g.to_machine : `${g.from_machine} → ${g.to_machine}`}</td>
+                        <td className="px-3 py-2.5 font-mono">{timeRange(g.new_start_time, g.new_end_time)}</td>
+                        <td className={cn("px-3 py-2.5", c && "font-semibold text-fault")}>{c ? "Konflik" : changeKind(g)}</td>
+                        <td className="px-3 py-2.5 text-right font-mono">{formatIDR(cost)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <p
+              className={cn(
+                "flex items-center gap-2 rounded-md border px-3 py-2 font-mono text-[15px]",
+                c ? "border-danger-line bg-danger-bg text-fault" : "border-ok-line bg-ok-bg text-running",
+              )}
+            >
+              <span className={cn("size-2.5 rounded-full", c ? "bg-danger-line" : "bg-ok-line")} aria-hidden />
+              {c
+                ? `sap_version ${c.expected_version} → ${c.actual_version} · pemeriksaan drift: TIDAK COCOK`
+                : `sap_version ${sapVersion} · pemeriksaan drift saat disetujui`}
+            </p>
+
+            {c?.receipt_id && (
+              <div className="flex items-center gap-3 rounded-md bg-page py-2 pr-2 pl-4">
+                <span className="flex-1 text-[15px] font-medium">Penolakan dicatat di audit ledger · {c.receipt_id.slice(0, 8)}</span>
+                <Btn
+                  variant="secondary"
+                  onClick={() => {
+                    closeApproval();
+                    setLedgerOpen(true);
+                    verify();
+                  }}
+                >
+                  Lihat entri
+                </Btn>
+              </div>
+            )}
+
+            <label className="flex flex-col gap-1">
+              <span className="text-[15px] font-medium text-muted-ink">Disetujui oleh (nama approver — tercatat di audit ledger)</span>
+              <input
+                value={approver}
+                onChange={(e) => setApprover(e.target.value)}
+                disabled={approving || !!c}
+                placeholder="Production Supervisor — Nama Anda"
+                aria-describedby={!c && !named ? "appr-name-hint" : undefined}
+                className="min-h-12 rounded-md border border-line bg-surface px-4 text-[16px] disabled:opacity-60"
+              />
+              {!c && !named && (
+                <span id="appr-name-hint" className="text-[14px] text-muted-ink">
+                  Isi nama Anda untuk menyetujui
+                </span>
+              )}
+            </label>
           </div>
 
-          <p
-            className={cn(
-              "flex items-center gap-2 rounded-md border px-3 py-2 font-mono text-[15px]",
-              c ? "border-danger-line bg-danger-bg text-fault" : "border-ok-line bg-ok-bg text-running",
-            )}
-          >
-            <span className={cn("size-2.5 rounded-full", c ? "bg-danger-line" : "bg-ok-line")} aria-hidden />
-            {c
-              ? `sap_version ${c.expected_version} → ${c.actual_version} · pemeriksaan drift: TIDAK COCOK`
-              : `sap_version ${sapVersion} · pemeriksaan drift saat disetujui`}
-          </p>
-
-          {c?.receipt_id && (
-            <div className="flex items-center gap-3 rounded-md bg-page py-2 pr-2 pl-4">
-              <span className="flex-1 text-[15px] font-medium">Penolakan dicatat di audit ledger · {c.receipt_id.slice(0, 8)}</span>
-              <Btn
-                variant="secondary"
-                onClick={() => {
-                  closeApproval();
-                  setLedgerOpen(true);
-                  verify();
-                }}
-              >
-                Lihat entri
-              </Btn>
-            </div>
-          )}
-
-          <label className="flex flex-col gap-1">
-            <span className="text-[15px] font-medium text-muted-ink">Disetujui oleh (nama approver — tercatat di audit ledger)</span>
-            <input
-              value={approver}
-              onChange={(e) => setApprover(e.target.value)}
-              disabled={approving || !!c}
-              placeholder="Production Supervisor — Nama Anda"
-              className="min-h-12 rounded-md border border-line bg-surface px-4 text-[16px] disabled:opacity-60"
-            />
-          </label>
-
-          <div className="flex flex-wrap justify-end gap-3">
+          <div className="flex shrink-0 flex-wrap justify-end gap-3">
             <Btn variant="secondary" onClick={closeApproval} disabled={approving}>
               Batal
             </Btn>
@@ -123,7 +132,7 @@ export function ApprovalModal() {
                 <Btn onClick={() => openChat("recalc")}>Hitung ulang skenario</Btn>
               </>
             ) : (
-              <Btn onClick={confirmApproval} disabled={approving}>
+              <Btn onClick={confirmApproval} disabled={approving || !named}>
                 {approving ? <Spinner className="size-5" /> : null}
                 Setujui skenario ini
               </Btn>
@@ -246,12 +255,14 @@ export function LedgerDrawer() {
   };
   const types = [...new Set(ledger.map((e) => e.action_type))].sort();
   const entries = [...ledger].reverse().filter((e) => filter === "ALL" || e.action_type === filter);
+  const me = approver.trim().toLowerCase();
+  const mine = (e: (typeof ledger)[number]) => me.length >= 3 && String(e.approved_by ?? "").toLowerCase().includes(me);
 
   async function revert(entryId: string) {
     setReverting(entryId);
     setRevertError(null);
     try {
-      await api.revertLedger(entryId, approver);
+      await api.revertLedger(entryId, approver.trim() || DEFAULT_SIGNER);
       await verify();
     } catch (e) {
       setRevertError(e instanceof Error ? e.message : String(e));
@@ -319,6 +330,9 @@ export function LedgerDrawer() {
               <span className={cn("text-[16px] font-semibold", rejected && "text-fault")}>
                 {ACTION_LABEL[e.action_type] ?? e.action_type}
                 {subject && ` · ${subject}`}
+                {mine(e) && (
+                  <span className="ml-2 rounded-full bg-navy px-2 py-0.5 align-middle text-[12px] font-semibold text-white">Anda</span>
+                )}
               </span>
               {plc ? (
                 <span className="text-[14px] text-muted-ink">
@@ -362,11 +376,12 @@ export function LedgerDrawer() {
         <p
           role="status"
           className={cn(
-            "flex items-center gap-2.5 rounded-md border px-4 py-3 font-mono text-[15px]",
+            "flex flex-col gap-0.5 rounded-md border px-4 py-3 text-[15px] font-semibold",
             verifyResult.valid ? "border-ok-line bg-ok-bg text-running" : "border-danger-line bg-danger-bg text-fault",
           )}
         >
-          valid: {String(verifyResult.valid)} · {verifyResult.total_entries} entri terverifikasi
+          {chainVerdict(verifyResult)}
+          <Mono className="text-[12px] font-normal">hash terakhir {shortHash(ledger.at(-1)?.sha256_hash)}</Mono>
         </p>
       )}
       <Btn size="lg" onClick={verify} disabled={verifying}>

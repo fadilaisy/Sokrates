@@ -1,6 +1,8 @@
-// Notification sounds, synthesised with the Web Audio API (no audio files).
-// Browsers keep audio silent until the first user interaction, so the
-// provider calls unlockAudio() on the first click or keypress.
+// Notification sounds: a recorded paging file for live alarms, Web Audio
+// beeps for the rest. Browsers keep audio silent until the first user
+// interaction, so the provider calls unlockAudio() on the first tap or
+// keypress. iOS Safari also refuses an audio file the page never played
+// during a tap, so unlockAudio() plays the paging file once, muted.
 
 export type SoundKind = "telemetry" | "disruption" | "ledger";
 
@@ -16,6 +18,11 @@ let ctx: AudioContext | null = null;
 const alarm = typeof Audio !== "undefined" ? new Audio("/sounds/paging.mp3") : null;
 if (alarm) alarm.preload = "auto";
 let muted = readMuted();
+let primed = false;
+let priming = false;
+// Set by playAlarmNow(): the priming play is the real one, so keep it sounding.
+let audibleOnPrime = false;
+const readyListeners = new Set<() => void>();
 const lastPlayed: Record<SoundKind, number> = { telemetry: 0, disruption: 0, ledger: 0 };
 
 function readMuted(): boolean {
@@ -43,13 +50,78 @@ export function setMuted(v: boolean) {
   }
 }
 
+/** True once both the beeps and the paging file are allowed to play. */
+export function audioReady(): boolean {
+  return ctx?.state === "running" && (primed || !alarm);
+}
+
+/** Calls fn whenever audioReady() may have changed; returns the unsubscribe. */
+export function onAudioReady(fn: () => void): () => void {
+  readyListeners.add(fn);
+  return () => readyListeners.delete(fn);
+}
+
+function notifyReady() {
+  readyListeners.forEach((fn) => fn());
+}
+
+// Must run inside the tap handler: play() outside a gesture is refused on iOS.
+function primeAlarm() {
+  if (!alarm || primed || priming) return;
+  priming = true;
+  alarm.muted = true;
+  alarm
+    .play()
+    .then(() => {
+      if (!audibleOnPrime) {
+        alarm.pause();
+        alarm.currentTime = 0;
+      }
+      primed = true;
+    })
+    .catch(() => {
+      // not a gesture the browser accepts; the next tap tries again
+      if (audibleOnPrime) playTones("telemetry");
+    })
+    .finally(() => {
+      alarm.muted = false;
+      priming = false;
+      audibleOnPrime = false;
+      notifyReady();
+    });
+}
+
 export function unlockAudio() {
   if (!ctx) {
     const AC = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!AC) return;
     ctx = new AC();
+    ctx.addEventListener("statechange", notifyReady);
   }
-  if (ctx.state === "suspended") void ctx.resume();
+  // Safari 17+: play through the silent switch, like a media app.
+  try {
+    const session = (navigator as unknown as { audioSession?: { type: string } }).audioSession;
+    if (session) session.type = "playback";
+  } catch {
+    // older Safari or another browser: nothing to set
+  }
+  if (ctx.state === "suspended") void ctx.resume().then(notifyReady, () => {});
+  primeAlarm();
+}
+
+/** From a tap: unlock audio and play the paging sound right away (the alarm banner's sound button). */
+export function playAlarmNow() {
+  if (muted) return;
+  if (alarm && !primed) {
+    audibleOnPrime = true;
+    unlockAudio();
+    alarm.muted = false;
+    return;
+  }
+  unlockAudio();
+  if (!alarm) return playTones("telemetry");
+  alarm.currentTime = 0;
+  alarm.play().catch(() => playTones("telemetry"));
 }
 
 function tone(freq: number, start: number, dur: number, type: OscillatorType, vol: number) {

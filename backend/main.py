@@ -221,7 +221,7 @@ class ApproveRequest(BaseModel):
     scenario_id: str             = Field(..., example="scenario_c")
     scenario_data: dict[str, Any]
     expected_sap_version: int
-    approved_by: str             = Field(..., example="Production Supervisor — Budi Santoso")
+    approved_by: str             = Field(..., min_length=3, example="Production Supervisor — Budi Santoso")
 
 
 class ApproveResponse(BaseModel):
@@ -1901,6 +1901,40 @@ async def _index_maintenance_cases() -> None:
         print(f"[maintenance] cases in RAG index: {counts}")
     except Exception as exc:  # the cockpit must start even if indexing fails
         print(f"[maintenance] case indexing skipped: {exc}", file=sys.stderr)
+
+
+_autoseed_task: Optional[asyncio.Task] = None
+
+
+def _demo_docs_indexed() -> bool:
+    from rag.samples import SEED_ORDER
+    rows = get_store().query("SELECT filename FROM documents WHERE status = 'indexed'")
+    return any(r["filename"] in SEED_ORDER for r in rows)
+
+
+async def _seed_demo_documents() -> None:
+    try:
+        if await run_in_threadpool(_demo_docs_indexed):
+            return
+        from rag.samples import seed
+        results = await run_in_threadpool(seed)
+        ok = sum(1 for r in results if r.get("status") == "indexed" or r.get("duplicate"))
+        print(f"[rag] demo documents seeded at startup: {ok}/{len(results)} indexed")
+        for r in results:
+            if r.get("error"):
+                print(f"[rag] demo seed {r.get('file')}: {r['error']}", file=sys.stderr)
+    except Exception as exc:  # the cockpit must start even if seeding fails
+        print(f"[rag] demo document seeding skipped: {exc}", file=sys.stderr)
+
+
+@app.on_event("startup")
+async def _autoseed_demo_documents() -> None:
+    """Index the demo plant documents (SOPs, manuals) if a restart left the store without them.
+    Set RAG_AUTOSEED_DEMO=0 for a real plant that brings its own documents."""
+    global _autoseed_task
+    if os.getenv("RAG_AUTOSEED_DEMO", "1").strip().lower() in ("0", "false", "no", "off"):
+        return
+    _autoseed_task = asyncio.create_task(_seed_demo_documents())
 
 
 class MaintenanceEntryRequest(BaseModel):
