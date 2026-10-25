@@ -1783,6 +1783,65 @@ async def post_skills_test_run(body: SkillTestRunRequest) -> SkillTestRunRespons
     )
 
 
+_SKILL_LEDGER_TYPES = ("SKILL_APPROVED", "SKILL_TEST_RUN", "SKILL_FIRED")
+
+
+@app.get("/api/skills", summary="Skill library: every skill, its trigger, status and ledger history")
+async def get_skills() -> dict[str, Any]:
+    history: dict[str, list[dict[str, Any]]] = {}
+    for e in _ledger.get_all():
+        if e.get("action_type") in _SKILL_LEDGER_TYPES and e.get("skill_id"):
+            history.setdefault(e["skill_id"], []).append(
+                {k: e.get(k) for k in ("id", "action_type", "timestamp", "machine_id", "passed",
+                                       "scenario_id", "approved_by", "skill_version", "trigger", "sha256_hash")})
+    skills = []
+    for skill_id, entry in sorted(_skills.skills.items()):
+        spec = entry.get("spec")
+        events = history.get(skill_id, [])
+        skills.append({
+            "skill_id": skill_id,
+            "name": entry.get("name") or skill_id,
+            "version": (spec or {}).get("version"),
+            "owner": (spec or {}).get("owner"),
+            "status": (spec or {}).get("status", "active" if skill_id == DEFAULT_SKILL_ID else "v1"),
+            "is_default": skill_id == DEFAULT_SKILL_ID,
+            "has_know_how": spec is not None,
+            "spec_errors": entry.get("spec_errors", []),
+            "trigger": (spec or {}).get("trigger"),
+            "allowed_actions": (spec or {}).get("allowed_actions", []),
+            "root_cause_count": len((spec or {}).get("root_causes", [])),
+            "fired_count": sum(1 for e in events if e["action_type"] == "SKILL_FIRED"),
+            "history": events[-5:][::-1],
+        })
+    used_by: dict[str, list[str]] = {}
+    for sk in skills:
+        for a in sk["allowed_actions"]:
+            used_by.setdefault(a, []).append(sk["skill_id"])
+    tools = [{"id": tid, "label": label, "kind": "tool", "autonomous": False, "used_by": used_by.get(tid, [])}
+             for tid, label in _SKILL_TOOLS.items()]
+    seen: set[str] = set()
+    for mid in _plc_limits.raw.get("machines", {}):
+        for aid, a in ((_plc_limits.machine(mid) or {}).get("actions") or {}).items():
+            if aid not in seen:
+                seen.add(aid)
+                tools.append({"id": aid, "label": a.get("label") or aid, "kind": "plc_action",
+                              "autonomous": bool(a.get("autonomous")), "used_by": used_by.get(aid, [])})
+    return {"skills": skills, "tools": tools,
+            "scenarios": [{"id": sc.id, "label": sc.label, "machine_id": sc.machine_id, "alarm_code": sc.alarm_code}
+                          for sc in PLC_SCENARIOS.values() if sc.machine_id]}
+
+
+@app.get("/api/skills/{skill_id}", summary="One skill: its skill.json and SKILL.md")
+async def get_skill(skill_id: str) -> dict[str, Any]:
+    if not _valid_skill_id(skill_id) or skill_id not in _skills.skills:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown skill: {skill_id}")
+    d = _ROOT / "skills" / skill_id
+    md = (d / "SKILL.md").read_text(encoding="utf-8") if (d / "SKILL.md").exists() else ""
+    return {"skill_id": skill_id, "name": _skills.skills[skill_id].get("name"),
+            "spec": _load_spec_file(skill_id), "spec_errors": _skills.skills[skill_id].get("spec_errors", []),
+            "skill_md": md}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 5: Ledger rollback reference
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2542,6 +2601,45 @@ def _plc_proposal(row: dict[str, Any], *, alarm_code: Optional[str] = None,
     }
 
 
+def _skill_guidance(machine_id: str, *, metric: Optional[str] = None, alarm_code: Optional[str] = None,
+                    prediction: bool = False, evidence_ids: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
+    """
+    What the copilot card shows for a reading: the routed skill and, when it has a
+    skill.json, its checks, root causes and mechanic tasks. Root causes whose sources
+    were retrieved for this alarm (evidence_ids) move to the top and are marked.
+    """
+    if prediction:
+        skill_id = _skills.match(machine_id, metric, alarm_code, prediction=True) or _skills.route(machine_id, metric, alarm_code)
+    else:
+        skill_id = _skills.route(machine_id, metric, alarm_code)
+    if not skill_id:
+        return None
+    entry = _skills.skills.get(skill_id, {})
+    spec = _skills.get_spec(skill_id)
+    seen = set(evidence_ids or [])
+    causes = [{**c, "evidence_found": bool(seen & set(c.get("sources", [])))}
+              for c in (spec or {}).get("root_causes", [])]
+    causes.sort(key=lambda c: not c["evidence_found"])  # stable: the expert's order otherwise
+    return {
+        "skill_id": skill_id,
+        "name": entry.get("name") or skill_id,
+        "version": (spec or {}).get("version"),
+        "owner": (spec or {}).get("owner"),
+        "has_know_how": spec is not None,
+        "confirm": (spec or {}).get("confirm", []),
+        "root_causes": causes,
+        "tasks": (spec or {}).get("tasks", []),
+        "allowed_actions": (spec or {}).get("allowed_actions", []),
+    }
+
+
+def _skill_allows(guidance: Optional[dict[str, Any]], proposal: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """A skill with a skill.json only proposes the PLC actions it allows; v1 skills keep the limits-file default."""
+    if not proposal or not guidance or not guidance["has_know_how"]:
+        return proposal
+    return proposal if proposal["action_id"] in guidance["allowed_actions"] else None
+
+
 def _alarm_references(code: str, text: str) -> dict[str, Any]:
     """Past fixes for an alarm code (exact code match first) and the plant documents that cover it."""
     res = _agent.search(f"{code} {text}", top_k=8)
@@ -2687,13 +2785,20 @@ async def _plc_tick(scenario: Optional[str], peak: dict[tuple[str, str], str], a
             except Exception as exc:  # the feed must keep scanning without references
                 print(f"[plc] alarm lookup failed: {exc}", file=sys.stderr)
                 refs = {"past_fixes": [], "documents": []}
-            proposal = _plc_proposal(m, alarm_code=code)
+            guidance = _skill_guidance(mid, alarm_code=code,
+                                       evidence_ids=[f["case_id"] for f in refs["past_fixes"]])
+            proposal = _skill_allows(guidance, _plc_proposal(m, alarm_code=code))
             alarm_frame = {
                 "event": "plc_alarm", "machine_id": mid, "code": code, "text": alarm["text"],
-                **refs, "proposed_action": proposal, "timestamp": datetime.now(timezone.utc).isoformat(),
+                **refs, "proposed_action": proposal, "skill": guidance,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             _plc_latest["alarms"][mid] = alarm_frame
             await _plc_broadcast(alarm_frame)
+            if guidance and guidance["has_know_how"]:
+                _ledger.append({"action_type": "SKILL_FIRED", "skill_id": guidance["skill_id"],
+                                "machine_id": mid, "trigger": f"alarm {code}",
+                                "proposed_action": proposal["action_id"] if proposal else None})
             if m["run"]:  # a stopped machine needs no load taken off it
                 await _plc_autonomous(proposal, f"alarm {code}")
         elif not code:
@@ -2711,10 +2816,11 @@ async def _plc_tick(scenario: Optional[str], peak: dict[tuple[str, str], str], a
                     if pred is not None:
                         first = (mid, metric) not in predicted_at
                         predicted_at[(mid, metric)] = now
-                        proposal = _plc_proposal(m, metric=metric)
+                        guidance = _skill_guidance(mid, metric=metric, prediction=True)
+                        proposal = _skill_allows(guidance, _plc_proposal(m, metric=metric))
                         pred_frame = {"event": "plc_prediction", **pred, "label": tag_limits[metric].get("label"),
                                       "unit": tag_limits[metric].get("unit"), "proposed_action": proposal,
-                                      "timestamp": datetime.now(timezone.utc).isoformat()}
+                                      "skill": guidance, "timestamp": datetime.now(timezone.utc).isoformat()}
                         _plc_latest["predictions"][(mid, metric)] = (now, pred_frame)
                         await _plc_broadcast(pred_frame)
                         if first:

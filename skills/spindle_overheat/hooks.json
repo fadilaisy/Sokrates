@@ -1,0 +1,25 @@
+[
+  {
+    "id": "HOOK-001",
+    "name": "Motor Temperature High Alert",
+    "name_id": "Peringatan Suhu Motor Tinggi",
+    "trigger_type": "telemetry",
+    "condition": "motor_temp_celsius > 85",
+    "condition_description_id": "Suhu motor melebihi 85°C (peringatan dini sebelum interlock Tier 1 di 95°C)",
+    "skill_action": "WARN_AND_PREPARE_COOLDOWN",
+    "skill_action_steps": [
+      "Log telemetry event to audit ledger",
+      "Notify maintenance_technician via dashboard",
+      "Increase coolant flow if controllable",
+      "Monitor every 60 seconds",
+      "If temp exceeds 95°C, trigger SAFE-001 immediately"
+    ],
+    "auto_resolve_if": "motor_temp_celsius < 80 FOR 5_CONSECUTIVE_READINGS",
+    "notify_roles": [
+      "maintenance_technician",
+      "production_supervisor"
+    ],
+    "severity": "WARNING",
+    "debounce_seconds": 30
+  }
+]

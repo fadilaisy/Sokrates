@@ -42,7 +42,9 @@ def test_shipped_skills_route_by_metric_and_alarm():
     r = _index(SKILLS)
     assert r.route("CNC-02", "coolant_pressure_bar") == "coolant_pressure"
     assert r.route("CNC-04", None, "ALM-441") == "coolant_pressure"
-    assert r.route("CNC-04", "motor_temp_celsius") == DEFAULT_SKILL_ID
+    assert r.route("CNC-04", "motor_temp_celsius") == "spindle_overheat"
+    assert r.route("CNC-04", None, "Alarm 108") == "spindle_overheat"
+    assert r.route("CNC-04", "spindle_vibration_mm_per_s") == DEFAULT_SKILL_ID
     assert r.route(None, "coolant_pressure_bar", prediction=True) == "coolant_pressure"
 
 
@@ -107,10 +109,11 @@ def test_routed_skill_can_add_a_stricter_rule(registry, monkeypatch):
     assert m._classify_telemetry("coolant_pressure_bar", 2.7, "CNC-01") == ("OK", None)  # out of scope
 
 
-def test_shipped_coolant_skill_keeps_every_default_tier1_rule():
+@pytest.mark.parametrize("skill_id", ["coolant_pressure", "spindle_overheat"])
+def test_shipped_skills_keep_every_default_tier1_rule(skill_id):
     r = _index(SKILLS)
     base = {il.id: il.condition for il in r.load_interlocks(DEFAULT_SKILL_ID) if il.tier == 1}
-    own = {il.id: il.condition for il in r.load_interlocks("coolant_pressure")}
+    own = {il.id: il.condition for il in r.load_interlocks(skill_id)}
     assert base.items() <= own.items()
-    spec = r.get_spec("coolant_pressure")
+    spec = r.get_spec(skill_id)
     assert spec and all(c["sources"] for c in spec["root_causes"])
