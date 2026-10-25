@@ -65,7 +65,8 @@ from erp_adapter.sap_client import DriftError, SAPClient
 import copy
 from erp_adapter.audit_ledger import AuditLedger
 from solver.schedule_solver import ScheduleSolver, TIER1_BLOCKED_STATUSES
-from skills.loader import DEFAULT_SKILL_ID, SafetyInterlock, SkillRegistry, parse_skill_spec, trigger_score
+from skills.loader import (DEFAULT_SKILL_ID, SafetyInterlock, SkillRegistry, normalize_alarm_code, parse_skill_spec,
+                           trigger_score)
 from fastapi.concurrency import run_in_threadpool
 from rag.api import router as rag_router
 from rag.retrieve import Retriever
@@ -1840,6 +1841,212 @@ async def get_skill(skill_id: str) -> dict[str, Any]:
     return {"skill_id": skill_id, "name": _skills.skills[skill_id].get("name"),
             "spec": _load_spec_file(skill_id), "spec_errors": _skills.skills[skill_id].get("spec_errors", []),
             "skill_md": md}
+
+
+# ── AI drafting: the expert's story + resolved cases → a skill.json draft ────
+
+_CATEGORY_METRICS = {
+    "COOLANT": ["coolant_pressure_bar"],
+    "SPINDLE": [],  # temperature or vibration, decided from the case text below
+}
+_METRIC_WORDS = {
+    "motor_temp_celsius": ("overheat", "temperat", "suhu", "panas", "°c", " c,"),
+    "spindle_vibration_mm_per_s": ("vibrat", "getar", "bearing", "runout"),
+    "coolant_pressure_bar": ("coolant", "pendingin"),
+}
+
+
+_METRIC_SKILL_NAMES = {
+    "coolant_pressure_bar": "Tekanan coolant turun",
+    "motor_temp_celsius": "Motor spindel overheat",
+    "spindle_vibration_mm_per_s": "Vibrasi spindel tinggi",
+}
+
+
+class SkillComposeRequest(BaseModel):
+    story: str = Field(default="", max_length=4000, description="The expert's own words, Bahasa or English")
+    case_ids: list[str] = Field(min_length=1, max_length=6, description="Resolved maintenance cases to learn from")
+    name: str | None = Field(default=None, max_length=120)
+    machines: list[str] = Field(default_factory=list, description="Empty = every machine")
+    owner: str | None = Field(default=None, max_length=120)
+
+
+class SkillComposeResponse(BaseModel):
+    skill_id: str
+    spec: dict[str, Any]
+    # Section → how it was made: {"by": "ai" | "rules", "from": [case ids]}
+    provenance: dict[str, dict[str, Any]]
+    model_used: str | None
+    warnings: list[str]
+
+
+def _slug(text: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+    return (s or "skill_baru")[:40]
+
+
+def _case_metrics(cases: list[dict[str, Any]]) -> list[str]:
+    found: list[str] = []
+    for c in cases:
+        text = " ".join(filter(None, [c.get("symptom"), c.get("root_cause"), c.get("category")])).lower()
+        for metric in _CATEGORY_METRICS.get(str(c.get("category") or "").upper(), []):
+            if metric not in found:
+                found.append(metric)
+        for metric, words in _METRIC_WORDS.items():
+            if metric not in found and any(w in text for w in words):
+                found.append(metric)
+    return found
+
+
+def _compose_rules(body: SkillComposeRequest, cases: list[dict[str, Any]]) -> dict[str, Any]:
+    """The draft built without a model: every field comes straight from the cases."""
+    codes: list[str] = []
+    for c in cases:
+        codes += [e for e in c.get("error_codes") or [] if e not in codes]
+    metrics = _case_metrics(cases)
+    tasks: list[str] = []
+    for c in cases[:1]:
+        tasks += list(c.get("fix_steps") or [])
+    for c in cases:
+        if c.get("safety_notes") and c["safety_notes"] not in tasks:
+            tasks.append(c["safety_notes"])
+    confirm = [{"kind": "auto", "text": f"Pastikan {m} melewati batas pada beban normal, bukan lonjakan sesaat."}
+               for m in metrics[:1]]
+    confirm.append({"kind": "operator", "text": "Apakah gejalanya sama dengan kasus sebelumnya: "
+                    + "; ".join(filter(None, (c.get("symptom") for c in cases[:2]))) + "?"})
+    first = cases[0]
+    return {
+        "schema": "skillforge_skill_v2",
+        "name": body.name or (_METRIC_SKILL_NAMES.get(metrics[0]) if metrics else None)
+                or (f"Alarm {codes[0]}" if codes else str(first.get("category") or "Gangguan").title()),
+        "version": "0.1.0",
+        "status": "active",  # takes effect only once approved after a passed test run
+        "owner": body.owner,
+        "trigger": {"machines": list(body.machines), "metrics": metrics, "alarm_codes": codes,
+                    "predictions": bool(metrics)},
+        "confirm": confirm,
+        "root_causes": [{"cause": c.get("root_cause") or c.get("symptom") or c["id"],
+                         "evidence": c.get("symptom") or "", "sources": [c["id"]]} for c in cases],
+        "tasks": tasks,
+        "allowed_actions": [],
+    }
+
+
+def _compose_actions(spec: dict[str, Any]) -> list[str]:
+    """Tools every skill gets, plus the limits-file PLC actions that answer the same alarms or signals."""
+    trig = spec["trigger"]
+    codes = {normalize_alarm_code(c) for c in trig["alarm_codes"]}
+    actions = ["send_task", "book_maintenance", "solver_reschedule"]
+    for mid in _plc_limits.raw.get("machines", {}):
+        for aid, a in ((_plc_limits.machine(mid) or {}).get("actions") or {}).items():
+            hits = codes & {normalize_alarm_code(c) for c in a.get("alarm_codes", [])} or (
+                set(trig["metrics"]) & set(a.get("metrics", [])))
+            if hits and aid not in actions:
+                actions.append(aid)
+    return actions
+
+
+async def _compose_llm(body: SkillComposeRequest, cases: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Ask the model for name, checks, causes and tasks in Bahasa; None when it fails or cites outside the cases."""
+    case_ids = [c["id"] for c in cases]
+    case_lines = "\n".join(
+        f"- {c['id']} ({c.get('machine_id')}, kode {', '.join(c.get('error_codes') or []) or '-'}): "
+        f"gejala: {c.get('symptom')}; penyebab: {c.get('root_cause')}; "
+        f"perbaikan: {' / '.join(c.get('fix_steps') or [])}; keselamatan: {c.get('safety_notes') or '-'}"
+        for c in cases
+    )
+    prompt = (
+        "Anda membantu seorang ahli perawatan CNC mengubah pengalamannya menjadi skill untuk agent pabrik.\n"
+        f"Cerita ahli:\n\"\"\"{body.story.strip() or '(tidak ada)'}\"\"\"\n\n"
+        f"Kasus perawatan yang sudah selesai (satu-satunya sumber yang boleh dikutip):\n{case_lines}\n\n"
+        "Balas HANYA JSON valid, dalam Bahasa Indonesia, dengan bentuk:\n"
+        '{"name": "nama skill singkat", '
+        '"confirm": [{"kind": "auto" | "operator", "text": "..."}], '
+        '"root_causes": [{"cause": "...", "evidence": "...", "sources": ["CASE-...."]}], '
+        '"tasks": ["langkah untuk mekanik", "..."]}\n'
+        "Aturan: setiap akar penyebab wajib punya sources dari daftar kasus di atas saja; urutkan dari yang paling "
+        "mungkin menurut cerita ahli; tugas dimulai dengan lockout-tagout bila membuka mesin; jangan pernah "
+        "menyarankan bypass interlock atau switch keselamatan; maksimal 4 penyebab dan 6 tugas."
+    )
+    try:
+        text = (await _call_gemini(prompt, max_tokens=1500)).strip()
+    except Exception:
+        return None
+    fenced = re.search(r"\{[\s\S]*\}", text)
+    if not fenced:
+        return None
+    try:
+        data = json.loads(fenced.group(0))
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    allowed = set(case_ids)
+    causes = []
+    for c in data.get("root_causes") or []:
+        if not isinstance(c, dict) or not isinstance(c.get("cause"), str):
+            continue
+        srcs = [s for s in c.get("sources") or [] if isinstance(s, str)]
+        if not srcs or not set(srcs) <= allowed:
+            return None  # a cause citing anything outside the picked cases rejects the whole draft
+        causes.append({"cause": c["cause"].strip(), "evidence": str(c.get("evidence") or "").strip(), "sources": srcs})
+    tasks = [t.strip() for t in data.get("tasks") or [] if isinstance(t, str) and t.strip()]
+    if any(re.search(r"\bbypass\b", t, re.I) and not re.search(r"\bjangan\b|\bdo not\b|\bnever\b", t, re.I)
+           for t in tasks):
+        return None
+    confirm = [{"kind": c.get("kind") if c.get("kind") in ("auto", "operator") else "operator",
+                "text": str(c.get("text")).strip()}
+               for c in data.get("confirm") or [] if isinstance(c, dict) and c.get("text")]
+    if not causes or not tasks:
+        return None
+    name = data.get("name") if isinstance(data.get("name"), str) and data["name"].strip() else None
+    return {"name": name, "confirm": confirm[:4], "root_causes": causes[:4], "tasks": tasks[:6]}
+
+
+@app.post(
+    "/api/skills/compose",
+    response_model=SkillComposeResponse,
+    summary="Draft a skill.json from the expert's story and resolved cases (AI-assisted, cited)",
+)
+async def post_skills_compose(body: SkillComposeRequest) -> SkillComposeResponse:
+    """
+    Turn an expert's own words plus the resolved cases they pick into a draft
+    skill.json. Trigger, alarm codes and PLC actions come from the cases and the
+    machine limits file; the model only writes the name, checks, causes and tasks,
+    and its draft is rejected (rules-only draft instead) if any cause cites a case
+    outside the picked ones or a task suggests a bypass. The draft is not saved: the
+    expert edits it, runs a test run, then approves it.
+    """
+    cases, missing = [], []
+    for cid in dict.fromkeys(c.strip().upper() for c in body.case_ids):
+        e = _maint_ledger.get_entry(cid)
+        (cases if e and e.get("entry_type") == "CASE" else missing).append(e or cid)
+    if missing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"Kasus tidak ditemukan: {', '.join(map(str, missing))}")
+    spec = _compose_rules(body, cases)
+    ids = [c["id"] for c in cases]
+    provenance = {k: {"by": "rules", "from": ids} for k in ("name", "trigger", "confirm", "root_causes", "tasks")}
+    provenance["allowed_actions"] = {"by": "rules", "from": ["plc_adapter/machine_limits.json"]}
+    model_used, warnings = None, []
+    ai = await _compose_llm(body, cases) if (_gemini_client is not None or aicore.configured()) else None
+    if ai:
+        model_used = _active_model()
+        for key in ("confirm", "root_causes", "tasks"):
+            spec[key] = ai[key] or spec[key]
+            provenance[key] = {"by": "ai", "from": ids}
+        if ai["name"] and not body.name:
+            spec["name"] = ai["name"]
+            provenance["name"] = {"by": "ai", "from": ids}
+    else:
+        warnings.append("Draf disusun langsung dari kasus (AI tidak tersedia atau jawabannya ditolak).")
+    if body.name:
+        provenance["name"] = {"by": "expert", "from": []}
+    spec["allowed_actions"] = _compose_actions(spec)
+    if not spec["trigger"]["metrics"] and not spec["trigger"]["alarm_codes"]:
+        warnings.append("Kasus tidak punya kode alarm atau sinyal yang dikenali; isi pemicu secara manual.")
+    return SkillComposeResponse(skill_id=_slug(spec["name"]), spec=spec, provenance=provenance,
+                                model_used=model_used, warnings=warnings)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
