@@ -1497,6 +1497,8 @@ async def post_skills_approve(body: SkillApproveRequest) -> SkillApproveResponse
 
     if body.spec is not None:
         spec, spec_errors = parse_skill_spec(body.spec)
+        if spec and not body.skill_md.strip():
+            body.skill_md = _render_skill_md(body.skill_id, spec)
         spec_errors += _spec_action_errors(spec) if spec else []
         if spec_errors:
             raise HTTPException(
@@ -1840,7 +1842,33 @@ async def get_skill(skill_id: str) -> dict[str, Any]:
     md = (d / "SKILL.md").read_text(encoding="utf-8") if (d / "SKILL.md").exists() else ""
     return {"skill_id": skill_id, "name": _skills.skills[skill_id].get("name"),
             "spec": _load_spec_file(skill_id), "spec_errors": _skills.skills[skill_id].get("spec_errors", []),
-            "skill_md": md}
+            "skill_md": md,
+            "hooks": [h.__dict__ for h in _skills.load_hooks(skill_id)],
+            "interlocks": json.loads((d / "rules" / "safety_interlocks.json").read_text(encoding="utf-8"))
+            if (d / "rules" / "safety_interlocks.json").exists() else [],
+            "sla_penalties": _skills.load_sla_penalties(skill_id)}
+
+
+def _render_skill_md(skill_id: str, spec: dict[str, Any]) -> str:
+    """A readable SKILL.md for a skill taught in the Studio; skill.json stays the source of truth."""
+    lines = [f"# SKILL.md — {spec.get('name') or skill_id}", "<!-- skill_metadata",
+             f"name: {spec.get('name') or skill_id}", f"version: {spec.get('version') or '1.0.0'}",
+             "machine_type: CNC_milling_center", "references:", "  - skill.json",
+             "  - rules/safety_interlocks.json", "language: bilingual (EN + ID)", "-->", ""]
+    trig = spec["trigger"]
+    lines += ["## Pemicu / Trigger",
+              f"- Mesin: {', '.join(trig['machines']) or 'semua mesin'}",
+              f"- Sinyal: {', '.join(trig['metrics']) or '-'}",
+              f"- Kode alarm: {', '.join(trig['alarm_codes']) or '-'}",
+              f"- Prediksi tren: {'ya' if trig['predictions'] else 'tidak'}", ""]
+    lines += ["## Pastikan masalah"] + [f"- ({c.get('kind')}) {c.get('text')}" for c in spec.get("confirm", [])] + [""]
+    lines += ["## Akar penyebab"] + [f"- {c['cause']} — {c.get('evidence') or ''} [{', '.join(c['sources'])}]"
+                                     for c in spec.get("root_causes", [])] + [""]
+    lines += ["## Tugas mekanik"] + [f"{i}. {t}" for i, t in enumerate(spec.get("tasks", []), 1)] + [""]
+    lines += ["## Aksi yang diizinkan"] + [f"- {a}" for a in spec.get("allowed_actions", [])]
+    lines += ["", "Perubahan ke SAP selalu menunggu persetujuan supervisor. Aturan Tier 1 skill dasar "
+              f"{DEFAULT_SKILL_ID} selalu berlaku."]
+    return "\n".join(lines) + "\n"
 
 
 # ── AI drafting: the expert's story + resolved cases → a skill.json draft ────
@@ -1888,13 +1916,17 @@ def _slug(text: str) -> str:
 def _case_metrics(cases: list[dict[str, Any]]) -> list[str]:
     found: list[str] = []
     for c in cases:
-        text = " ".join(filter(None, [c.get("symptom"), c.get("root_cause"), c.get("category")])).lower()
         for metric in _CATEGORY_METRICS.get(str(c.get("category") or "").upper(), []):
             if metric not in found:
                 found.append(metric)
-        for metric, words in _METRIC_WORDS.items():
-            if metric not in found and any(w in text for w in words):
-                found.append(metric)
+        # The symptom names the signal; a root cause like "coolant ingress" on a
+        # vibration case must not add the coolant signal, so it is only a fallback.
+        for field in ("symptom", "root_cause"):
+            text = str(c.get(field) or "").lower()
+            hits = [m for m, words in _METRIC_WORDS.items() if any(w in text for w in words)]
+            if hits:
+                found += [m for m in hits if m not in found]
+                break
     return found
 
 

@@ -78,3 +78,9 @@ def test_unknown_case_is_404():
     r = client.post("/api/skills/compose", json={"case_ids": ["CASE-9999"]})
     assert r.status_code == 404 and "CASE-9999" in r.text
     assert client.post("/api/skills/compose", json={"case_ids": []}).status_code == 422
+
+
+def test_vibration_cases_do_not_pick_up_coolant_from_the_root_cause():
+    # Both cases blame coolant ingress in the root cause; the symptom is vibration.
+    cases = [m._maint_ledger.get_entry(c) for c in ("CASE-0026", "CASE-0001")]
+    assert m._case_metrics(cases) == ["spindle_vibration_mm_per_s"]

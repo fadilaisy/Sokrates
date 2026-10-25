@@ -126,6 +126,19 @@ def test_approve_needs_a_passed_test_run_of_the_same_spec(isolated_skills):
     assert approved["spec_sha256"] == m._spec_hash(spec)
 
 
+def test_approve_renders_skill_md_when_left_empty(isolated_skills):
+    spec = {**_shipped_spec(), "name": "Coolant render"}
+    assert _run(skill_id="coolant_render", spec=spec).json()["passed"] is True
+    base = client.get("/api/skills/cnc_milling").json()
+    r = client.post("/api/skills/approve", json={
+        "skill_id": "coolant_render", "skill_md": "", "sla_penalties": base["sla_penalties"],
+        "hooks": base["hooks"], "interlocks": base["interlocks"], "approved_by": "Kepala perawatan", "spec": spec})
+    assert r.status_code == 200, r.text
+    md = (isolated_skills / "coolant_render" / "SKILL.md").read_text(encoding="utf-8")
+    assert md.startswith("# SKILL.md — Coolant render") and "CASE-0009" in md
+    assert m._skills.skills["coolant_render"]["name"] == "Coolant render"
+
+
 def test_approve_rejects_an_invalid_spec(isolated_skills):
     r = _approve("coolant_bad", {"trigger": {"metrics": "x"}})
     assert r.status_code == 422 and r.json()["detail"]["error"] == "InvalidSkillSpec"
