@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
+import { Volume2 } from "lucide-react";
 import { cn } from "../lib/utils";
 import type { PlcActionResult } from "../lib/api";
 import { fmt1, shortHash, telemetryOf, windowLabel } from "../lib/shift";
+import { audioReady, onAudioReady, playAlarmNow } from "../lib/sound";
 import { DEMO_DISRUPTION, useCockpit } from "./store";
 import { Btn, Card, Mono, StatusBadge } from "./ui";
 
@@ -260,7 +262,8 @@ function PlcPredictionCard() {
 
 /** The alarm a machine just raised, with how it was fixed last time (from the maintenance ledger). */
 function PlcAlarmCard() {
-  const { plcAlarm } = useCockpit();
+  const { plcAlarm, muted } = useCockpit();
+  const canSound = useSyncExternalStore(onAudioReady, audioReady);
   if (!plcAlarm) return null;
   const fix = plcAlarm.past_fixes[0];
   const doc = plcAlarm.documents[0];
@@ -269,6 +272,12 @@ function PlcAlarmCard() {
       <p className="font-semibold">
         <Mono>{plcAlarm.machine_id} · {plcAlarm.code}</Mono> {plcAlarm.text}
       </p>
+      {!canSound && !muted && (
+        <Btn variant="secondary" className="self-start px-4 text-[14px]" onClick={playAlarmNow}>
+          <Volume2 className="size-5" aria-hidden />
+          Ketuk untuk menyalakan suara alarm
+        </Btn>
+      )}
       {fix ? (
         <>
           <p className="text-muted-ink">

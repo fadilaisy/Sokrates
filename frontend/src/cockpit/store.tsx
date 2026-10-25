@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { api, ApiError, formatIDR, WS_PLC, WS_TELEMETRY } from "../lib/api";
 import type { ApproveReceipt, DisruptResponse, DriftDetail, LedgerEntry, PlcActionResult, PlcAlarmFrame, PlcInfo, PlcMachine, PlcPredictionFrame, PlcProposedAction, RagSource, SapState, Scenario, ShiftMetrics, TelemetryFrame } from "../lib/api";
 import { normalizeStatus, windowLabel } from "../lib/shift";
-import { isMuted, playSound, setMuted, unlockAudio } from "../lib/sound";
+import { audioReady, isMuted, onAudioReady, playSound, setMuted, unlockAudio } from "../lib/sound";
 import type { MachineStatus } from "../lib/shift";
 import type { SkillStudioFormData, SkillStudioDraft, SkillStudioLintResult } from "../lib/api";
 
@@ -273,12 +273,19 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    const unlock = () => unlockAudio();
-    window.addEventListener("pointerdown", unlock, { once: true });
-    window.addEventListener("keydown", unlock, { once: true });
+    // iOS Safari only accepts touchend/click as the gesture that allows audio,
+    // so listen to all of them until both the beeps and the paging file are unlocked.
+    const events = ["pointerdown", "touchend", "click", "keydown"] as const;
+    const unlock = () => {
+      unlockAudio();
+      if (audioReady()) stop();
+    };
+    const stop = () => events.forEach((ev) => window.removeEventListener(ev, unlock));
+    events.forEach((ev) => window.addEventListener(ev, unlock));
+    const unsubscribe = onAudioReady(() => audioReady() && stop());
     return () => {
-      window.removeEventListener("pointerdown", unlock);
-      window.removeEventListener("keydown", unlock);
+      stop();
+      unsubscribe();
     };
   }, []);
 
