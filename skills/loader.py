@@ -45,6 +45,28 @@ def normalize_alarm_code(code: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(code).upper())
 
 
+def trigger_score(
+    spec: dict[str, Any],
+    machine_id: str | None = None,
+    metric: str | None = None,
+    alarm_code: str | None = None,
+    prediction: bool = False,
+) -> int:
+    """How well a validated spec's trigger fits a reading: 0 = no match, alarm code 4, metric 2."""
+    trigger = spec["trigger"]
+    if trigger["machines"] and (machine_id is None or machine_id not in trigger["machines"]):
+        return 0
+    if prediction and not trigger["predictions"]:
+        return 0
+    score = 0
+    code = normalize_alarm_code(alarm_code) if alarm_code else ""
+    if code and code in {normalize_alarm_code(c) for c in trigger["alarm_codes"]}:
+        score += 4
+    if metric and metric in trigger["metrics"]:
+        score += 2
+    return score
+
+
 def parse_skill_spec(data: Any) -> tuple[dict[str, Any] | None, list[str]]:
     """
     Validate a skill.json document (schema ``skillforge_skill_v2``).
@@ -262,25 +284,15 @@ class SkillRegistry:
         plant-wide one; remaining ties go to the lowest skill id. A prediction
         only matches skills with ``trigger.predictions``. None when nothing fits.
         """
-        code = normalize_alarm_code(alarm_code) if alarm_code else ""
         best: tuple[int, int, str] | None = None
         for skill_id, entry in self._registry.items():
             spec = entry.get("spec")
             if not spec or spec["status"] != "active":
                 continue
-            trigger = spec["trigger"]
-            if trigger["machines"] and (machine_id is None or machine_id not in trigger["machines"]):
-                continue
-            if prediction and not trigger["predictions"]:
-                continue
-            score = 0
-            if code and code in {normalize_alarm_code(c) for c in trigger["alarm_codes"]}:
-                score += 4
-            if metric and metric in trigger["metrics"]:
-                score += 2
+            score = trigger_score(spec, machine_id, metric, alarm_code, prediction)
             if score == 0:
                 continue
-            key = (score, 1 if trigger["machines"] else 0, skill_id)
+            key = (score, 1 if spec["trigger"]["machines"] else 0, skill_id)
             if best is None or key[:2] > best[:2] or (key[:2] == best[:2] and skill_id < best[2]):
                 best = key
         return best[2] if best else None

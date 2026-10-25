@@ -65,7 +65,7 @@ from erp_adapter.sap_client import DriftError, SAPClient
 import copy
 from erp_adapter.audit_ledger import AuditLedger
 from solver.schedule_solver import ScheduleSolver, TIER1_BLOCKED_STATUSES
-from skills.loader import DEFAULT_SKILL_ID, SafetyInterlock, SkillRegistry
+from skills.loader import DEFAULT_SKILL_ID, SafetyInterlock, SkillRegistry, parse_skill_spec, trigger_score
 from fastapi.concurrency import run_in_threadpool
 from rag.api import router as rag_router
 from rag.retrieve import Retriever
@@ -80,7 +80,7 @@ from plc_adapter.driver import PlcWriteError
 from plc_adapter.limits import MachineLimits, already_applied, pre_action_checks
 from plc_adapter.opcua_driver import OpcUaDriver
 from plc_adapter.predictor import TrendPredictor
-from plc_adapter.simulator import SCENARIOS as PLC_SCENARIOS, SimulatedPLC
+from plc_adapter.simulator import DEFAULT_SETPOINTS as PLC_DEFAULT_SETPOINTS, SCENARIOS as PLC_SCENARIOS, SimulatedPLC
 from rag.store import get_store
 from rag.generate import answer_from_retrieval
 
@@ -435,6 +435,9 @@ class SkillApproveRequest(BaseModel):
     interlocks: list[dict]
     skill_version: str = Field(default="1.0.0")
     approved_by: str = Field(default="Production Supervisor — Budi Santoso")
+    # skill.json (schema skillforge_skill_v2). When set, it must have passed a
+    # test run unchanged (/api/skills/test-run) before it can be approved.
+    spec: dict | None = Field(default=None)
 
 
 class SkillApproveResponse(BaseModel):
@@ -1491,6 +1494,24 @@ async def post_skills_approve(body: SkillApproveRequest) -> SkillApproveResponse
             detail={"error": "InvalidSkillFiles", "errors": shape_errors},
         )
 
+    if body.spec is not None:
+        spec, spec_errors = parse_skill_spec(body.spec)
+        spec_errors += _spec_action_errors(spec) if spec else []
+        if spec_errors:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error": "InvalidSkillSpec", "errors": spec_errors},
+            )
+        test = _skill_tests.get((body.skill_id, _spec_hash(body.spec)))
+        if not test or not test["passed"]:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "TestRunRequired",
+                    "errors": ["Skill ini belum lulus uji coba dengan isi yang sama. Jalankan uji coba dulu."],
+                },
+            )
+
     # Create backup of existing files if they exist
     if skill_dir.exists():
         import shutil
@@ -1523,6 +1544,11 @@ async def post_skills_approve(body: SkillApproveRequest) -> SkillApproveResponse
         encoding="utf-8"
     )
 
+    if body.spec is not None:
+        (skill_dir / "skill.json").write_text(
+            json.dumps(body.spec, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
     # Reload registry
     _skills.index()
 
@@ -1531,6 +1557,7 @@ async def post_skills_approve(body: SkillApproveRequest) -> SkillApproveResponse
         "action_type": "SKILL_APPROVED",
         "skill_id": body.skill_id,
         "skill_version": body.skill_version,
+        "spec_sha256": _spec_hash(body.spec) if body.spec is not None else None,
         "approved_by": body.approved_by,
         "hooks_count": len(body.hooks),
         "interlocks_count": len(body.interlocks),
@@ -1541,6 +1568,218 @@ async def post_skills_approve(body: SkillApproveRequest) -> SkillApproveResponse
         skill_id=body.skill_id,
         version=body.skill_version,
         ledger_entry_id=entry["id"],
+    )
+
+
+# ── Skill test run: replay a PLC scenario against a skill, write nothing ─────
+
+# Tools a skill may name in allowed_actions besides the PLC actions in the limits file.
+_SKILL_TOOLS = {
+    "send_task": "Kirim tugas ke mekanik",
+    "book_maintenance": "Pesan slot maintenance",
+    "solver_reschedule": "Usulkan jadwal ulang dengan solver (persetujuan sebelum SAP)",
+}
+# (skill_id, sha256 of skill.json) → last test result; approving a spec needs a passed one.
+_skill_tests: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+def _spec_hash(spec: dict | None) -> str:
+    import hashlib
+    raw = json.dumps(spec or {}, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _plc_action_ids() -> set[str]:
+    ids: set[str] = set()
+    for mid in _plc_limits.raw.get("machines", {}):
+        ids.update(((_plc_limits.machine(mid) or {}).get("actions") or {}).keys())
+    return ids
+
+
+def _spec_action_errors(spec: dict[str, Any]) -> list[str]:
+    known = set(_SKILL_TOOLS) | _plc_action_ids()
+    return [f"allowed_actions: '{a}' tidak dikenal (bukan tool atau aksi di file batas mesin)."
+            for a in spec.get("allowed_actions", []) if a not in known]
+
+
+class SkillTestRunRequest(BaseModel):
+    skill_id: str
+    scenario_id: str = Field(description="A simulator fault scenario id, e.g. cnc02_coolant")
+    # A draft skill.json to test before it is approved; default: the skill's file on disk.
+    spec: dict | None = Field(default=None)
+
+
+class SkillTestStep(BaseModel):
+    id: str
+    title: str
+    detail: str
+    ok: bool
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class SkillTestRunResponse(BaseModel):
+    skill_id: str
+    scenario_id: str
+    passed: bool
+    steps: list[SkillTestStep]
+    checks: list[dict[str, Any]]
+    spec_sha256: str
+    ledger_entry_id: str
+
+
+def _load_spec_file(skill_id: str) -> dict[str, Any] | None:
+    path = _ROOT / "skills" / skill_id / "skill.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+@app.post(
+    "/api/skills/test-run",
+    response_model=SkillTestRunResponse,
+    summary="Replay a PLC scenario against a skill without writing to the PLC or SAP",
+)
+async def post_skills_test_run(body: SkillTestRunRequest) -> SkillTestRunResponse:
+    """
+    Dry run of what the agent would do with this skill when the scenario's alarm
+    fires: match, classify, confirm, root causes (their sources must exist), tasks,
+    the PLC action with its pre-action checks against a healthy simulated machine,
+    and the solver's reschedule options. Nothing is written to the PLC, SAP or the
+    skill files; the result is logged to the audit ledger as SKILL_TEST_RUN.
+    """
+    if not _valid_skill_id(body.skill_id):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="skill_id must match ^[a-z0-9_]+$")
+    sc = PLC_SCENARIOS.get(body.scenario_id)
+    if sc is None or not sc.machine_id or not sc.metric:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"Unknown fault scenario: {body.scenario_id}")
+    raw_spec = body.spec if body.spec is not None else _load_spec_file(body.skill_id)
+    if raw_spec is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"Skill {body.skill_id} has no skill.json to test")
+    spec, spec_errors = parse_skill_spec(raw_spec)
+    if spec is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail={"error": "InvalidSkillSpec", "errors": spec_errors})
+    action_errors = _spec_action_errors(spec)
+
+    machine_id, metric, value, code = sc.machine_id, sc.metric, sc.target, sc.alarm_code
+    steps: list[SkillTestStep] = [SkillTestStep(
+        id="alarm", title="Alarm diterima", ok=True,
+        detail=f"{machine_id} · {metric} = {value:g}" + (f" · {code} {sc.alarm_text}" if code else ""),
+        data={"machine_id": machine_id, "metric": metric, "value": value, "alarm_code": code},
+    )]
+
+    matches = trigger_score(spec, machine_id, metric, code) > 0
+    winner = _skills.route(machine_id, metric, code)
+    detail = ("Pemicu sesuai mesin, sinyal atau kode alarm." if matches
+              else "Pemicu skill tidak menangkap alarm ini; periksa mesin, sinyal dan kode alarm.")
+    if winner and winner != body.skill_id:
+        detail += f" Skill aktif yang sekarang menangani alarm ini: {winner}."
+    steps.append(SkillTestStep(
+        id="match", ok=matches, detail=detail, data={"active_skill": winner},
+        title=f"Skill cocok: {spec.get('name') or body.skill_id}" if matches else "Skill tidak cocok",
+    ))
+
+    severity, rule = _classify_telemetry(metric, value, machine_id, code)
+    steps.append(SkillTestStep(
+        id="classify", title=f"Tingkat keparahan: {severity}", ok=True,
+        detail=f"Aturan Tier 1 {rule} terpicu." if rule else "Tidak ada aturan Tier 1 yang terpicu.",
+        data={"severity": severity, "rule_triggered": rule},
+    ))
+    steps.append(SkillTestStep(
+        id="confirm", title="Pastikan masalah", ok=True,
+        detail=f"{len(spec.get('confirm', []))} pemeriksaan", data={"confirm": spec.get("confirm", [])},
+    ))
+
+    causes, missing = [], []
+    for cause in spec.get("root_causes", []):
+        found = [sid for sid in cause.get("sources", []) if _maint_ledger.get_entry(sid)]
+        missing += [sid for sid in cause.get("sources", []) if sid not in found]
+        causes.append({**cause, "sources_found": found})
+    if not causes:
+        cause_detail = "Belum ada akar penyebab."
+    elif missing:
+        cause_detail = f"Sumber tidak ditemukan di ledger perawatan: {', '.join(missing)}"
+    else:
+        cause_detail = f"{len(causes)} penyebab, semua sumber ditemukan di ledger perawatan."
+    steps.append(SkillTestStep(id="root_causes", title="Akar penyebab", ok=bool(causes) and not missing,
+                               detail=cause_detail, data={"root_causes": causes}))
+
+    tasks = list(spec.get("tasks", []))
+    steps.append(SkillTestStep(
+        id="tasks", title="Pesan ke mekanik", ok=bool(tasks), data={"tasks": tasks},
+        detail=(f"{machine_id}: {sc.alarm_text or metric}. " + " ".join(tasks[:2])) if tasks else "Belum ada tugas.",
+    ))
+
+    allowed = set(spec.get("allowed_actions", []))
+    action = _plc_limits.action_for(machine_id, alarm_code=code, metric=metric)
+    if action and action["action_id"] in allowed:
+        row = {"machine_id": machine_id, "setpoints": dict(PLC_DEFAULT_SETPOINTS), "estop": False, "lockout": False}
+        wc = next((w for w in _sap.get_state().get("work_centers", []) if w.get("id") == machine_id), {})
+        autonomous = bool(action.get("autonomous"))
+        plc_checks = pre_action_checks(
+            _plc_limits, machine_id=machine_id, tag=action["tag"], value=action["value"], row=row,
+            sap_status=wc.get("status") or "RUNNING", approved_by=None if autonomous else "uji coba",
+            autonomous=autonomous, action_id=action["action_id"], writes_enabled=True,
+        )
+        failed = [c for c in plc_checks if not c["ok"]]
+        steps.append(SkillTestStep(
+            id="plc_action", ok=not failed,
+            title=f"Aksi PLC: {action['label']}" + (" (otonom terbatas)" if autonomous else " (setelah disetujui)"),
+            detail=(f"{len(plc_checks) - len(failed)}/{len(plc_checks)} pemeriksaan akan lolos. "
+                    "Disimulasikan, tidak ditulis ke PLC."),
+            data={"action_id": action["action_id"], "tag": action["tag"], "value": action["value"],
+                  "autonomous": autonomous, "checks": plc_checks},
+        ))
+    else:
+        steps.append(SkillTestStep(
+            id="plc_action", title="Aksi PLC: tidak ada", ok=True,
+            detail=("File batas mesin tidak punya aksi untuk alarm ini." if not action
+                    else f"Aksi {action['action_id']} ada, tetapi tidak diizinkan oleh skill ini."),
+        ))
+
+    if "solver_reschedule" in allowed:
+        solver_error = None
+        try:
+            options = await run_in_threadpool(
+                _solver.solve, _sap.get_state(),
+                {"machine_id": machine_id, "disruption_type": "BREAKDOWN", "start_hour": 0, "end_hour": 3},
+            )
+        except Exception as exc:  # the dry run reports a solver failure instead of failing
+            options, solver_error = [], str(exc)
+        steps.append(SkillTestStep(
+            id="sap", title="Usulan SAP: jadwal ulang", ok=bool(options),
+            detail=(f"Solver menyiapkan {len(options)} skenario. Menunggu persetujuan supervisor sebelum menulis ke SAP."
+                    if options else f"Solver tidak menghasilkan skenario{': ' + solver_error if solver_error else ''}."),
+            data={"options": [{k: o.get(k) for k in ("id", "name", "total_cost_idr", "recommended")} for o in options]},
+        ))
+
+    base_rules = [il.id for il in _skills.load_interlocks(DEFAULT_SKILL_ID) if il.tier == 1]
+    checks = [
+        {"id": "sources", "label": "Semua akar penyebab punya sumber yang ada", "ok": bool(causes) and not missing},
+        {"id": "tier1", "label": "Aturan Tier 1 skill dasar tetap berlaku", "ok": bool(base_rules),
+         "detail": f"{len(base_rules)} aturan dari {DEFAULT_SKILL_ID} selalu dievaluasi"},
+        {"id": "actions", "label": "Aksi yang diizinkan dikenal dan dalam batas mesin", "ok": not action_errors,
+         "detail": "; ".join(action_errors) or "ok"},
+        {"id": "no_writes", "label": "Tidak ada tulis ke PLC atau SAP selama uji coba", "ok": True},
+    ]
+    passed = all(st.ok for st in steps) and all(c["ok"] for c in checks)
+    sha = _spec_hash(raw_spec)
+    _skill_tests[(body.skill_id, sha)] = {"passed": passed, "scenario_id": body.scenario_id}
+    entry = _ledger.append({
+        "action_type": "SKILL_TEST_RUN",
+        "skill_id": body.skill_id,
+        "scenario_id": body.scenario_id,
+        "machine_id": machine_id,
+        "passed": passed,
+        "spec_sha256": sha,
+    })
+    return SkillTestRunResponse(
+        skill_id=body.skill_id, scenario_id=body.scenario_id, passed=passed,
+        steps=steps, checks=checks, spec_sha256=sha, ledger_entry_id=entry["id"],
     )
 
 
