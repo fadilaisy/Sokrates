@@ -49,6 +49,8 @@ export interface ChatMessage {
   scenario?: Scenario;
   /** SOP/plant-document passages the reply cites as [S1], [S2] … */
   sources?: RagSource[];
+  /** Optional HTML/SVG visual the AI added to its answer (shown in a sandboxed frame). */
+  visual?: string | null;
 }
 
 type WsStatus = "connecting" | "open" | "closed";
@@ -857,7 +859,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
         try {
           const r = await api.chat(t);
           setMessages((cur) => cur.filter((m) => m.id !== pid));
-          push({ from: "ai", text: r.reply, sources: r.sources });
+          push({ from: "ai", text: r.reply, sources: r.sources, visual: r.visual });
         } catch {
           setMessages((cur) => cur.filter((m) => m.id !== pid));
           push({

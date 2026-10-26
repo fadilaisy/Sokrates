@@ -73,6 +73,7 @@ from rag.api import router as rag_router
 from rag.retrieve import Retriever
 from rag.generate import sanitize as rag_sanitize
 from rag import aicore
+from backend import chat_visual
 from backend.agent_run import AgentDeps, AgentRunner
 from backend.metrics import compute_metrics, events_for_approval
 from knowledge.maintenance_ledger import MaintenanceLedger
@@ -238,6 +239,8 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     model_used: str
+    # Optional self-contained HTML/SVG snippet (backend/chat_visual.py), shown in a sandboxed frame.
+    visual: Optional[str] = None
     # Plant-document passages the reply cites as [S1], [S2] …, each with the
     # character spans that support it, so a supervisor can verify by hand.
     sources: list[dict[str, Any]] = Field(default_factory=list)
@@ -963,23 +966,40 @@ async def post_chat(body: ChatRequest) -> ChatResponse:
             "misalnya [S1]. Jangan menambah fakta prosedur yang tidak ada di passage. "
             "Jangan mencantumkan id untuk fakta dari data SAP.\n"
         )
+    order_lines = "\n".join(
+        f"- {o.get('id')} kelas {o.get('order_class')} di {o.get('work_center_id')}, "
+        f"{_hhmm(o.get('planned_start'))}–{_hhmm(o.get('planned_end'))}, deadline {_hhmm(o.get('deadline'))}, "
+        f"status {o.get('status')}, progres {o.get('progress_percent', 0)}%, "
+        f"denda SLA Rp {o.get('sla_penalty_per_hour_idr', 0):,}/jam"
+        for o in orders
+    )
+    stock_lines = "\n".join(
+        f"- {p.get('part_no')} ({p.get('description')}): stok {p.get('stock_qty')} {p.get('unit')}, "
+        f"lead time {p.get('lead_time_days')} hari, Rp {p.get('unit_price_idr', 0):,}"
+        for p in state.get("spare_parts", [])
+    )
+    data_block = (
+        f"Status mesin: {machines}.\n"
+        "Jadwal/log maintenance (gunakan ini untuk menjawab alasan sebuah mesin maintenance):\n"
+        f"{maintenance}\n"
+        f"Order (total {len(orders)}, per status {by_status}):\n{order_lines}\n"
+        f"Stok suku cadang:\n{stock_lines}\n"
+        f"SAP version: {state.get('_meta', {}).get('version')}.\n"
+    )
     prompt = (
         "Anda adalah AI Supervisor lantai produksi PT Karawang Precision Manufacturing. "
         "Jawab dalam Bahasa Indonesia, singkat (maks 3 kalimat), hanya berdasarkan data berikut. "
         "Anda HANYA memberi informasi/teks — Anda tidak bisa menyetujui skenario, mengubah jadwal, "
         "atau menulis ke SAP. Jika user meminta perubahan, arahkan ke tombol persetujuan di dasbor.\n\n"
-        f"Status mesin: {machines}.\n"
-        "Jadwal/log maintenance (gunakan ini untuk menjawab alasan sebuah mesin maintenance):\n"
-        f"{maintenance}\n"
-        f"Order (total {len(orders)}, per status {by_status}).\n"
-        f"SAP version: {state.get('_meta', {}).get('version')}.\n"
+        f"{data_block}"
         f"{grounding}\n"
+        f"{chat_visual.VISUAL_INSTRUCTION}\n\n"
         f"Pertanyaan supervisor: {body.message}\n\n"
-        "Jawab HANYA jawabannya, tanpa kata pengantar."
+        "Jawab HANYA jawabannya (plus visual bila perlu), tanpa kata pengantar."
     )
     # Reasoning tokens count against the limit; 300 cut replies mid-sentence
-    # ("...dalam status"). 1024 leaves room for a 3-sentence answer.
-    reply = await _call_llm(prompt, max_tokens=1024)
+    # ("...dalam status"). 2048 leaves room for 3 sentences plus a small visual.
+    reply = await _call_llm(prompt, max_tokens=2048)
     if reply.startswith(LLM_ERROR_PREFIX):
         # Every AI Core model failed: say so plainly instead of
         # showing the provider's raw error text in the chat bubble.
@@ -988,8 +1008,9 @@ async def post_chat(body: ChatRequest) -> ChatResponse:
             reply=("AI Supervisor sedang tidak bisa menjawab karena layanan AI sedang sibuk "
                    "atau tidak terjangkau. Coba kirim ulang pertanyaan sebentar lagi."),
             model_used="unavailable", sources=[])
+    reply, visual = chat_visual.extract(reply, data_block)
     reply, sources = _cite_chat_sources(reply, packed)
-    return ChatResponse(reply=reply, model_used=_active_model(), sources=sources)
+    return ChatResponse(reply=reply, model_used=_active_model(), sources=sources, visual=visual)
 
 
 _CHAT_CITE = re.compile(r"[ \t]*\[(S\d+(?:\s*,\s*S\d+)*)\]")

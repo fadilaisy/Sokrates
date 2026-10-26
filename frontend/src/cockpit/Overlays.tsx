@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { api, formatIDR } from "../lib/api";
 import { cn } from "../lib/utils";
 import { chainVerdict, changeKind, shortHash, timeRange, wibTime } from "../lib/shift";
+import { ChatVisual } from "./ChatVisual";
 import { CitedText, SourceCitations } from "./Citations";
 import { ledgerDetail, ledgerSubject } from "./ledgerDetail";
 import { DEFAULT_SIGNER, useCockpit } from "./store";
@@ -446,6 +447,7 @@ export function ChatDrawer() {
               ) : (
                 <CitedText text={m.text} />
               )}
+              {m.visual && <ChatVisual html={m.visual} />}
               <SourceCitations sources={m.sources} className="mt-3" />
               {m.kind === "result" && m.scenario && (
                 <div className="mt-3 flex flex-col gap-2 rounded-lg border-2 border-accent-blue bg-surface p-3">
