@@ -80,6 +80,19 @@ export interface PlcProposedAction {
   write_enabled: boolean;
 }
 
+/** The skill the agent follows for an alarm or prediction (Skill Studio), with its know-how. */
+export interface SkillGuidance {
+  skill_id: string;
+  name: string;
+  version: string | null;
+  owner: string | null;
+  has_know_how: boolean;
+  confirm: { kind: "auto" | "operator"; text: string }[];
+  root_causes: { cause: string; evidence?: string; sources: string[]; evidence_found: boolean }[];
+  tasks: string[];
+  allowed_actions: string[];
+}
+
 /** Sent once when a machine raises a new alarm code, with past fixes for that code. */
 export interface PlcAlarmFrame {
   event: "plc_alarm";
@@ -89,6 +102,7 @@ export interface PlcAlarmFrame {
   past_fixes: PlcPastFix[];
   documents: { doc_id: string; doc_title: string | null; page: number | null; citation: string | null }[];
   proposed_action: PlcProposedAction | null;
+  skill?: SkillGuidance | null;
   timestamp: string;
 }
 
@@ -106,6 +120,7 @@ export interface PlcPredictionFrame {
   eta_warning_s: number | null;
   eta_critical_s: number | null;
   proposed_action: PlcProposedAction | null;
+  skill?: SkillGuidance | null;
   timestamp: string;
 }
 
@@ -560,6 +575,20 @@ export const api = {
       method: "POST",
       body: JSON.stringify(b),
     }),
+  skills: () => req<SkillLibrary>("/api/skills"),
+  skill: (id: string) => req<SkillFiles>(`/api/skills/${encodeURIComponent(id)}`),
+  composeSkill: (b: { story: string; case_ids: string[]; name?: string; machines?: string[]; owner?: string }) =>
+    req<SkillCompose>("/api/skills/compose", { method: "POST", body: JSON.stringify(b) }),
+  testRunSkill: (b: { skill_id: string; scenario_id: string; spec?: SkillSpec }) =>
+    req<SkillTestRun>("/api/skills/test-run", { method: "POST", body: JSON.stringify(b) }),
+  approveSkillSpec: (b: {
+    skill_id: string; spec: SkillSpec; sla_penalties: unknown; hooks: unknown[]; interlocks: unknown[];
+    approved_by: string; skill_version?: string;
+  }) =>
+    req<{ success: boolean; skill_id: string; version: string; ledger_entry_id: string }>("/api/skills/approve", {
+      method: "POST",
+      body: JSON.stringify({ ...b, skill_md: "" }),
+    }),
   revertLedger: (entry_id: string, approved_by: string) =>
     req<ApproveReceipt>(`/api/ledger/${entry_id}/revert`, {
       method: "POST",
@@ -751,3 +780,98 @@ export const maintApi = {
     req<MaintChat>("/api/maintenance/chat", { method: "POST", body: JSON.stringify({ question, machine_id }) }),
   verify: () => req<{ valid: boolean; message: string }>("/api/maintenance/ledger/verify"),
 };
+
+// ── Skill Studio (skill.json, schema skillforge_skill_v2) ───────────────────
+
+export interface SkillSpec {
+  schema: "skillforge_skill_v2";
+  name: string;
+  version?: string;
+  status?: "active" | "draft" | "disabled";
+  owner?: string | null;
+  trigger: { machines: string[]; metrics: string[]; alarm_codes: string[]; predictions: boolean };
+  confirm: { kind: "auto" | "operator"; text: string }[];
+  root_causes: { cause: string; evidence?: string; sources: string[] }[];
+  tasks: string[];
+  allowed_actions: string[];
+}
+
+export interface SkillHistoryItem {
+  id: string;
+  action_type: "SKILL_APPROVED" | "SKILL_TEST_RUN" | "SKILL_FIRED";
+  timestamp: string;
+  machine_id?: string | null;
+  passed?: boolean | null;
+  scenario_id?: string | null;
+  approved_by?: string | null;
+  skill_version?: string | null;
+  trigger?: string | null;
+  sha256_hash?: string | null;
+}
+
+export interface SkillSummary {
+  skill_id: string;
+  name: string;
+  version: string | null;
+  owner: string | null;
+  status: string;
+  is_default: boolean;
+  has_know_how: boolean;
+  spec_errors: string[];
+  trigger: SkillSpec["trigger"] | null;
+  allowed_actions: string[];
+  root_cause_count: number;
+  fired_count: number;
+  history: SkillHistoryItem[];
+}
+
+export interface SkillTool {
+  id: string;
+  label: string;
+  kind: "tool" | "plc_action";
+  autonomous: boolean;
+  used_by: string[];
+}
+
+export interface SkillLibrary {
+  skills: SkillSummary[];
+  tools: SkillTool[];
+  scenarios: { id: string; label: string; machine_id: string; alarm_code: string | null }[];
+}
+
+export interface SkillFiles {
+  skill_id: string;
+  name: string;
+  spec: SkillSpec | null;
+  spec_errors: string[];
+  skill_md: string;
+  hooks: unknown[];
+  interlocks: unknown[];
+  sla_penalties: unknown;
+}
+
+export interface SkillCompose {
+  skill_id: string;
+  spec: SkillSpec;
+  provenance: Record<string, { by: "ai" | "rules" | "expert"; from: string[] }>;
+  model_used: string | null;
+  warnings: string[];
+}
+
+export interface SkillTestStep {
+  id: string;
+  title: string;
+  detail: string;
+  ok: boolean;
+  data: Record<string, unknown>;
+}
+
+export interface SkillTestRun {
+  skill_id: string;
+  scenario_id: string;
+  passed: boolean;
+  steps: SkillTestStep[];
+  checks: { id: string; label: string; ok: boolean; detail?: string }[];
+  spec_sha256: string;
+  ledger_entry_id: string;
+}
