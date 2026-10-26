@@ -21,3 +21,6 @@ os.environ.setdefault("MAINTENANCE_LEDGER_PATH", str(_TMP / "maintenance_ledger.
 # Startup demo-document seeding writes into the process-wide RAG store; tests that
 # need it turn it on themselves (tests/test_seed_startup.py).
 os.environ.setdefault("RAG_AUTOSEED_DEMO", "0")
+# A latched PLC alarm would start a background agent run in every PLC test;
+# tests/test_agent_run.py turns it on where it is the thing under test.
+os.environ.setdefault("AGENT_AUTORUN", "0")

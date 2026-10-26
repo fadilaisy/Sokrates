@@ -18,6 +18,8 @@ WS   /ws/plc                 PLC feed: tags, trend predictions, alarm codes → 
 GET  /api/plc                PLC driver, scenario, autonomy; POST /api/plc/scenario starts one
 POST /api/plc/actions        Write one setpoint after pre-action checks + approval (audit ledger)
 POST /api/plc/autonomy       Limited autonomy on/off; GET /api/plc/limits per-machine limits
+POST /api/agent/run          Agent run for an alarm: plan → tools → one approval (also auto on PLC alarms)
+GET  /api/agent/runs/latest  Latest run; GET /api/agent/runs/{id}; POST …/{id}/approve
 GET  /health                 Health check
 
 RAG (rag/api.py)
@@ -71,6 +73,7 @@ from rag.api import router as rag_router
 from rag.retrieve import Retriever
 from rag.generate import sanitize as rag_sanitize
 from rag import aicore
+from backend.agent_run import AgentDeps, AgentRunner
 from backend.metrics import compute_metrics, events_for_approval
 from knowledge.maintenance_ledger import MaintenanceLedger
 from knowledge.case_index import case_id_for_doc
@@ -2043,6 +2046,119 @@ async def _telemetry_to_playbook(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Agent run — alarm → plan → tools → one approval (backend/agent_run.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def _agent_run_llm(prompt: str, max_tokens: int, model: str | None) -> str:
+    return await _call_llm(prompt, max_tokens=max_tokens, interactive=False, model=model)
+
+
+async def _agent_run_approve(scenario_id: str, scenario: dict[str, Any], version: int,
+                             approved_by: str) -> dict[str, Any]:
+    r = await post_approve(ApproveRequest(scenario_id=scenario_id, scenario_data=scenario,
+                                          expected_sap_version=version, approved_by=approved_by))
+    return r.model_dump()
+
+
+def _issue_scenarios(scenarios: list[dict[str, Any]]) -> None:
+    for s in scenarios:
+        _issued_scenarios[s["id"]] = copy.deepcopy(s)
+
+
+_agent_runner = AgentRunner(AgentDeps(
+    get_state=_sap.get_state,
+    apply_delta=lambda delta, version: _sap.apply_delta(delta, expected_version=version),
+    ledger_append=_ledger.append,
+    handle_case=lambda payload: _agent.handle_new_entry(payload, use_llm=False),
+    solve=_solver.solve,
+    issue_scenarios=_issue_scenarios,
+    approve_scenario=_agent_run_approve,
+    llm=_agent_run_llm,
+    active_model=_active_model,
+    planner_model=lambda: os.getenv("AGENT_MODEL", "anthropic--claude-4.5-sonnet").strip() or None,
+))
+
+
+class AgentRunRequest(BaseModel):
+    machine_id: str = Field(..., example="CNC-01")
+    alarm_code: Optional[str] = Field(None, example="ALM-162")
+    alarm_text: Optional[str] = Field(None, example="SPINDLE OVERLOAD")
+    tag: Optional[str] = None
+    value: Optional[float] = None
+
+
+class AgentApproveRequest(BaseModel):
+    approved_by: str = Field(..., min_length=3, example="Production Supervisor — Budi Santoso")
+
+
+def _alarm_trigger(machine_id: str, code: Optional[str], text: Optional[str],
+                   tags: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """Trigger for a run; the drifting tag comes from the simulator scenario behind the alarm code."""
+    metric = next((sc.metric for sc in PLC_SCENARIOS.values() if code and sc.alarm_code == code), None)
+    value = (tags or {}).get(metric) if metric else None
+    return {"machine_id": machine_id, "alarm_code": code, "alarm_text": text, "tag": metric,
+            "value": round(value, 2) if isinstance(value, (int, float)) else value, "source": "plc"}
+
+
+@app.post("/api/agent/run", summary="Start an agent run for a machine alarm (plan → tools → approval)")
+async def post_agent_run(body: AgentRunRequest) -> dict[str, Any]:
+    if not any(w.get("id") == body.machine_id for w in _sap.get_state().get("work_centers", [])):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown machine_id: {body.machine_id}")
+    code, text, tags = body.alarm_code, body.alarm_text, {}
+    if not code:  # started by hand: use the machine's live PLC alarm, if any
+        live = _plc_latest["alarms"].get(body.machine_id)
+        if live:
+            code, text = live.get("code"), live.get("text")
+        row = next((m for m in ((_plc_latest.get("scan") or {}).get("machines") or [])
+                    if m.get("machine_id") == body.machine_id), None)
+        tags = (row or {}).get("tags") or {}
+    trigger = _alarm_trigger(body.machine_id, code, text, tags)
+    if body.tag:
+        trigger.update(tag=body.tag, value=body.value)
+    trigger["source"] = "manual"
+    busy = _agent_runner.busy_for(body.machine_id, trigger.get("alarm_code"))
+    if busy and busy["status"] in ("planning", "running"):
+        return busy
+    return _agent_runner.start(trigger)
+
+
+@app.get("/api/agent/runs/latest", summary="The most recent agent run (null when none)")
+async def get_agent_run_latest() -> Optional[dict[str, Any]]:
+    return _agent_runner.latest()
+
+
+@app.get("/api/agent/runs/{run_id}", summary="One agent run with its plan and steps")
+async def get_agent_run(run_id: str) -> dict[str, Any]:
+    run = _agent_runner.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown run: {run_id}")
+    return run
+
+
+@app.post("/api/agent/runs/{run_id}/approve", summary="Approve the run's SAP writes: parts order + reroute")
+async def post_agent_run_approve(run_id: str, body: AgentApproveRequest) -> dict[str, Any]:
+    try:
+        return await _agent_runner.approve(run_id, body.approved_by)
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown run: {run_id}")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except DriftError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail={"error": "DriftError", "message": str(exc)})
+
+
+async def _autorun_agent(m: dict[str, Any], code: str, text: str) -> None:
+    """A newly latched PLC alarm starts an agent run by itself (AGENT_AUTORUN, default on)."""
+    if not _env_flag("AGENT_AUTORUN", True) or _agent_runner.busy_for(m["machine_id"], code):
+        return
+    run = _agent_runner.start(_alarm_trigger(m["machine_id"], code, text, m.get("tags")))
+    await _plc_broadcast({"event": "agent_run", "run_id": run["id"], "machine_id": m["machine_id"],
+                          "code": code, "timestamp": datetime.now(timezone.utc).isoformat()})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Simulated PLC — machines report their own tags and alarm codes
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -2405,6 +2521,7 @@ async def _plc_tick(scenario: Optional[str], peak: dict[tuple[str, str], str], a
             await _plc_broadcast(alarm_frame)
             if m["run"]:  # a stopped machine needs no load taken off it
                 await _plc_autonomous(proposal, f"alarm {code}")
+            _plc_spawn(_autorun_agent(m, code, alarm["text"]))
         elif not code:
             _plc_latest["alarms"].pop(mid, None)
         alarms[mid] = code
