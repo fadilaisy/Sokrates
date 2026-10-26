@@ -1221,7 +1221,7 @@ async def _draft_skill_md_llm(body: SkillDraftRequest, interlocks: list[dict]) -
     try:
         text = (await _call_llm(prompt, max_tokens=4096)).strip()
     except Exception as exc:
-        print(f"[skills/draft] LLM failed: {f"{type(exc).__name__}: {str(exc)[:200]}"}", file=sys.stderr)
+        print(f"[skills/draft] LLM failed: {type(exc).__name__}: {str(exc)[:200]}", file=sys.stderr)
         return ""
     # _call_llm reports its own failures as "[AI ...]" text, not exceptions.
     if not text or text.startswith(LLM_ERROR_PREFIX):
