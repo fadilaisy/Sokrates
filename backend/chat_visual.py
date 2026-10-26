@@ -69,14 +69,20 @@ def _local_ref(value: str) -> bool:
     return value.strip("\"' ").startswith("#")
 
 
+_ID = re.compile(r"\b[A-Za-z]+[-_]?[A-Za-z]*-\d[\w-]*")   # CNC-01, ALM-162, PO-2024-001
+
+
 def _numbers(text: str) -> set[str]:
-    return {re.sub(r"[.,]", "", n) for n in _NUM.findall(text)}
+    """Figures in the text, ignoring numbers that are part of ids like CNC-01."""
+    return {re.sub(r"[.,]", "", n) for n in _NUM.findall(_ID.sub(" ", text))}
 
 
 def grounded(html: str, context: str) -> bool:
-    """At least one number of 2+ digits in the visual also appears in the prompt's data."""
+    """Most of the visual's 2+-digit figures (at least one) also appear in the prompt's data."""
     shown = {n for n in _numbers(_TAGS.sub(" ", html)) if len(n) >= 2}
-    return bool(shown & _numbers(context))
+    if not shown:
+        return False
+    return len(shown & _numbers(context)) * 2 > len(shown)
 
 
 def extract(reply: str, context: str) -> Tuple[str, Optional[str]]:

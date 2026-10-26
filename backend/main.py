@@ -54,7 +54,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 import httpx
 
@@ -75,7 +75,7 @@ from rag.retrieve import Retriever
 from rag.generate import sanitize as rag_sanitize
 from rag import aicore
 from backend import chat_visual
-from backend.agent_run import AgentDeps, AgentRunner
+from backend.agent_run import AgentDeps, AgentRunner, ApprovalRefused
 from backend.metrics import compute_metrics, events_for_approval
 from knowledge.maintenance_ledger import MaintenanceLedger
 from knowledge.case_index import case_id_for_doc
@@ -2637,8 +2637,12 @@ async def _agent_run_llm(prompt: str, max_tokens: int, model: str | None) -> str
 
 async def _agent_run_approve(scenario_id: str, scenario: dict[str, Any], version: int,
                              approved_by: str) -> dict[str, Any]:
-    r = await post_approve(ApproveRequest(scenario_id=scenario_id, scenario_data=scenario,
-                                          expected_sap_version=version, approved_by=approved_by))
+    try:
+        r = await post_approve(ApproveRequest(scenario_id=scenario_id, scenario_data=scenario,
+                                              expected_sap_version=version, approved_by=approved_by))
+    except HTTPException as exc:
+        d = exc.detail
+        raise ApprovalRefused(d.get("message", str(d)) if isinstance(d, dict) else str(d)) from exc
     return r.model_dump()
 
 
@@ -2671,6 +2675,14 @@ class AgentRunRequest(BaseModel):
 
 class AgentApproveRequest(BaseModel):
     approved_by: str = Field(..., min_length=3, example="Production Supervisor — Budi Santoso")
+
+    @field_validator("approved_by")
+    @classmethod
+    def _real_name(cls, v: str) -> str:
+        # SAP writes need a person on record, not the cockpit's placeholder signer.
+        if v.strip().lower() in ("production supervisor", "supervisor"):
+            raise ValueError("approved_by must be the approver's real name")
+        return v.strip()
 
 
 def _alarm_trigger(machine_id: str, code: Optional[str], text: Optional[str],
@@ -2723,11 +2735,14 @@ async def post_agent_run_approve(run_id: str, body: AgentApproveRequest) -> dict
         return await _agent_runner.approve(run_id, body.approved_by)
     except KeyError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown run: {run_id}")
-    except ValueError as exc:
+    except (ValueError, ApprovalRefused) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
     except DriftError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,
                             detail={"error": "DriftError", "message": str(exc)})
+    except Exception as exc:  # the run keeps the reason and stays approvable
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail=f"{type(exc).__name__}: {str(exc)[:200]}")
 
 
 async def _autorun_agent(m: dict[str, Any], code: str, text: str) -> None:

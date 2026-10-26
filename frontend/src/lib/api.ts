@@ -508,7 +508,7 @@ export function isOvertimeLabel(v: unknown): boolean {
 }
 
 // ── Agent run (backend/agent_run.py) ────────────────────────────────────────
-export type AgentRunStatus = "planning" | "running" | "awaiting_approval" | "approved" | "done" | "failed";
+export type AgentRunStatus = "planning" | "running" | "awaiting_approval" | "approved" | "done" | "failed" | "rejected";
 
 export interface AgentRunStep {
   tool: string;

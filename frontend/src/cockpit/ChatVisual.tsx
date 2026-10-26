@@ -27,6 +27,8 @@ export function ChatVisual({ html }: { html: string }) {
     <iframe
       ref={ref}
       title="Visual dari AI"
+      // Never add allow-scripts: together with allow-same-origin it would let model-written HTML run
+      // in the cockpit's origin. The backend sanitizer is best-effort; this sandbox is the real wall.
       sandbox="allow-same-origin"
       srcDoc={frameDoc(html)}
       onLoad={fit}

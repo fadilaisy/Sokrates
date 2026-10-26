@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Bot, CircleCheck, Circle, CircleMinus, CircleX, ShieldCheck } from "lucide-react";
 import { api, type AgentRun, type AgentRunStep } from "../lib/api";
 import { cn } from "../lib/utils";
-import { DEFAULT_SIGNER, useCockpit } from "./store";
+import { useCockpit } from "./store";
 import { Btn, Card, Mono, Spinner } from "./ui";
 
 const ACTIVE = new Set(["planning", "running"]);
@@ -15,6 +15,7 @@ const STATUS_TEXT: Record<AgentRun["status"], string> = {
   approved: "Disetujui",
   done: "Selesai",
   failed: "Gagal",
+  rejected: "Ditolak",
 };
 
 /** Latest run, polled fast while it works and slowly otherwise; a PLC "agent_run" frame refreshes at once. */
@@ -44,9 +45,11 @@ function useLatestRun(ping: number) {
  * and one approval for the SAP writes (parts order + reroute).
  */
 export function AgentRunPanel() {
-  const { agentRunPing, plcAlarm, approver, reload, showToast } = useCockpit();
+  const { agentRunPing, plcAlarm, approver, setApprover, reload, showToast } = useCockpit();
   const { run, setRun, refresh } = useLatestRun(agentRunPing);
   const [busy, setBusy] = useState(false);
+  // SAP writes are signed by a real person, never the placeholder signer (same rule as scenario approval).
+  const named = approver.trim().length >= 3 && approver.trim().toLowerCase() !== "production supervisor";
 
   const start = async (machineId: string, code?: string, text?: string) => {
     setBusy(true);
@@ -60,10 +63,10 @@ export function AgentRunPanel() {
   };
 
   const approve = async () => {
-    if (!run) return;
+    if (!run || !named) return;
     setBusy(true);
     try {
-      const done = await api.agentRunApprove(run.id, approver.trim() || DEFAULT_SIGNER);
+      const done = await api.agentRunApprove(run.id, approver.trim());
       setRun(done);
       showToast("Disetujui: suku cadang dipesan dan work order dialihkan. Tercatat di audit ledger.");
       await reload();
@@ -130,7 +133,16 @@ export function AgentRunPanel() {
               <p className="text-[16px]">{run.summary}</p>
             </div>
           )}
-          {run.status === "awaiting_approval" && <ApprovalBox run={run} busy={busy} onApprove={() => void approve()} />}
+          {run.status === "awaiting_approval" && (
+            <ApprovalBox
+              run={run}
+              busy={busy}
+              named={named}
+              approver={approver}
+              setApprover={setApprover}
+              onApprove={() => void approve()}
+            />
+          )}
           {run.status === "approved" && run.approval && <ApprovedBox run={run} />}
         </>
       )}
@@ -140,7 +152,7 @@ export function AgentRunPanel() {
 
 function StatusChip({ status }: { status: AgentRun["status"] }) {
   const tone =
-    status === "failed"
+    status === "failed" || status === "rejected"
       ? "bg-danger-bg text-fault"
       : status === "awaiting_approval"
         ? "bg-warn-bg text-warn"
@@ -199,7 +211,21 @@ function StepRow({ label, why, step }: { label: string; why: string; step?: Agen
   );
 }
 
-function ApprovalBox({ run, busy, onApprove }: { run: AgentRun; busy: boolean; onApprove: () => void }) {
+function ApprovalBox({
+  run,
+  busy,
+  named,
+  approver,
+  setApprover,
+  onApprove,
+}: {
+  run: AgentRun;
+  busy: boolean;
+  named: boolean;
+  approver: string;
+  setApprover: (v: string) => void;
+  onApprove: () => void;
+}) {
   const parts = run.pending_approval?.parts;
   const sc = run.pending_approval?.scenario;
   const moves = (sc?.gantt_changes ?? []).filter((c) => c.to_machine !== c.from_machine);
@@ -222,7 +248,17 @@ function ApprovalBox({ run, busy, onApprove }: { run: AgentRun; busy: boolean; o
           biaya {idr(sc.total_cost_idr)}, hemat {idr(sc.net_savings_idr)}
         </p>
       )}
-      <Btn className="mt-1 self-start" disabled={busy} onClick={onApprove}>
+      <label className="mt-1 flex flex-col gap-1">
+        <span className="text-[14px] font-medium text-muted-ink">Disetujui oleh (nama Anda, tercatat di audit ledger)</span>
+        <input
+          value={approver}
+          onChange={(e) => setApprover(e.target.value)}
+          disabled={busy}
+          placeholder="Production Supervisor — Nama Anda"
+          className="min-h-11 rounded-md border border-line bg-surface px-3 text-[15px] disabled:opacity-60"
+        />
+      </label>
+      <Btn className="mt-1 self-start" disabled={busy || !named} onClick={onApprove}>
         <ShieldCheck className="size-5" aria-hidden />
         Setujui semua
       </Btn>
