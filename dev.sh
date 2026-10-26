@@ -18,7 +18,7 @@ if [ ! -f ".env" ]; then
   if [ -f ".env.example" ]; then
     echo "⚠️  .env file not found. Creating from .env.example..."
     cp .env.example .env
-    echo "💡 Please update .env with your GEMINI_API_KEY if needed."
+    echo "💡 Please fill in the AICORE_* values in .env (SAP AI Core service key)."
   fi
 fi
 

@@ -1,8 +1,9 @@
 """
 rag/aicore.py
 ─────────────
-SAP AI Core client for the hackathon tenant, over plain REST (httpx), like the
-Gemini and Claude clients in rag/llm.py.
+SAP AI Core client for the hackathon tenant, over plain REST (httpx). This is
+the only LLM provider SkillForge uses (rag/llm.py adds an optional direct
+Anthropic client for local runs).
 
 Two modes
 ---------
@@ -32,6 +33,9 @@ AICORE_CLIENT_SECRET    "clientsecret"
 AI_API_URL              "serviceurls.AI_API_URL"
 AICORE_ORCHESTRATION_ID default d8c092efb8980093; "" disables orchestration
 AICORE_MODEL_NAME       default gpt-5.4 — model_name for orchestration calls
+AICORE_FALLBACK_MODELS  comma-separated model_names tried in order when the main
+                        one fails (orchestration only); default
+                        anthropic--claude-4.5-sonnet. "" disables fallbacks.
 AICORE_DEPLOYMENT_ID    default d1a82575de60e02a (gpt-5.4), direct mode only
 AICORE_RESOURCE_GROUP   default "default"
 AICORE_MODEL_LABEL      optional display-label override for model_label()
@@ -51,6 +55,7 @@ API_VERSION = "2024-12-01-preview"
 DEFAULT_DEPLOYMENT_ID = "d1a82575de60e02a"      # gpt-5.4 in the hackathon tenant
 DEFAULT_ORCHESTRATION_ID = "d8c092efb8980093"   # orchestration → all chat models
 DEFAULT_MODEL_NAME = "gpt-5.4"                  # orchestration model_name
+DEFAULT_FALLBACK_MODELS = "anthropic--claude-4.5-sonnet"
 TOKEN_REFRESH_MARGIN = 300                      # refresh 5 min before expiry
 
 _token: Optional[str] = None
@@ -87,6 +92,24 @@ def orchestration_id() -> str:
 def model_name() -> str:
     """model_name sent in orchestration calls (per-call override: chat(..., model=...))."""
     return _env("AICORE_MODEL_NAME", DEFAULT_MODEL_NAME)
+
+
+def fallback_models() -> List[str]:
+    """Orchestration model_names tried after model_name(), in order (none in direct mode)."""
+    if not orchestration_id():
+        return []
+    raw = os.environ.get("AICORE_FALLBACK_MODELS")
+    raw = DEFAULT_FALLBACK_MODELS if raw is None else raw
+    return [m.strip() for m in raw.split(",") if m.strip()]
+
+
+def models_in_order(first: Optional[str] = None) -> List[str]:
+    """`first` (or model_name()), then the fallbacks, without duplicates."""
+    out: List[str] = []
+    for m in [first or model_name(), *fallback_models()]:
+        if m and m not in out:
+            out.append(m)
+    return out
 
 
 def resource_group() -> str:
@@ -227,3 +250,21 @@ def ask(prompt: str, *, system: Optional[str] = None, max_tokens: int = 1024,
     messages = [{"role": "system", "content": system}] if system else []
     messages.append({"role": "user", "content": prompt})
     return chat(messages, max_tokens=max_tokens, timeout=timeout, model=model)
+
+
+def ask_any(prompt: str, *, system: Optional[str] = None, max_tokens: int = 1024,
+            timeout: float = 60.0, first: Optional[str] = None) -> Tuple[str, str]:
+    """ask() on each model of models_in_order(first) until one answers.
+
+    Returns (text, model_name that answered). A login failure ends the loop at
+    once: every model sits behind the same tenant, so trying the next is pointless.
+    """
+    errors: List[str] = []
+    for m in models_in_order(first):
+        try:
+            return ask(prompt, system=system, max_tokens=max_tokens, timeout=timeout, model=m), m
+        except AICoreError as exc:
+            errors.append(f"{m}: {exc}")
+            if "login" in str(exc).lower():
+                break
+    raise AICoreError("; ".join(errors) or "no AI Core model configured")

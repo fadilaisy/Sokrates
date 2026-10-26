@@ -102,6 +102,11 @@ class SAPClient:
                     return copy.deepcopy(wc)
         return None
 
+    def get_spare_parts(self):
+        """Return the spare-part stock list (MM material stock in the mock)."""
+        with self._lock:
+            return copy.deepcopy(self._state.get("spare_parts", []))
+
     def apply_delta(self, delta, expected_version):
         """
         Apply a structured delta to the in-memory SAP state.
@@ -112,6 +117,9 @@ class SAPClient:
             - work_center_updates: list[dict] — each needs "id"
             - order_updates: list[dict] — each needs "id"
             - meta_updates: dict — merged into _meta
+            - spare_part_updates: list[dict] — each needs "part_no"
+            - reservations_add / purchase_requisitions_add: list[dict] —
+              appended to "reservations" / "purchase_requisitions"
         expected_version : int
             Must match current _meta.version; raises DriftError on mismatch.
 
@@ -141,6 +149,18 @@ class SAPClient:
                     if order["id"] == order_id:
                         order.update({k: v for k, v in order_patch.items() if k != "id"})
                         break
+
+            for part_patch in delta.get("spare_part_updates", []):
+                part_no = part_patch.get("part_no")
+                for part in self._state.get("spare_parts", []):
+                    if part["part_no"] == part_no:
+                        part.update({k: v for k, v in part_patch.items() if k != "part_no"})
+                        break
+
+            for key in ("reservations", "purchase_requisitions"):
+                added = delta.get(f"{key}_add") or []
+                if added:
+                    self._state.setdefault(key, []).extend(copy.deepcopy(added))
 
             if "meta_updates" in delta:
                 self._state["_meta"].update(delta["meta_updates"])

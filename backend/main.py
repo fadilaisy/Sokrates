@@ -2,13 +2,13 @@
 backend/main.py
 ───────────────
 SkillForge FastAPI backend — Agentic AI Supervisor for Indonesian Manufacturers.
-AI model: GPT-5.4 on SAP AI Core when configured (rag/aicore.py), with
-Gemini 3.5 Flash (Google) via the REST API as the backup.
+AI model: SAP AI Core orchestration only (rag/aicore.py): AICORE_MODEL_NAME
+(default gpt-5.4), then AICORE_FALLBACK_MODELS on the same tenant.
 
 Endpoints
 ---------
 GET  /api/state              Current SAP mock state
-POST /api/disrupt            Disruption analysis — CP-SAT solver + Gemini summary
+POST /api/disrupt            Disruption analysis — CP-SAT solver + AI summary
 POST /api/approve            Approve scenario, apply SAP delta, write audit entry
 GET  /api/ledger             Full immutable audit ledger
 GET  /api/ledger/verify      SHA-256 hash-chain integrity check
@@ -18,13 +18,15 @@ WS   /ws/plc                 PLC feed: tags, trend predictions, alarm codes → 
 GET  /api/plc                PLC driver, scenario, autonomy; POST /api/plc/scenario starts one
 POST /api/plc/actions        Write one setpoint after pre-action checks + approval (audit ledger)
 POST /api/plc/autonomy       Limited autonomy on/off; GET /api/plc/limits per-machine limits
+POST /api/agent/run          Agent run for an alarm: plan → tools → one approval (also auto on PLC alarms)
+GET  /api/agent/runs/latest  Latest run; GET /api/agent/runs/{id}; POST …/{id}/approve
 GET  /health                 Health check
 
 RAG (rag/api.py)
 POST /api/documents          Upload plant documents (supervisor/admin)
 GET  /api/documents[/{id}]   Status + extracted metadata
 POST /api/retrieve           Incident-aware retrieval with score breakdown
-POST /api/answer             Cited answer (Gemini / Claude Haiku 4.5) or abstention
+POST /api/answer             Cited answer (SAP AI Core) or abstention
 
 Start:  uvicorn backend.main:app --reload --port 8000
 Docs:   http://localhost:8000/docs
@@ -72,7 +74,8 @@ from rag.api import router as rag_router
 from rag.retrieve import Retriever
 from rag.generate import sanitize as rag_sanitize
 from rag import aicore
-from rag.llm import gemini_error, gemini_generation_config, gemini_text
+from backend import chat_visual
+from backend.agent_run import AgentDeps, AgentRunner
 from backend.metrics import compute_metrics, events_for_approval
 from knowledge.maintenance_ledger import MaintenanceLedger
 from knowledge.case_index import case_id_for_doc
@@ -85,39 +88,15 @@ from plc_adapter.simulator import DEFAULT_SETPOINTS as PLC_DEFAULT_SETPOINTS, SC
 from rag.store import get_store
 from rag.generate import answer_from_retrieval
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Google Gemini configuration (REST API, no SDK dependency)
-# ─────────────────────────────────────────────────────────────────────────────
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
-# The key is sent in the x-goog-api-key header, never in the URL, so it can't
-# leak through exception messages, access logs or proxies.
-GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-
-
-def _safe_gemini_error(exc: Exception) -> str:
-    """Short error text for the UI: HTTP code + Google's reason. Never the URL or key."""
-    return gemini_error(exc)
-
-
 def _active_model() -> str:
-    """Model that answered the last _call_gemini in this request; before any call,
-    the one tried first (AI Core when configured, else Gemini)."""
-    return _answered_by.get() or (aicore.model_label() if aicore.configured() else GEMINI_MODEL)
+    """Model that answered the last _call_llm in this request; before any call,
+    the one tried first."""
+    return _answered_by.get() or aicore.model_label()
 
 
-# Set by _call_gemini to the model that actually produced the text, so a reply
-# served by the Gemini backup isn't labelled as GPT-5.4.
+# Set by _call_llm to the model that actually produced the text, so a reply
+# served by a fallback model isn't labelled as the main one.
 _answered_by: contextvars.ContextVar[str] = contextvars.ContextVar("answered_by", default="")
-# Gemini overload/quota/server errors worth one retry before giving up.
-_GEMINI_RETRY_STATUS = {429, 500, 502, 503, 504}
-GEMINI_RETRY_DELAY = float(os.getenv("GEMINI_RETRY_DELAY", "2"))
-
-# Async HTTP client for Gemini API
-_gemini_client: httpx.AsyncClient | None = (
-    httpx.AsyncClient(timeout=60.0) if GEMINI_API_KEY else None
-)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Module-level singletons (safe in single-process uvicorn)
@@ -152,7 +131,7 @@ app = FastAPI(
     version="1.0.0",
     description=(
         "Backend API for SkillForge. Combines OR-Tools CP-SAT scheduling, "
-        "Gemini 3.5 Flash AI (Google), and a tamper-evident audit ledger to help "
+        "SAP AI Core (GPT-5.4 / Claude via orchestration), and a tamper-evident audit ledger to help "
         "Indonesian manufacturers recover from shop-floor disruptions."
     ),
 )
@@ -261,6 +240,8 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     model_used: str
+    # Optional self-contained HTML/SVG snippet (backend/chat_visual.py), shown in a sandboxed frame.
+    visual: Optional[str] = None
     # Plant-document passages the reply cites as [S1], [S2] …, each with the
     # character spans that support it, so a supervisor can verify by hand.
     sources: list[dict[str, Any]] = Field(default_factory=list)
@@ -449,113 +430,75 @@ class SkillApproveResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Gemini helper — async via httpx (no executor needed)
+# LLM helper — SAP AI Core orchestration (rag/aicore.py), run in a thread
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-# Client-side guard for the Gemini free tier (5 requests/min, 20/day on the
-# free plan). Stay under GEMINI_RPM so we don't burn quota on calls Google will
-# reject anyway, and reuse identical answers for a short time.
-GEMINI_RPM       = int(os.getenv("GEMINI_RPM", "4"))
-GEMINI_CACHE_TTL = float(os.getenv("GEMINI_CACHE_TTL", "300"))
-# Calls per minute kept free for interactive requests (chat, skills, disrupt),
-# so background telemetry/agent calls can't use up the whole budget.
-GEMINI_INTERACTIVE_RESERVE = int(os.getenv("GEMINI_INTERACTIVE_RESERVE", "2"))
-_gemini_calls: deque[float] = deque()                    # monotonic timestamps, last 60s
-_gemini_cache: dict[tuple[str, int], tuple[float, str]] = {}
-_GEMINI_CACHE_MAX = 256
+# Every AI call goes to SAP AI Core. Identical prompts are reused for a short
+# time, and background telemetry/agent calls are capped per minute so they
+# can't crowd out the operator's own requests.
+LLM_RPM       = int(os.getenv("LLM_RPM", "30"))
+LLM_CACHE_TTL = float(os.getenv("LLM_CACHE_TTL", "300"))
+# Calls per minute kept free for interactive requests (chat, skills, disrupt).
+LLM_INTERACTIVE_RESERVE = int(os.getenv("LLM_INTERACTIVE_RESERVE", "10"))
+_llm_calls: deque[float] = deque()                    # monotonic timestamps, last 60s
+_llm_cache: dict[tuple[str, int], tuple[float, str, str]] = {}
+_LLM_CACHE_MAX = 256
+# Every failure text from _call_llm starts with this, so callers can tell it from an answer.
+LLM_ERROR_PREFIX = "[AI"
 
 
-def _gemini_cache_put(key: tuple[str, int], text: str) -> None:
-    """Insert into the Gemini cache, dropping expired entries and evicting oldest past the cap."""
+def _llm_cache_put(key: tuple[str, int], text: str, model: str) -> None:
+    """Insert into the LLM cache, dropping expired entries and evicting oldest past the cap."""
     now = time.monotonic()
-    _gemini_cache.pop(key, None)
-    for k in [k for k, (ts, _) in _gemini_cache.items() if now - ts >= GEMINI_CACHE_TTL]:
-        del _gemini_cache[k]
-    while len(_gemini_cache) >= _GEMINI_CACHE_MAX:
-        del _gemini_cache[next(iter(_gemini_cache))]  # dict keeps insertion order: oldest first
-    _gemini_cache[key] = (now, text)
+    _llm_cache.pop(key, None)
+    for k in [k for k, (ts, _, _) in _llm_cache.items() if now - ts >= LLM_CACHE_TTL]:
+        del _llm_cache[k]
+    while len(_llm_cache) >= _LLM_CACHE_MAX:
+        del _llm_cache[next(iter(_llm_cache))]  # dict keeps insertion order: oldest first
+    _llm_cache[key] = (now, text, model)
 
 
-def _gemini_budget_ok(interactive: bool = True) -> bool:
+def _llm_budget_ok(interactive: bool = True) -> bool:
     now = time.monotonic()
-    while _gemini_calls and now - _gemini_calls[0] > 60:
-        _gemini_calls.popleft()
-    limit = GEMINI_RPM if interactive else max(GEMINI_RPM - GEMINI_INTERACTIVE_RESERVE, 0)
-    if len(_gemini_calls) >= limit:
+    while _llm_calls and now - _llm_calls[0] > 60:
+        _llm_calls.popleft()
+    limit = LLM_RPM if interactive else max(LLM_RPM - LLM_INTERACTIVE_RESERVE, 0)
+    if len(_llm_calls) >= limit:
         return False
-    _gemini_calls.append(now)
+    _llm_calls.append(now)
     return True
 
 
-async def _call_gemini(prompt: str, max_tokens: int = 512, *, interactive: bool = True) -> str:
+async def _call_llm(prompt: str, max_tokens: int = 512, *, interactive: bool = True,
+                    model: str | None = None) -> str:
     """
-    Call Gemini 3.5 Flash via the Google REST API with async httpx.
+    Ask SAP AI Core: `model` (or AICORE_MODEL_NAME), then AICORE_FALLBACK_MODELS.
 
-    Returns a graceful fallback string when the API key is not configured
-    or an error occurs — the app stays functional without AI summaries.
-    Identical prompts are served from a short-lived cache, and calls are
-    capped at GEMINI_RPM per minute so the free-tier quota isn't exhausted.
+    Returns a "[AI …]" fallback string instead of raising when AI Core is not
+    configured or every model fails — the app stays functional without AI text.
     """
-    cache_key = (prompt, max_tokens)
-    hit = _gemini_cache.get(cache_key)
-    if hit and time.monotonic() - hit[0] < GEMINI_CACHE_TTL:
+    cache_key = (f"{model or ''}\x00{prompt}", max_tokens)
+    hit = _llm_cache.get(cache_key)
+    if hit and time.monotonic() - hit[0] < LLM_CACHE_TTL:
+        _answered_by.set(hit[2])
         return hit[1]
-    # SAP AI Core (GPT-5.4) is the main model when its credentials are in .env;
-    # Gemini below is the backup if AI Core is missing or fails.
-    if aicore.configured():
-        try:
-            # GPT-5.x counts hidden reasoning against the limit, so give it headroom.
-            text = await asyncio.to_thread(aicore.ask, prompt, max_tokens=max(max_tokens, 2048))
-            _gemini_cache_put(cache_key, text)
-            _answered_by.set(aicore.model_label())
-            return text
-        except aicore.AICoreError as exc:
-            print(f"[aicore] {exc} — falling back to Gemini", file=sys.stderr)
-    if _gemini_client is None:
-        return (
-            "[Gemini tidak dikonfigurasi — tambahkan GEMINI_API_KEY ke file .env] "
-            "Tinjau skenario solver di atas dan pilih yang sesuai secara manual."
-        )
-    if not _gemini_budget_ok(interactive):
-        return (
-            "[Gemini: batas permintaan per menit tercapai, coba lagi sebentar lagi] "
-            "Silakan tinjau skenario solver secara manual."
-        )
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }],
-        "generationConfig": gemini_generation_config(max_tokens, GEMINI_MODEL),
-    }
-
-    for attempt in range(2):
-        try:
-            response = await _gemini_client.post(
-                GEMINI_API_URL,
-                json=payload,
-                headers={"Content-Type": "application/json",
-                         "x-goog-api-key": GEMINI_API_KEY},
-            )
-            response.raise_for_status()
-            text, finish = gemini_text(response.json())
-            if text:
-                _gemini_cache_put(cache_key, text)
-                _answered_by.set(GEMINI_MODEL)
-                return text
-            print(f"[gemini] empty reply (finishReason={finish})", file=sys.stderr)
-            return (f"[Gemini: tidak ada teks dalam respons (finishReason={finish})] "
-                    "Silakan tinjau skenario solver secara manual.")
-        except Exception as exc:
-            err = _safe_gemini_error(exc)
-            print(f"[gemini] {err}", file=sys.stderr)
-            transient = (isinstance(exc, httpx.HTTPStatusError)
-                         and exc.response.status_code in _GEMINI_RETRY_STATUS)
-            if attempt == 0 and transient:
-                await asyncio.sleep(GEMINI_RETRY_DELAY)
-                continue
-            return f"[Gemini error: {err}] Silakan tinjau skenario solver secara manual."
-    return "[Gemini error: retry exhausted] Silakan tinjau skenario solver secara manual."
+    if not aicore.configured():
+        return ("[AI tidak dikonfigurasi — tambahkan AICORE_* dan AI_API_URL ke file .env] "
+                "Tinjau skenario solver di atas dan pilih yang sesuai secara manual.")
+    if not _llm_budget_ok(interactive):
+        return ("[AI: batas permintaan per menit tercapai, coba lagi sebentar lagi] "
+                "Silakan tinjau skenario solver secara manual.")
+    try:
+        # GPT-5.x counts hidden reasoning against the limit, so give it headroom.
+        text, used = await asyncio.to_thread(aicore.ask_any, prompt,
+                                             max_tokens=max(max_tokens, 2048), first=model)
+    except aicore.AICoreError as exc:
+        print(f"[aicore] {exc}", file=sys.stderr)
+        return f"[AI error: {str(exc)[:300]}] Silakan tinjau skenario solver secara manual."
+    _llm_cache_put(cache_key, text, used)
+    _answered_by.set(used)
+    return text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -578,12 +521,12 @@ async def post_state_reset() -> dict[str, Any]:
 @app.post(
     "/api/disrupt",
     response_model=DisruptionResponse,
-    summary="Trigger disruption analysis — CP-SAT solver + Gemini 3.5 Flash summary",
+    summary="Trigger disruption analysis — CP-SAT solver + SAP AI Core summary",
 )
 async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
     """
     Simulate a machine disruption. Runs the CP-SAT solver to generate three
-    recovery scenarios (A / B / C), then calls Gemini 3.5 Flash to produce a 2-3
+    recovery scenarios (A / B / C), then calls SAP AI Core to produce a 2-3
     sentence executive summary in Bahasa Indonesia with specific IDR cost figures.
     """
     if body.end_hour <= body.start_hour:
@@ -673,7 +616,7 @@ async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
     except Exception as exc:  # RAG must never break the disruption flow
         print(f"[rag] grounding skipped: {exc}")
 
-    # ── Gemini 3.5 Flash: Bahasa Indonesia executive summary ──────────────────
+    # ── SAP AI Core: Bahasa Indonesia executive summary ──────────────────
     prompt = (
         f"Anda adalah AI Supervisor lantai produksi di PT Karawang Precision Manufacturing.\n"
         f"Mesin {body.machine_id} mengalami gangguan ({body.disruption_type}) "
@@ -687,14 +630,14 @@ async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
         f"{grounding_block}\n"
         "Jawab HANYA dengan ringkasan tersebut, tanpa kata pengantar atau penjelasan tambahan."
     )
-    gemini_summary = await _call_gemini(prompt, max_tokens=512)
+    ai_summary = await _call_llm(prompt, max_tokens=512)
 
     return DisruptionResponse(
         machine_id=body.machine_id,
         disruption_type=body.disruption_type,
         disruption_hours=disruption_hours,
         scenarios=scenarios,
-        claude_summary=gemini_summary,
+        claude_summary=ai_summary,
         sap_version=_sap.get_version(),
         sources=sources,
         grounding_abstained=grounding_abstained,
@@ -938,7 +881,7 @@ async def get_ledger_verify() -> LedgerVerifyResponse:
 )
 async def post_skills_generate(body: SkillGenerateRequest) -> SkillGenerateResponse:
     """
-    Call Gemini 3.5 Flash to produce a full bilingual EN/ID SKILL.md playbook from
+    Call SAP AI Core to produce a full bilingual EN/ID SKILL.md playbook from
     a plain-language supervisor description.
     """
     prompt = (
@@ -957,7 +900,7 @@ async def post_skills_generate(body: SkillGenerateRequest) -> SkillGenerateRespo
         "Be specific, realistic, and production-ready. Include concrete threshold values.\n"
         "Output ONLY the raw markdown, starting with # SKILL.md."
     )
-    skill_md = await _call_gemini(prompt, max_tokens=2048)
+    skill_md = await _call_llm(prompt, max_tokens=2048)
     return SkillGenerateResponse(skill_md=skill_md, model_used=_active_model())
 
 
@@ -998,7 +941,7 @@ def _maintenance_context(state: dict[str, Any]) -> str:
 async def post_chat(body: ChatRequest) -> ChatResponse:
     """
     Hybrid-chat fallback: scripted fast paths live in the frontend; anything
-    else comes here. Gemini answers in Bahasa Indonesia, grounded on a live
+    else comes here. The AI answers in Bahasa Indonesia, grounded on a live
     SAP snapshot embedded in the prompt. It is text-only: it cannot approve,
     reroute, or write anything — the reply must direct the user to the
     approval buttons for actions.
@@ -1027,33 +970,51 @@ async def post_chat(body: ChatRequest) -> ChatResponse:
             "misalnya [S1]. Jangan menambah fakta prosedur yang tidak ada di passage. "
             "Jangan mencantumkan id untuk fakta dari data SAP.\n"
         )
+    order_lines = "\n".join(
+        f"- {o.get('id')} kelas {o.get('order_class')} di {o.get('work_center_id')}, "
+        f"{_hhmm(o.get('planned_start'))}–{_hhmm(o.get('planned_end'))}, deadline {_hhmm(o.get('deadline'))}, "
+        f"status {o.get('status')}, progres {o.get('progress_percent', 0)}%, "
+        f"denda SLA Rp {o.get('sla_penalty_per_hour_idr', 0):,}/jam"
+        for o in orders
+    )
+    stock_lines = "\n".join(
+        f"- {p.get('part_no')} ({p.get('description')}): stok {p.get('stock_qty')} {p.get('unit')}, "
+        f"lead time {p.get('lead_time_days')} hari, Rp {p.get('unit_price_idr', 0):,}"
+        for p in state.get("spare_parts", [])
+    )
+    data_block = (
+        f"Status mesin: {machines}.\n"
+        "Jadwal/log maintenance (gunakan ini untuk menjawab alasan sebuah mesin maintenance):\n"
+        f"{maintenance}\n"
+        f"Order (total {len(orders)}, per status {by_status}):\n{order_lines}\n"
+        f"Stok suku cadang:\n{stock_lines}\n"
+        f"SAP version: {state.get('_meta', {}).get('version')}.\n"
+    )
     prompt = (
         "Anda adalah AI Supervisor lantai produksi PT Karawang Precision Manufacturing. "
         "Jawab dalam Bahasa Indonesia, singkat (maks 3 kalimat), hanya berdasarkan data berikut. "
         "Anda HANYA memberi informasi/teks — Anda tidak bisa menyetujui skenario, mengubah jadwal, "
         "atau menulis ke SAP. Jika user meminta perubahan, arahkan ke tombol persetujuan di dasbor.\n\n"
-        f"Status mesin: {machines}.\n"
-        "Jadwal/log maintenance (gunakan ini untuk menjawab alasan sebuah mesin maintenance):\n"
-        f"{maintenance}\n"
-        f"Order (total {len(orders)}, per status {by_status}).\n"
-        f"SAP version: {state.get('_meta', {}).get('version')}.\n"
+        f"{data_block}"
         f"{grounding}\n"
+        f"{chat_visual.VISUAL_INSTRUCTION}\n\n"
         f"Pertanyaan supervisor: {body.message}\n\n"
-        "Jawab HANYA jawabannya, tanpa kata pengantar."
+        "Jawab HANYA jawabannya (plus visual bila perlu), tanpa kata pengantar."
     )
-    # Gemini 3.x thinking tokens count against maxOutputTokens; 300 cut replies
-    # mid-sentence ("...dalam status"). 1024 leaves room for a 3-sentence answer.
-    reply = await _call_gemini(prompt, max_tokens=1024)
-    if reply.startswith("[Gemini"):
-        # Both AI Core and the Gemini backup failed: say so plainly instead of
+    # Reasoning tokens count against the limit; 300 cut replies mid-sentence
+    # ("...dalam status"). 2048 leaves room for 3 sentences plus a small visual.
+    reply = await _call_llm(prompt, max_tokens=2048)
+    if reply.startswith(LLM_ERROR_PREFIX):
+        # Every AI Core model failed: say so plainly instead of
         # showing the provider's raw error text in the chat bubble.
         print(f"[chat] no model answered: {reply[:200]}", file=sys.stderr)
         return ChatResponse(
             reply=("AI Supervisor sedang tidak bisa menjawab karena layanan AI sedang sibuk "
                    "atau tidak terjangkau. Coba kirim ulang pertanyaan sebentar lagi."),
             model_used="unavailable", sources=[])
+    reply, visual = chat_visual.extract(reply, data_block)
     reply, sources = _cite_chat_sources(reply, packed)
-    return ChatResponse(reply=reply, model_used=_active_model(), sources=sources)
+    return ChatResponse(reply=reply, model_used=_active_model(), sources=sources, visual=visual)
 
 
 _CHAT_CITE = re.compile(r"[ \t]*\[(S\d+(?:\s*,\s*S\d+)*)\]")
@@ -1121,7 +1082,7 @@ async def post_skills_draft(body: SkillDraftRequest) -> SkillDraftResponse:
     """
     Generate complete skill files (SKILL.md, sla_penalties.json, hooks.json,
     safety_interlocks.json) from a guided interview. Falls back to template
-    if Gemini is not configured.
+    if AI Core is not configured.
     """
     validation_errors: list[str] = []
 
@@ -1167,7 +1128,7 @@ async def post_skills_draft(body: SkillDraftRequest) -> SkillDraftResponse:
     interlocks = _draft_interlocks(body.safety_thresholds)
 
     skill_md = ""
-    if _gemini_client is not None or aicore.configured():
+    if aicore.configured():
         skill_md = await _draft_skill_md_llm(body, interlocks)
     if not skill_md:
         skill_md = _create_fallback_skill_md(body.machine_type, body.failure_mode)
@@ -1258,12 +1219,12 @@ async def _draft_skill_md_llm(body: SkillDraftRequest, interlocks: list[dict]) -
         "gangguan di atas, dan Protokol Eskalasi. Bahasa Indonesia, ringkas (maksimal 60 baris)."
     )
     try:
-        text = (await _call_gemini(prompt, max_tokens=4096)).strip()
+        text = (await _call_llm(prompt, max_tokens=4096)).strip()
     except Exception as exc:
-        print(f"[skills/draft] LLM failed: {_safe_gemini_error(exc)}", file=sys.stderr)
+        print(f"[skills/draft] LLM failed: {type(exc).__name__}: {str(exc)[:200]}", file=sys.stderr)
         return ""
-    # _call_gemini reports its own failures as "[Gemini ...]" text, not exceptions.
-    if not text or text.startswith("[Gemini"):
+    # _call_llm reports its own failures as "[AI ...]" text, not exceptions.
+    if not text or text.startswith(LLM_ERROR_PREFIX):
         print(f"[skills/draft] no usable SKILL.md from LLM: {text[:120]!r}", file=sys.stderr)
         return ""
     fenced = re.fullmatch(r"```(?:markdown|md)?\s*\n([\s\S]*?)\n?```", text)
@@ -1280,7 +1241,7 @@ async def _draft_skill_md_llm(body: SkillDraftRequest, interlocks: list[dict]) -
 
 
 def _create_fallback_skill_md(machine_type: str, failure_mode: str, *args) -> str:
-    """Fallback SKILL.md when Gemini is not available."""
+    """Fallback SKILL.md when AI Core is not available."""
     return f"""# SKILL.md
 
 ## Metadata
@@ -1313,7 +1274,7 @@ Skill ini untuk mesin {machine_type} dengan mode gangguan {failure_mode}.
 """
 
 def _create_fallback_hooks(safety_thresholds: dict) -> list:
-    """Fallback hooks when Gemini is not available."""
+    """Fallback hooks when AI Core is not available."""
     return [
         {
             "id": "HOOK-TEMP-001",
@@ -1335,7 +1296,7 @@ def _create_fallback_hooks(safety_thresholds: dict) -> list:
 
 
 def _create_fallback_interlocks(safety_thresholds: dict) -> list:
-    """Fallback interlocks when Gemini is not available."""
+    """Fallback interlocks when AI Core is not available."""
     return [
         {
             "id": "SAFE-001",
@@ -2001,7 +1962,7 @@ async def _compose_llm(body: SkillComposeRequest, cases: list[dict[str, Any]]) -
         "menyarankan bypass interlock atau switch keselamatan; maksimal 4 penyebab dan 6 tugas."
     )
     try:
-        text = (await _call_gemini(prompt, max_tokens=1500)).strip()
+        text = (await _call_llm(prompt, max_tokens=1500)).strip()
     except Exception:
         return None
     fenced = re.search(r"\{[\s\S]*\}", text)
@@ -2061,7 +2022,7 @@ async def post_skills_compose(body: SkillComposeRequest) -> SkillComposeResponse
     provenance = {k: {"by": "rules", "from": ids} for k in ("name", "trigger", "confirm", "root_causes", "tasks")}
     provenance["allowed_actions"] = {"by": "rules", "from": ["plc_adapter/machine_limits.json"]}
     model_used, warnings = None, []
-    ai = await _compose_llm(body, cases) if (_gemini_client is not None or aicore.configured()) else None
+    ai = await _compose_llm(body, cases) if aicore.configured() else None
     if ai:
         model_used = _active_model()
         for key in ("confirm", "root_causes", "tasks"):
@@ -2329,7 +2290,7 @@ async def _analyze_reading(
         # Normal readings don't need an LLM — save quota for real alerts.
         analysis = f"{machine_id}: {metric} = {value} dalam batas normal."
     else:
-        analysis = await _call_gemini(analysis_prompt, max_tokens=150, interactive=False)
+        analysis = await _call_llm(analysis_prompt, max_tokens=150, interactive=False)
 
     await send({
         "event":          "telemetry_analysis",
@@ -2448,7 +2409,7 @@ def _classify_telemetry(
 
 
 async def _agent_llm(prompt: str) -> str:
-    return await _call_gemini(prompt, max_tokens=300, interactive=False)
+    return await _call_llm(prompt, max_tokens=300, interactive=False)
 
 
 _agent = ProactiveAgent(_maint_ledger, llm=_agent_llm)
@@ -2651,7 +2612,7 @@ async def _telemetry_to_playbook(
     _telemetry_last[key] = now
     phrase = _TELEMETRY_PHRASES.get(metric, metric.replace("_", " "))
     try:
-        # Template message only: keeps the Gemini free-tier quota for the operator-facing analysis.
+        # Template message only: keeps the AI call budget for the operator-facing analysis.
         return await _agent.handle_new_entry({
             "machine_id": machine_id,
             "symptom": f"{severity}: {metric} = {value}" + (f" ({rule})" if rule else "") + f" — {phrase}",
@@ -2663,6 +2624,119 @@ async def _telemetry_to_playbook(
     except Exception as exc:  # never let the flow break the telemetry socket
         print(f"[maintenance] proactive flow failed: {exc}", file=sys.stderr)
         return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent run — alarm → plan → tools → one approval (backend/agent_run.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def _agent_run_llm(prompt: str, max_tokens: int, model: str | None) -> str:
+    return await _call_llm(prompt, max_tokens=max_tokens, interactive=False, model=model)
+
+
+async def _agent_run_approve(scenario_id: str, scenario: dict[str, Any], version: int,
+                             approved_by: str) -> dict[str, Any]:
+    r = await post_approve(ApproveRequest(scenario_id=scenario_id, scenario_data=scenario,
+                                          expected_sap_version=version, approved_by=approved_by))
+    return r.model_dump()
+
+
+def _issue_scenarios(scenarios: list[dict[str, Any]]) -> None:
+    for s in scenarios:
+        _issued_scenarios[s["id"]] = copy.deepcopy(s)
+
+
+_agent_runner = AgentRunner(AgentDeps(
+    get_state=_sap.get_state,
+    apply_delta=lambda delta, version: _sap.apply_delta(delta, expected_version=version),
+    ledger_append=_ledger.append,
+    handle_case=lambda payload: _agent.handle_new_entry(payload, use_llm=False),
+    solve=_solver.solve,
+    issue_scenarios=_issue_scenarios,
+    approve_scenario=_agent_run_approve,
+    llm=_agent_run_llm,
+    active_model=_active_model,
+    planner_model=lambda: os.getenv("AGENT_MODEL", "anthropic--claude-4.5-sonnet").strip() or None,
+))
+
+
+class AgentRunRequest(BaseModel):
+    machine_id: str = Field(..., example="CNC-01")
+    alarm_code: Optional[str] = Field(None, example="ALM-162")
+    alarm_text: Optional[str] = Field(None, example="SPINDLE OVERLOAD")
+    tag: Optional[str] = None
+    value: Optional[float] = None
+
+
+class AgentApproveRequest(BaseModel):
+    approved_by: str = Field(..., min_length=3, example="Production Supervisor — Budi Santoso")
+
+
+def _alarm_trigger(machine_id: str, code: Optional[str], text: Optional[str],
+                   tags: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """Trigger for a run; the drifting tag comes from the simulator scenario behind the alarm code."""
+    metric = next((sc.metric for sc in PLC_SCENARIOS.values() if code and sc.alarm_code == code), None)
+    value = (tags or {}).get(metric) if metric else None
+    return {"machine_id": machine_id, "alarm_code": code, "alarm_text": text, "tag": metric,
+            "value": round(value, 2) if isinstance(value, (int, float)) else value, "source": "plc"}
+
+
+@app.post("/api/agent/run", summary="Start an agent run for a machine alarm (plan → tools → approval)")
+async def post_agent_run(body: AgentRunRequest) -> dict[str, Any]:
+    if not any(w.get("id") == body.machine_id for w in _sap.get_state().get("work_centers", [])):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown machine_id: {body.machine_id}")
+    code, text, tags = body.alarm_code, body.alarm_text, {}
+    if not code:  # started by hand: use the machine's live PLC alarm, if any
+        live = _plc_latest["alarms"].get(body.machine_id)
+        if live:
+            code, text = live.get("code"), live.get("text")
+        row = next((m for m in ((_plc_latest.get("scan") or {}).get("machines") or [])
+                    if m.get("machine_id") == body.machine_id), None)
+        tags = (row or {}).get("tags") or {}
+    trigger = _alarm_trigger(body.machine_id, code, text, tags)
+    if body.tag:
+        trigger.update(tag=body.tag, value=body.value)
+    trigger["source"] = "manual"
+    busy = _agent_runner.busy_for(body.machine_id, trigger.get("alarm_code"))
+    if busy and busy["status"] in ("planning", "running"):
+        return busy
+    return _agent_runner.start(trigger)
+
+
+@app.get("/api/agent/runs/latest", summary="The most recent agent run (null when none)")
+async def get_agent_run_latest() -> Optional[dict[str, Any]]:
+    return _agent_runner.latest()
+
+
+@app.get("/api/agent/runs/{run_id}", summary="One agent run with its plan and steps")
+async def get_agent_run(run_id: str) -> dict[str, Any]:
+    run = _agent_runner.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown run: {run_id}")
+    return run
+
+
+@app.post("/api/agent/runs/{run_id}/approve", summary="Approve the run's SAP writes: parts order + reroute")
+async def post_agent_run_approve(run_id: str, body: AgentApproveRequest) -> dict[str, Any]:
+    try:
+        return await _agent_runner.approve(run_id, body.approved_by)
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown run: {run_id}")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except DriftError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail={"error": "DriftError", "message": str(exc)})
+
+
+async def _autorun_agent(m: dict[str, Any], code: str, text: str) -> None:
+    """A newly latched PLC alarm starts an agent run by itself (AGENT_AUTORUN, default on)."""
+    if not _env_flag("AGENT_AUTORUN", True) or _agent_runner.busy_for(m["machine_id"], code):
+        return
+    run = _agent_runner.start(_alarm_trigger(m["machine_id"], code, text, m.get("tags")))
+    await _plc_broadcast({"event": "agent_run", "run_id": run["id"], "machine_id": m["machine_id"],
+                          "code": code, "timestamp": datetime.now(timezone.utc).isoformat()})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3074,6 +3148,7 @@ async def _plc_tick(scenario: Optional[str], peak: dict[tuple[str, str], str], a
                                 "proposed_action": proposal["action_id"] if proposal else None})
             if m["run"]:  # a stopped machine needs no load taken off it
                 await _plc_autonomous(proposal, f"alarm {code}")
+            _plc_spawn(_autorun_agent(m, code, alarm["text"]))
         elif not code:
             _plc_latest["alarms"].pop(mid, None)
         alarms[mid] = code
@@ -3168,9 +3243,9 @@ async def ws_plc(websocket: WebSocket) -> None:
 async def health() -> dict[str, str]:
     return {
         "status":             "ok",
-        "ai_model":           aicore.model_label() if aicore.configured() else GEMINI_MODEL,
+        "ai_model":           aicore.model_label(),
+        "ai_models":          ", ".join(aicore.models_in_order()),
         "aicore_configured":  "yes" if aicore.configured() else "no — set AICORE_* and AI_API_URL in .env",
-        "gemini_configured":  "yes" if GEMINI_API_KEY else "no — set GEMINI_API_KEY in .env",
         "sap_version":        str(_sap.get_version()),
         "sap_source":         str(_sap.get_state()["_meta"].get("source", "mock")),
         "sap_error":          str(_sap.get_state()["_meta"].get("s4hana_error", "")),

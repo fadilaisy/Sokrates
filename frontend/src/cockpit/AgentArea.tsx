@@ -197,7 +197,7 @@ function Proposing() {
       />
       {result.claude_summary && (
         <div className="rounded-md bg-page px-4 py-3">
-          <p className="text-[14px] font-semibold text-muted-ink">Ringkasan AI (Gemini)</p>
+          <p className="text-[14px] font-semibold text-muted-ink">Ringkasan AI (SAP AI Core)</p>
           <p className="text-[16px]">{result.claude_summary}</p>
         </div>
       )}

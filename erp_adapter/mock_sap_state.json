@@ -324,5 +324,109 @@
       "technician": "Bambang Susilo",
       "status": "IN_PROGRESS"
     }
-  ]
+  ],
+  "spare_parts": [
+    {
+      "part_no": "NSK-7014CTYNSULP4",
+      "description": "Bearing spindel angular contact (pasangan)",
+      "machine_models": [
+        "Haas VF-2"
+      ],
+      "stock_qty": 0,
+      "unit": "SET",
+      "storage_location": "WH-SP-A1",
+      "supplier": "PT Mitra Bearing Karawang",
+      "lead_time_days": 2,
+      "unit_price_idr": 18500000,
+      "reorder_point": 1
+    },
+    {
+      "part_no": "SEAL-SP-0031",
+      "description": "Seal labirin spindel",
+      "machine_models": [
+        "Haas VF-2"
+      ],
+      "stock_qty": 6,
+      "unit": "PCS",
+      "storage_location": "WH-SP-A2",
+      "supplier": "PT Mitra Bearing Karawang",
+      "lead_time_days": 1,
+      "unit_price_idr": 650000,
+      "reorder_point": 2
+    },
+    {
+      "part_no": "93-1000",
+      "description": "Kit servis spindel (gemuk + O-ring)",
+      "machine_models": [
+        "Haas VF-2"
+      ],
+      "stock_qty": 4,
+      "unit": "KIT",
+      "storage_location": "WH-SP-A2",
+      "supplier": "PT Sentosa Teknik CNC",
+      "lead_time_days": 3,
+      "unit_price_idr": 1200000,
+      "reorder_point": 1
+    },
+    {
+      "part_no": "CHL-FAN-0220",
+      "description": "Kipas chiller oli spindel",
+      "machine_models": [
+        "Mazak Variaxis i-500"
+      ],
+      "stock_qty": 2,
+      "unit": "PCS",
+      "storage_location": "WH-SP-B1",
+      "supplier": "PT Sentosa Teknik CNC",
+      "lead_time_days": 1,
+      "unit_price_idr": 2400000,
+      "reorder_point": 1
+    },
+    {
+      "part_no": "FLT-CLN-10U",
+      "description": "Filter coolant 10 mikron",
+      "machine_models": [
+        "Mazak Variaxis i-500",
+        "Haas VF-2"
+      ],
+      "stock_qty": 12,
+      "unit": "PCS",
+      "storage_location": "WH-SP-B2",
+      "supplier": "PT Sentosa Teknik CNC",
+      "lead_time_days": 1,
+      "unit_price_idr": 350000,
+      "reorder_point": 4
+    },
+    {
+      "part_no": "HSK-A63-SP-0042",
+      "description": "Klem tool HSK-A63 spindel",
+      "machine_models": [
+        "Mazak Variaxis i-500"
+      ],
+      "stock_qty": 1,
+      "unit": "PCS",
+      "storage_location": "WH-SP-B1",
+      "supplier": "PT Sentosa Teknik CNC",
+      "lead_time_days": 5,
+      "unit_price_idr": 9800000,
+      "reorder_point": 1
+    },
+    {
+      "part_no": "SNS-VIB-0110",
+      "description": "Sensor getaran spindel",
+      "machine_models": [
+        "Mazak Variaxis i-500",
+        "Haas VF-2"
+      ],
+      "stock_qty": 3,
+      "unit": "PCS",
+      "storage_location": "WH-SP-C1",
+      "supplier": "PT Sentosa Teknik CNC",
+      "lead_time_days": 2,
+      "unit_price_idr": 3100000,
+      "reorder_point": 1
+    }
+  ],
+  "reservations": [],
+  "purchase_requisitions": []
 }

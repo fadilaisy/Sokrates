@@ -20,7 +20,7 @@ def llm(monkeypatch):
         box["prompt"] = prompt
         return box["text"]
 
-    monkeypatch.setattr(m, "_call_gemini", fake)
+    monkeypatch.setattr(m, "_call_llm", fake)
     monkeypatch.setattr(m.aicore, "configured", lambda: True)
     return box
 
@@ -56,7 +56,7 @@ def test_ai_draft_is_used_and_marked(llm):
     _good(sources=("CASE-0042",)),                         # cites a case the expert did not pick
     _good(task="Bypass switch tekanan supaya mesin jalan"),  # suggests a bypass
     "maaf, saya tidak bisa",                               # no JSON
-    "[Gemini: tidak ada teks dalam respons]",
+    "[AI error: AI Core orchestration returned an empty reply]",
 ])
 def test_rejected_ai_falls_back_to_rules(llm, text):
     llm["text"] = text

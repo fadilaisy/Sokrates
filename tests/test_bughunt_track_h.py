@@ -79,20 +79,22 @@ def test_h4_ws_telemetry_list_payload_is_rejected_without_closing():
         assert ws.receive_json() == {"error": "Payload must be a JSON object"}
 
 
-# H5 — Gemini cache is capped at 256 entries
-def test_h5_gemini_cache_is_capped(monkeypatch):
+# H5 — LLM cache is capped at 256 entries
+def test_h5_llm_cache_is_capped(monkeypatch):
     monkeypatch.setattr(backend_main.aicore, "configured", lambda: True)
-    monkeypatch.setattr(backend_main.aicore, "ask", lambda prompt, max_tokens: f"reply {prompt}")
-    backend_main._gemini_cache.clear()
+    monkeypatch.setattr(backend_main.aicore, "ask_any",
+                        lambda prompt, max_tokens, first=None: (f"reply {prompt}", "gpt-5.4"))
+    monkeypatch.setattr(backend_main, "LLM_RPM", 10_000)
+    backend_main._llm_cache.clear()
     try:
         for i in range(300):
-            asyncio.run(backend_main._call_gemini(f"prompt-{i}", 64))
-        assert len(backend_main._gemini_cache) <= 256
+            asyncio.run(backend_main._call_llm(f"prompt-{i}", 64))
+        assert len(backend_main._llm_cache) <= 256
         # Newest entries survive; the oldest were evicted.
-        assert ("prompt-299", 64) in backend_main._gemini_cache
-        assert ("prompt-0", 64) not in backend_main._gemini_cache
+        assert ("\x00prompt-299", 64) in backend_main._llm_cache
+        assert ("\x00prompt-0", 64) not in backend_main._llm_cache
     finally:
-        backend_main._gemini_cache.clear()
+        backend_main._llm_cache.clear()
 
 
 # H6 — upload is rejected with 413 once the size limit is exceeded (chunked read)

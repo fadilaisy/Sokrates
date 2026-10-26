@@ -131,7 +131,7 @@ def test_skill_approve_writes_files_and_reloads_registry():
     if target.exists():
         shutil.rmtree(target)
     try:
-        # Draft endpoint must never 500, with or without Gemini configured.
+        # Draft endpoint must never 500, with or without AI Core configured.
         draft = client.post("/api/skills/draft", json={
             "machine_type": "Test Mill", "failure_mode": "Overheat",
             "sla_class_a_penalty_per_hour_idr": 20_000_000,
@@ -141,7 +141,7 @@ def test_skill_approve_writes_files_and_reloads_registry():
             "safety_thresholds": {"motor_temp_celsius": 90, "spindle_vibration_mm_per_s": 7, "coolant_pressure_bar": 2.5},
         })
         assert draft.status_code == 200
-        # Deterministic approve roundtrip (independent of Gemini output shape).
+        # Deterministic approve roundtrip (independent of AI output shape).
         payload = {
             "skill_md": "# SKILL.md test",
             "sla_penalties": {"order_classes": {"A": {"penalty_per_hour_idr": 1}}},
@@ -170,12 +170,12 @@ def test_chat_prompt_includes_maintenance_reason(monkeypatch):
 
     captured = {}
 
-    async def fake_gemini(prompt, max_tokens=512):
+    async def fake_llm_reply(prompt, max_tokens=512):
         captured["prompt"] = prompt
         captured["max_tokens"] = max_tokens
         return "CNC-05 sedang penggantian turret servo motor."
 
-    monkeypatch.setattr(m, "_call_gemini", fake_gemini)
+    monkeypatch.setattr(m, "_call_llm", fake_llm_reply)
     r = client.post("/api/chat", json={"message": "CNC-05 lagi maintenance karena masalah apa?"})
     assert r.status_code == 200
     p = captured["prompt"]

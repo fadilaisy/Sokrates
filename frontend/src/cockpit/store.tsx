@@ -49,6 +49,8 @@ export interface ChatMessage {
   scenario?: Scenario;
   /** SOP/plant-document passages the reply cites as [S1], [S2] … */
   sources?: RagSource[];
+  /** Optional HTML/SVG visual the AI added to its answer (shown in a sandboxed frame). */
+  visual?: string | null;
 }
 
 type WsStatus = "connecting" | "open" | "closed";
@@ -138,6 +140,11 @@ interface CockpitValue {
   toggleMute: () => void;
   toast: string | null;
   reset: () => Promise<void>;
+  /** Reload SAP state, metrics and ledger (after a write made outside the store, e.g. an agent run). */
+  reload: () => Promise<void>;
+  showToast: (t: string) => void;
+  /** Bumped when the PLC feed reports a new agent run, so the run panel refreshes at once. */
+  agentRunPing: number;
   resetting: boolean;
   skillStudioOpen: boolean;
   setSkillStudioOpen: (v: boolean) => void;
@@ -189,6 +196,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   const [approving, setApproving] = useState(false);
   const [conflict, setConflict] = useState<DriftDetail | null>(null);
   const [approver, setApprover] = useState(savedApprover);
+  const [agentRunPing, setAgentRunPing] = useState(0);
   const [injecting, setInjecting] = useState(false);
 
   const [live, setLive] = useState<Record<string, Record<string, number>>>({});
@@ -197,7 +205,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   const [safety, setSafety] = useState<SafetyAlert | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
-  const [plcOn, setPlcOn] = useState(false);
+  const [plcOn, setPlcOn] = useState(true);
   const [plcStatus, setPlcStatus] = useState<WsStatus>("closed");
   const [plcInfo, setPlcInfo] = useState<PlcInfo | null>(null);
   const [plcAlarm, setPlcAlarm] = useState<PlcAlarmFrame | null>(null);
@@ -304,10 +312,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       setSapVersion(s._meta.version);
       if (l) noteLedger(l);
       setOnline(h.status === "ok");
-      setAiConfigured(
-        String(h.gemini_configured ?? "").startsWith("yes") ||
-        String(h.aicore_configured ?? "").startsWith("yes"),
-      );
+      setAiConfigured(String(h.aicore_configured ?? "").startsWith("yes"));
       setError(null);
     } catch (e) {
       setOnline(false);
@@ -407,6 +412,10 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       setPlcAlarm(f as unknown as PlcAlarmFrame);
       return;
     }
+    if (f.event === "agent_run") {
+      setAgentRunPing((n) => n + 1);
+      return;
+    }
     if (f.event === "plc_prediction") {
       setPlcPrediction(f as unknown as PlcPredictionFrame);
       return;
@@ -452,7 +461,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     };
   }, [applyFrame]);
 
-  // ── simulated PLC feed (on demand: every scan is a server push) ─────────────
+  // ── PLC feed (connects on load; every scan is a server push) ───────────────
   useEffect(() => {
     if (!plcOn) return;
     let stopped = false;
@@ -842,7 +851,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
         setChatOpen(false);
         setLedgerOpen(true);
       } else {
-        // Hybrid fallback: free-form questions go to Gemini via /api/chat,
+        // Hybrid fallback: free-form questions go to SAP AI Core via /api/chat,
         // grounded on live SAP state. Scripted fast paths above stay instant
         // and key-free; the solver/SAP paths are never touched by the LLM.
         setChatBusy(true);
@@ -850,12 +859,12 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
         try {
           const r = await api.chat(t);
           setMessages((cur) => cur.filter((m) => m.id !== pid));
-          push({ from: "ai", text: r.reply, sources: r.sources });
+          push({ from: "ai", text: r.reply, sources: r.sources, visual: r.visual });
         } catch {
           setMessages((cur) => cur.filter((m) => m.id !== pid));
           push({
             from: "ai",
-            text: "AI tidak dapat dihubungi (periksa backend / GEMINI_API_KEY). Untuk sekarang saya bisa: status semua mesin, simulasi What-if, dan membuka audit ledger.",
+            text: "AI tidak dapat dihubungi (periksa backend / kredensial SAP AI Core). Untuk sekarang saya bisa: status semua mesin, simulasi What-if, dan membuka audit ledger.",
           });
         } finally {
           setChatBusy(false);
@@ -907,7 +916,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       plcMachines, plcPrediction, plcAction, plcBusy, approvePlcAction, setPlcAutonomy, setPlcLockout, planMaintenance,
       ledgerOpen, setLedgerOpen, verifying, verifyResult, verify,
       chatOpen, chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat,
-      muted, toggleMute, toast, reset, resetting,
+      muted, toggleMute, toast, reset, resetting, reload: load, showToast, agentRunPing,
       // Phase 3: Skill Studio
       skillStudioOpen, setSkillStudioOpen, skillStudioState, setSkillStudioState,
       skillStudioFormData, setSkillStudioFormData, skillStudioDraft, setSkillStudioDraft,
@@ -919,6 +928,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       lastAnalysis, safety, sendTelemetry, runFullAnalysis, autoIn, plcOn, plcStatus, plcInfo, plcAlarm, plcOffline, startPlcScenario,
       plcMachines, plcPrediction, plcAction, plcBusy, approvePlcAction, setPlcAutonomy, setPlcLockout, planMaintenance, ledgerOpen, verifying, verifyResult, verify, chatOpen,
       chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat, muted, toggleMute, toast, reset, resetting,
+      load, showToast, agentRunPing,
       skillStudioOpen, skillStudioState, skillStudioFormData, skillStudioDraft, skillStudioLintResult,
     ],
   );

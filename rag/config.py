@@ -109,35 +109,12 @@ def load_scoring_config() -> ScoringConfig:
 
 
 # ── Generation ──────────────────────────────────────────────────────────────
-GEN_PROVIDER = os.getenv("RAG_GEN_PROVIDER", "auto")    # auto | aicore | gemini | claude
+GEN_PROVIDER = os.getenv("RAG_GEN_PROVIDER", "auto")    # auto | aicore | claude
 CONTEXT_TOKEN_BUDGET = int(os.getenv("RAG_CONTEXT_TOKENS", "4000"))
-
-
-def gemini_model() -> str:
-    return os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
-
-
-def gemini_thinking_level() -> str:
-    """Gemini 3.x thinkingLevel ("low" keeps short answers fast); empty = model default."""
-    return os.getenv("GEMINI_THINKING_LEVEL", "low").strip()
 
 
 def claude_model() -> str:
     return os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")
-
-
-def aicore_gemini_model() -> str:
-    """model_name used when gemini calls are routed through AI Core orchestration."""
-    return os.getenv("AICORE_GEMINI_MODEL", "gemini-3.5-flash")
-
-
-def aicore_claude_model() -> str:
-    """model_name used when claude calls are routed through AI Core orchestration."""
-    return os.getenv("AICORE_CLAUDE_MODEL", "anthropic--claude-4.5-haiku")
-
-
-def gemini_key() -> Optional[str]:
-    return os.getenv("GEMINI_API_KEY") or None
 
 
 def anthropic_key() -> Optional[str]:

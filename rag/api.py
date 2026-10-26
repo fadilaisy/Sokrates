@@ -31,7 +31,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
-from . import config
+from . import aicore, config
 from .generate import answer_from_retrieval
 from .ingest import UploadError, create_document, process_document
 from .llm import available_providers
@@ -89,7 +89,7 @@ class RetrieveRequest(BaseModel):
 class AnswerRequest(BaseModel):
     incident: Incident = Field(default_factory=Incident)
     query: str = Field("", examples=["Apa yang harus dilakukan operator sekarang?"])
-    provider: Optional[str] = Field(None, pattern="^(auto|gemini|claude)$")
+    provider: Optional[str] = Field(None, pattern="^(auto|aicore|claude)$")
 
 
 # ── Documents ───────────────────────────────────────────────────────────────
@@ -254,7 +254,7 @@ async def rag_status() -> Dict[str, Any]:
     from .config import load_scoring_config
     return {"documents": by_status, "chunks": n_chunks, "ocr": {"available": ok, "languages": langs},
             "llm_providers": available_providers(), "provider_order": config.GEN_PROVIDER,
-            "models": {"gemini": config.gemini_model(), "claude": config.claude_model()},
+            "models": {"aicore": aicore.models_in_order(), "claude": config.claude_model()},
             "scoring": load_scoring_config().to_dict()}
 
 

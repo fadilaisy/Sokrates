@@ -25,7 +25,7 @@ def llm(monkeypatch):
         replies["prompt"] = prompt
         return replies["text"]
 
-    monkeypatch.setattr(m, "_call_gemini", fake)
+    monkeypatch.setattr(m, "_call_llm", fake)
     monkeypatch.setattr(m.aicore, "configured", lambda: True)
     return replies
 
@@ -37,7 +37,7 @@ def _draft():
 
 
 @pytest.mark.parametrize("text", [
-    "[Gemini: tidak ada teks dalam respons (finishReason=MAX_TOKENS)] Silakan tinjau",
+    "[AI error: AI Core orchestration returned an empty reply] Silakan tinjau",
     "",
     '{"skill_md": "# SKILL.md\n- truncated',
 ])

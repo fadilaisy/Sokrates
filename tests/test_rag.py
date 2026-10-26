@@ -21,7 +21,7 @@ _TMP = tempfile.mkdtemp(prefix="rag_test_")
 os.environ["RAG_DATA_DIR"] = _TMP
 # Set to "" rather than pop: backend.main's load_dotenv() never overrides an
 # existing variable, but would re-add a popped one from .env and go online.
-for _k in ("GEMINI_API_KEY", "ANTHROPIC_API_KEY",
+for _k in ("ANTHROPIC_API_KEY",
            "AICORE_AUTH_URL", "AICORE_CLIENT_ID", "AICORE_CLIENT_SECRET", "AI_API_URL"):
     os.environ[_k] = ""
 
@@ -178,7 +178,7 @@ def _fake_llm(claims):
 
 
 def test_generation_postcheck(corpus, monkeypatch):
-    monkeypatch.setattr(generate, "available_providers", lambda: ["gemini"])
+    monkeypatch.setattr(generate, "available_providers", lambda: ["aicore"])
     monkeypatch.setattr(generate, "complete", _fake_llm([
         {"text": "Biarkan spindle dingin minimal 20 menit dengan pintu enclosure terbuka.", "sources": ["S1", "S2"]},
         {"text": "Spindle harus diganti dengan biaya 40 juta rupiah.", "sources": ["S1"]},
@@ -254,7 +254,7 @@ def test_highlight_spans_pick_supporting_sentence():
 
 
 def test_generation_sources_carry_highlights(corpus, monkeypatch):
-    monkeypatch.setattr(generate, "available_providers", lambda: ["gemini"])
+    monkeypatch.setattr(generate, "available_providers", lambda: ["aicore"])
     monkeypatch.setattr(generate, "complete", _fake_llm([
         {"text": "Biarkan spindle dingin minimal 20 menit dengan pintu enclosure terbuka.", "sources": ["S1", "S2"]},
     ]))
@@ -278,7 +278,7 @@ def test_chat_returns_only_cited_sources_with_highlights(corpus, monkeypatch):
         return ("Biarkan spindle dingin minimal 20 menit dengan pintu enclosure terbuka [S1]. "
                 "CNC-02 sedang berjalan normal [S9].")
 
-    monkeypatch.setattr(m, "_call_gemini", fake_llm)
+    monkeypatch.setattr(m, "_call_llm", fake_llm)
     r = TestClient(m.app).post("/api/chat", json={"message": "Langkah pemulihan overheat CNC-02?"})
     assert r.status_code == 200
     body = r.json()
@@ -297,6 +297,6 @@ def test_chat_without_citations_has_no_sources(corpus, monkeypatch):
     async def fake_llm(prompt, max_tokens=512):
         return "Semua mesin berjalan normal."
 
-    monkeypatch.setattr(m, "_call_gemini", fake_llm)
+    monkeypatch.setattr(m, "_call_llm", fake_llm)
     body = TestClient(m.app).post("/api/chat", json={"message": "Mesin mana yang butuh perhatian?"}).json()
     assert body["sources"] == [] and body["reply"] == "Semua mesin berjalan normal."

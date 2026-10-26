@@ -391,7 +391,7 @@ export interface RagStatus {
   ocr: { available: boolean; languages: string | null };
   llm_providers: string[];
   provider_order: string;
-  models: { gemini: string; claude: string };
+  models: { aicore: string[]; claude: string };
 }
 
 /** The cockpit acts as a supervisor (uploads allowed). No real auth in the backend yet. */
@@ -507,6 +507,53 @@ export function isOvertimeLabel(v: unknown): boolean {
   return /lembur|overtime/i.test(String(v ?? ""));
 }
 
+// ── Agent run (backend/agent_run.py) ────────────────────────────────────────
+export type AgentRunStatus = "planning" | "running" | "awaiting_approval" | "approved" | "done" | "failed";
+
+export interface AgentRunStep {
+  tool: string;
+  label: string;
+  status: "running" | "done" | "skipped" | "failed";
+  started_at: string;
+  ms: number | null;
+  summary: string;
+  output: Record<string, unknown>;
+}
+
+export interface AgentPartReservation {
+  id: string;
+  part_no: string;
+  description: string;
+  qty: number;
+  unit: string;
+  storage_location?: string;
+}
+
+export interface AgentPurchaseRequisition extends AgentPartReservation {
+  supplier: string;
+  lead_time_days: number;
+  value_idr: number;
+}
+
+export interface AgentRun {
+  id: string;
+  status: AgentRunStatus;
+  trigger: { machine_id: string; alarm_code: string | null; alarm_text: string | null; tag: string | null; value: number | null; source: string };
+  started_at: string;
+  finished_at: string | null;
+  planner: { source: "llm" | "fallback"; model: string | null; reasoning: string; ms: number } | null;
+  plan: { tool: string; label: string; why: string; added?: string }[];
+  steps: AgentRunStep[];
+  pending_approval: {
+    parts: { reservations: AgentPartReservation[]; purchase_requisitions: AgentPurchaseRequisition[]; max_lead_time_days: number } | null;
+    scenario: { id: string; name_id?: string; total_cost_idr?: number; net_savings_idr?: number; gantt_changes: { order_id: string; from_machine: string; to_machine: string }[] } | null;
+  } | null;
+  summary: string | null;
+  summary_model: string | null;
+  approval: { approved_by: string; at: string; scenario?: { receipt_id: string; sha256_hash: string }; parts?: { receipt_id: string; sha256_hash: string; reservations: string[]; purchase_requisitions: string[] } } | null;
+  error: string | null;
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(API_BASE + path, {
     ...init,
@@ -528,6 +575,12 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   state: () => req<SapState>("/api/state"),
+  agentRun: (b: { machine_id: string; alarm_code?: string; alarm_text?: string }) =>
+    req<AgentRun>("/api/agent/run", { method: "POST", body: JSON.stringify(b) }),
+  agentRunLatest: () => req<AgentRun | null>("/api/agent/runs/latest"),
+  agentRunGet: (id: string) => req<AgentRun>(`/api/agent/runs/${encodeURIComponent(id)}`),
+  agentRunApprove: (id: string, approved_by: string) =>
+    req<AgentRun>(`/api/agent/runs/${encodeURIComponent(id)}/approve`, { method: "POST", body: JSON.stringify({ approved_by }) }),
   resetState: () => req<SapState>("/api/state/reset", { method: "POST" }),
   health: () => req<Record<string, string>>("/health"),
   metrics: () => req<ShiftMetrics>("/api/metrics"),
@@ -555,7 +608,7 @@ export const api = {
       body: JSON.stringify({ supervisor_description }),
     }),
   chat: (message: string) =>
-    req<{ reply: string; model_used: string; sources?: RagSource[] }>("/api/chat", {
+    req<{ reply: string; model_used: string; sources?: RagSource[]; visual?: string | null }>("/api/chat", {
       method: "POST",
       body: JSON.stringify({ message }),
     }),

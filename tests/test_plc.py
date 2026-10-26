@@ -71,7 +71,7 @@ def test_ws_plc_alarm_finds_past_fixes_and_runs_playbook_with_code(monkeypatch, 
 
     async def fake_llm(prompt, max_tokens=150, interactive=True):
         return "analisis uji"
-    monkeypatch.setattr(backend_main, "_call_gemini", fake_llm)
+    monkeypatch.setattr(backend_main, "_call_llm", fake_llm)
 
     assert client.post("/api/plc/scenario", json={"scenario": "cnc04_overheat"}).json()["scenario"] == "cnc04_overheat"
     clock.t += 10  # fully drifted: 98 °C, ALM-410 latched
@@ -194,7 +194,7 @@ def fresh_plc(monkeypatch):
 
     async def fake_llm(prompt, max_tokens=150, interactive=True):
         return "analisis uji"
-    monkeypatch.setattr(backend_main, "_call_gemini", fake_llm)
+    monkeypatch.setattr(backend_main, "_call_llm", fake_llm)
     client.post("/api/state/reset")
     return plc, clock
 
