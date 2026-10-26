@@ -205,7 +205,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   const [safety, setSafety] = useState<SafetyAlert | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
-  const [plcOn, setPlcOn] = useState(false);
+  const [plcOn, setPlcOn] = useState(true);
   const [plcStatus, setPlcStatus] = useState<WsStatus>("closed");
   const [plcInfo, setPlcInfo] = useState<PlcInfo | null>(null);
   const [plcAlarm, setPlcAlarm] = useState<PlcAlarmFrame | null>(null);
@@ -461,7 +461,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     };
   }, [applyFrame]);
 
-  // ── simulated PLC feed (on demand: every scan is a server push) ─────────────
+  // ── PLC feed (connects on load; every scan is a server push) ───────────────
   useEffect(() => {
     if (!plcOn) return;
     let stopped = false;

@@ -11,7 +11,7 @@ import { MaintenancePage } from "./MaintenancePage";
 import { MachineStrip, PlcPanel, TelemetryPanel, WhatIfPanel } from "./Panels";
 import { Header } from "./Shell";
 import { ShiftGantt } from "./ShiftGantt";
-import { DEMO_DISRUPTION, useCockpit } from "./store";
+import { useCockpit } from "./store";
 import { Btn, Card, Mono, StatusBadge } from "./ui";
 
 /*
@@ -62,7 +62,7 @@ function Pill({ children, tone = "neutral" }: { children: ReactNode; tone?: "neu
 }
 
 function DashboardPage() {
-  const { state, metrics, displayStatus, setPage, runDisruption } = useCockpit();
+  const { state, metrics, displayStatus, setPage } = useCockpit();
   const machines = state?.work_centers ?? [];
   const bucket = (s: MachineStatus): MachineStatus => (s === "DISRUPTED" ? "FAULT" : s === "RECOVERING" ? "MAINTENANCE" : s);
   const counts: Record<string, number> = { RUNNING: 0, FAULT: 0, IDLE: 0, MAINTENANCE: 0 };
@@ -111,12 +111,7 @@ function DashboardPage() {
       </Card>
 
       <Card className="flex flex-col gap-4 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 className="text-[24px] font-bold">Jadwal produksi · Shift 1</h2>
-          <Btn size="lg" onClick={() => runDisruption(DEMO_DISRUPTION)}>
-            What-if: CNC-02 rusak 3 jam
-          </Btn>
-        </div>
+        <h2 className="text-[24px] font-bold">Jadwal produksi · Shift 1</h2>
         <ShiftGantt state={state} note={`${today.length} order di ${new Set(today.map((o) => o.work_center_id)).size} mesin hari ini`} />
       </Card>
 
