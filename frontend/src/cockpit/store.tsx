@@ -55,6 +55,9 @@ export interface ChatMessage {
 
 type WsStatus = "connecting" | "open" | "closed";
 
+/** Earlier chat turns sent along with a question to /api/chat. */
+const CHAT_HISTORY_TURNS = 6;
+
 interface CockpitValue {
   // data
   state: SapState | null;
@@ -222,6 +225,9 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMode, setChatMode] = useState<"general" | "recalc">("general");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  // Read by sendChat so a follow-up question carries the turns before it.
+  const messagesRef = useRef<ChatMessage[]>([]);
+  messagesRef.current = messages;
   const [recalcVersions, setRecalcVersions] = useState<{ from: number; to: number } | null>(null);
   const [chatBusy, setChatBusy] = useState(false);
 
@@ -835,6 +841,11 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     async (text: string) => {
       const t = text.trim();
       if (!t) return;
+      // Earlier turns for the AI, oldest first; progress bubbles are not part of the conversation.
+      const history = messagesRef.current
+        .filter((m) => m.kind !== "progress" && m.text.trim())
+        .slice(-CHAT_HISTORY_TURNS)
+        .map((m) => ({ role: m.from === "user" ? ("user" as const) : ("assistant" as const), text: m.text }));
       push({ from: "user", text: t });
       if (chatMode === "recalc") {
         await recalc(t === "__auto__" ? null : t);
@@ -857,7 +868,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
         setChatBusy(true);
         const pid = push({ from: "ai", kind: "progress", text: "AI Supervisor meninjau data SAP terbaru…" });
         try {
-          const r = await api.chat(t);
+          const r = await api.chat(t, history);
           setMessages((cur) => cur.filter((m) => m.id !== pid));
           push({ from: "ai", text: r.reply, sources: r.sources, visual: r.visual });
         } catch {

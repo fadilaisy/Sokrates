@@ -224,7 +224,7 @@ def test_part_gone_since_planning_becomes_a_requisition(runner):
 def test_refused_approval_is_recorded_on_the_run(runner, monkeypatch):
     run = _pending_run()
 
-    async def refuse(*_a):
+    async def refuse(*_a, **_k):
         raise ar.ApprovalRefused("Mesin CNC-02 berstatus FAULT")
 
     monkeypatch.setattr(m._agent_runner.deps, "approve_scenario", refuse)
@@ -301,3 +301,15 @@ def test_shutdown_cancels_runs_still_working():
         await r.shutdown()
         return t
     assert asyncio.run(go()).cancelled()
+
+
+def test_agent_reroute_is_tagged_and_the_chat_can_say_so(runner):
+    run = _pending_run()
+    ok = client.post(f"/api/agent/runs/{run['id']}/approve", json={"approved_by": "Supervisor Budi"})
+    assert ok.status_code == 200, ok.text
+    entry = next(e for e in reversed(m._ledger.get_all()) if e["action_type"] == "SCENARIO_APPROVED")
+    assert entry["source"] == {"kind": "agent_run", "run_id": run["id"], "machine_id": "CNC-01",
+                               "alarm_code": "ALM-162", "alarm_text": "SPINDLE OVERLOAD"}
+    moved = [u["id"] for u in entry["delta_applied"]["order_updates"]]
+    block = m.chat_context.order_history_block(m._ledger.get_all(), moved)
+    assert f"agen SkillForge {run['id']} setelah ALM-162 (SPINDLE OVERLOAD) di CNC-01" in block

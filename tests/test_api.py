@@ -330,3 +330,45 @@ def test_ws_telemetry_rejects_bad_value_and_keeps_session():
         ok = ws.receive_json()
         assert ok["event"] == "telemetry_analysis"
         assert ok["severity"] == "OK" and ok["value"] == 70
+
+
+def test_chat_prompt_carries_history_and_new_context_blocks(monkeypatch):
+    """Follow-ups keep the conversation; origin, PLC, agent runs, plans and OEE are in the prompt."""
+    import backend.main as m
+
+    captured = {}
+
+    async def fake_llm_reply(prompt, max_tokens=512):
+        captured["prompt"] = prompt
+        return "WO-2025-002 masih rencana awal SAP."
+
+    monkeypatch.setattr(m, "_call_llm", fake_llm_reply)
+    r = client.post("/api/chat", json={
+        "message": "kenapa?",
+        "history": [{"role": "user", "text": "Order apa saja di CNC-02?"},
+                    {"role": "assistant", "text": "WO-2025-002 dan WO-2025-003."}],
+    })
+    assert r.status_code == 200, r.text
+    p = captured["prompt"]
+    assert "Supervisor: Order apa saja di CNC-02?\nAI Supervisor: WO-2025-002 dan WO-2025-003." in p
+    for heading in ("Asal/riwayat order", "Bacaan PLC live", "Agent run terbaru",
+                    "Skenario dari analisis gangguan terakhir", "Downtime dan OEE"):
+        assert heading in p
+    assert "maks 3 kalimat" not in p
+
+
+def test_dashboard_approval_records_its_source_and_reset_marks_the_ledger():
+    import backend.main as m
+
+    client.post("/api/state/reset")
+    assert m._ledger.get_all()[-1]["action_type"] == "STATE_RESET"
+    r = client.post("/api/disrupt", json={"machine_id": "CNC-02", "disruption_type": "BREAKDOWN",
+                                          "start_hour": 2, "end_hour": 5})
+    best = next(s for s in r.json()["scenarios"] if s["recommended"])
+    ok = client.post("/api/approve", json={"scenario_id": best["id"], "scenario_data": best,
+                                           "expected_sap_version": r.json()["sap_version"],
+                                           "approved_by": "Supervisor Budi"})
+    assert ok.status_code == 200, ok.text
+    entry = m._ledger.get_all()[-1]
+    assert entry["action_type"] == "SCENARIO_APPROVED" and entry["source"] == {"kind": "dashboard"}
+    client.post("/api/state/reset")

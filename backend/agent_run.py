@@ -73,7 +73,8 @@ class AgentDeps:
     handle_case: Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]   # proactive flow
     solve: Callable[[Dict[str, Any], Dict[str, Any]], List[Dict[str, Any]]]
     issue_scenarios: Callable[[List[Dict[str, Any]]], None]
-    approve_scenario: Callable[[str, Dict[str, Any], int, str], Awaitable[Dict[str, Any]]]
+    # (scenario_id, scenario, sap_version, approved_by, source=…) → receipt
+    approve_scenario: Callable[..., Awaitable[Dict[str, Any]]]
     llm: Callable[[str, int, Optional[str]], Awaitable[str]]               # prompt, max_tokens, model
     active_model: Callable[[], str]
     planner_model: Callable[[], str]
@@ -478,8 +479,11 @@ class AgentRunner:
             scenario = pending.get("scenario")
             if scenario and "scenario" not in receipts:
                 version = int(self.deps.get_state()["_meta"]["version"])
+                t = run["trigger"]
+                source = {"kind": "agent_run", "run_id": run["id"], "machine_id": t.get("machine_id"),
+                          "alarm_code": t.get("alarm_code"), "alarm_text": t.get("alarm_text")}
                 receipts["scenario"] = await self.deps.approve_scenario(scenario["id"], scenario, version,
-                                                                        approved_by)
+                                                                        approved_by, source=source)
             parts = pending.get("parts")
             if parts and (parts["reservations"] or parts["purchase_requisitions"]) and "parts" not in receipts:
                 receipts["parts"] = self._apply_parts(run, parts, approved_by)

@@ -17,7 +17,7 @@ const DISRUPTION_LABEL: Record<string, string> = {
   FAULT: "fault",
 };
 
-export const scenarioName = (id: unknown) => SCENARIO_NAME[String(id)] ?? String(id ?? "");
+export const scenarioName = (id: unknown) => SCENARIO_NAME[String(id ?? "").split(":").pop() ?? ""] ?? String(id ?? "");
 
 const person = (v: unknown) => String(v ?? "").replace("Production Supervisor — ", "") || "–";
 const sap = (e: LedgerEntry) =>
@@ -59,11 +59,19 @@ export function ledgerDetail(e: LedgerEntry): string[] {
     }
     case "SCENARIO_APPROVED": {
       const moved = movedOrders(e.delta_applied);
+      const src = e.source as { kind?: string; run_id?: string; alarm_code?: string; machine_id?: string } | undefined;
       return [
         `${person(e.approved_by)} menyetujui skenario ${scenarioName(e.scenario_chosen)}; jadwal ditulis ke SAP (${sap(e)}).`,
+        ...(src?.kind === "agent_run"
+          ? [`Diusulkan oleh agen ${src.run_id ?? ""} setelah ${src.alarm_code ?? "alarm manual"} di ${src.machine_id ?? "?"}.`]
+          : src?.kind === "dashboard"
+            ? ["Dari analisis gangguan di dasbor."]
+            : []),
         moved.length ? `Order yang dijadwal ulang: ${moved.join("; ")}.` : "Tidak ada order yang dipindah.",
       ];
     }
+    case "STATE_RESET":
+      return [`Data SAP dimuat ulang ke rencana awal (SAP v${e.sap_version_after ?? "?"}). Riwayat order di chat dihitung mulai dari sini.`];
     case "APPROVAL_REJECTED_DRIFT":
       return [
         `Persetujuan skenario ${scenarioName(e.scenario_chosen)} oleh ${person(e.approved_by)} ditolak: data SAP berubah (v${e.sap_version_before} → v${e.sap_version_after}) sejak skenario dihitung.`,
