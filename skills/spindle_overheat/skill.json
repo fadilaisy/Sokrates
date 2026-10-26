@@ -1,0 +1,63 @@
+{
+  "schema": "skillforge_skill_v2",
+  "name": "Motor spindel overheat",
+  "version": "1.0.0",
+  "status": "active",
+  "owner": "Teknisi senior, Lini A",
+  "trigger": {
+    "machines": [],
+    "metrics": [
+      "motor_temp_celsius"
+    ],
+    "alarm_codes": [
+      "ALM-410",
+      "Alarm 108",
+      "SP1241"
+    ],
+    "predictions": true
+  },
+  "confirm": [
+    {
+      "kind": "auto",
+      "text": "Suhu motor spindel naik terus pada beban normal (bukan lonjakan sesaat)."
+    },
+    {
+      "kind": "auto",
+      "text": "Cek tekanan coolant di mesin yang sama; bila ikut turun, pakai skill coolant."
+    },
+    {
+      "kind": "operator",
+      "text": "Apakah kipas pendingin motor atau kipas chiller terdengar berhenti?"
+    }
+  ],
+  "root_causes": [
+    {
+      "cause": "Kipas kondensor chiller spindel macet, jaket spindel tidak terdinginkan",
+      "evidence": "Suhu return coolant chiller di atas 30 °C",
+      "sources": [
+        "CASE-0010"
+      ]
+    },
+    {
+      "cause": "Filter atau kipas pendingin motor spindel tersumbat serbuk dan kabut oli",
+      "evidence": "Aliran udara kipas lemah, sering di shift kedua atau saat stainless",
+      "sources": [
+        "CASE-0018",
+        "CASE-0006"
+      ]
+    }
+  ],
+  "tasks": [
+    "Turunkan feed override ke 50% dan biarkan spindel idle sampai suhu turun.",
+    "Lakukan lockout-tagout sebelum membuka cover kipas atau chiller.",
+    "Periksa kipas kondensor chiller CHL-FAN-0220 dan bersihkan sirip kondensor.",
+    "Bila chiller normal, ganti filter kipas pendingin 59-0112 dan bersihkan pelindung kipas.",
+    "Jalankan spindel tanpa beban 5 menit; pastikan suhu di bawah 85 °C sebelum produksi."
+  ],
+  "allowed_actions": [
+    "reduce_feed_50",
+    "send_task",
+    "book_maintenance",
+    "solver_reschedule"
+  ]
+}

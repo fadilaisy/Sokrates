@@ -1,0 +1,24 @@
+[
+  {
+    "id": "HOOK-003",
+    "name": "Coolant Pressure Low Alert",
+    "name_id": "Peringatan Tekanan Pendingin Rendah",
+    "trigger_type": "telemetry",
+    "condition": "coolant_pressure_bar < 2.5",
+    "condition_description_id": "Tekanan pendingin mendekati batas minimum (interlock Tier 1 di < 2 bar)",
+    "skill_action": "INSPECT_COOLANT_SYSTEM",
+    "skill_action_steps": [
+      "Log pressure drop event",
+      "Check coolant reservoir level",
+      "Inspect pump motor status",
+      "Alert maintenance_technician",
+      "If pressure drops below 2 bar, trigger SAFE-003 immediately"
+    ],
+    "auto_resolve_if": "coolant_pressure_bar >= 3.0 FOR 2_CONSECUTIVE_READINGS",
+    "notify_roles": [
+      "maintenance_technician"
+    ],
+    "severity": "WARNING",
+    "debounce_seconds": 15
+  }
+]

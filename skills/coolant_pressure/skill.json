@@ -1,0 +1,31 @@
+{
+  "schema": "skillforge_skill_v2",
+  "name": "Tekanan coolant turun",
+  "version": "1.0.0",
+  "status": "active",
+  "owner": "Kepala perawatan, Lini A",
+  "trigger": {
+    "machines": [],
+    "metrics": ["coolant_pressure_bar"],
+    "alarm_codes": ["Alarm 970", "ALM-441"],
+    "predictions": true
+  },
+  "confirm": [
+    {"kind": "auto", "text": "Tekanan coolant di bawah 2.5 bar saat spindel berputar (mesin berhenti terbaca 0 bar, bukan gangguan)."},
+    {"kind": "auto", "text": "Cek apakah suhu motor spindel ikut naik pada mesin yang sama."},
+    {"kind": "operator", "text": "Apakah pompa coolant terdengar berisik atau ada busa di tangki?"}
+  ],
+  "root_causes": [
+    {"cause": "Filter cartridge tersumbat serpihan halus, pompa kavitasi", "evidence": "Tekanan turun perlahan, pompa berisik", "sources": ["CASE-0009"]},
+    {"cause": "Impeller pompa aus dan seal bocor, udara masuk", "evidence": "Tekanan rendah dan pompa berisik", "sources": ["CASE-0012"]},
+    {"cause": "Relief valve pompa tekanan tinggi disetel terlalu rendah setelah perawatan", "evidence": "Coolant through-spindle lemah, sering patah bor", "sources": ["CASE-0025"]}
+  ],
+  "tasks": [
+    "Lakukan lockout-tagout, matikan pompa coolant dan tutup valve tangki.",
+    "Lepas dan periksa strainer serta filter cartridge FLT-CLN-10U; ganti bila tersumbat.",
+    "Bila filter bersih, periksa impeller pompa COOL-PMP-0312 dan seal SEAL-PMP-0058.",
+    "Isi tangki, bleed udara, lalu uji tekanan di atas 3.5 bar selama 20 menit.",
+    "Jangan bypass switch tekanan coolant (SAFE-003)."
+  ],
+  "allowed_actions": ["feed_hold", "send_task", "book_maintenance", "solver_reschedule"]
+}

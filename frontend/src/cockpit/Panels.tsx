@@ -1,7 +1,7 @@
 import { useState, useSyncExternalStore } from "react";
 import { Volume2 } from "lucide-react";
 import { cn } from "../lib/utils";
-import type { PlcActionResult } from "../lib/api";
+import type { PlcActionResult, SkillGuidance } from "../lib/api";
 import { fmt1, shortHash, telemetryOf, windowLabel } from "../lib/shift";
 import { audioReady, onAudioReady, playAlarmNow } from "../lib/sound";
 import { DEMO_DISRUPTION, useCockpit } from "./store";
@@ -248,6 +248,12 @@ function PlcPredictionCard() {
         {p.unit} {fmtEta(p.eta_warning_s)}, batas kritis {p.critical}
         {p.unit} {fmtEta(p.eta_critical_s)}.
       </p>
+      {p.skill?.has_know_how && (
+        <p className="text-muted-ink">
+          Skill <span className="font-semibold text-navy">{p.skill.name}</span> siap
+          {p.skill.root_causes[0] ? `; penyebab paling sering: ${p.skill.root_causes[0].cause.toLowerCase()}` : ""}.
+        </p>
+      )}
       <ProposedAction machineId={p.machine_id} />
       <Btn variant="secondary" onClick={() => planMaintenance(p.machine_id)} disabled={phase === "detecting"}>
         Jadwalkan perawatan sebelum rusak
@@ -261,6 +267,7 @@ function PlcAlarmCard() {
   const { plcAlarm, muted } = useCockpit();
   const canSound = useSyncExternalStore(onAudioReady, audioReady);
   if (!plcAlarm) return null;
+  if (plcAlarm.skill?.has_know_how) return <CopilotCard skill={plcAlarm.skill} />;
   const fix = plcAlarm.past_fixes[0];
   const doc = plcAlarm.documents[0];
   return (
@@ -291,6 +298,88 @@ function PlcAlarmCard() {
       {doc?.citation && <p className="text-muted-ink">Referensi: {doc.citation}</p>}
       <ProposedAction machineId={plcAlarm.machine_id} />
     </div>
+  );
+}
+
+/** Production copilot: the matched skill walks the alarm through issue → root cause → tasks → action. */
+function CopilotCard({ skill }: { skill: SkillGuidance }) {
+  const { plcAlarm, setSkillStudioOpen } = useCockpit();
+  if (!plcAlarm) return null;
+  const [top, ...rest] = skill.root_causes;
+  const doc = plcAlarm.documents[0];
+  return (
+    <section aria-label="Production copilot" className="flex flex-col gap-3 rounded-md border border-warn bg-page px-3 py-3 text-[14px]">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className="font-semibold">
+          <Mono>{plcAlarm.machine_id} · {plcAlarm.code}</Mono> {plcAlarm.text}
+        </p>
+        <button
+          type="button"
+          onClick={() => setSkillStudioOpen(true)}
+          className="min-h-10 rounded-md text-left text-muted-ink underline-offset-2 hover:underline"
+        >
+          Skill: <span className="font-semibold text-navy">{skill.name}</span>
+          {skill.version ? ` v${skill.version}` : ""}
+          {skill.owner ? ` · ${skill.owner}` : ""}
+        </button>
+      </div>
+      <div className="grid gap-3 md:grid-cols-3">
+        <div className="flex flex-col gap-1.5 rounded-md border border-line bg-surface p-3">
+          <h4 className="text-[13px] font-semibold tracking-wide text-muted-ink uppercase">1 · Masalah</h4>
+          <ul className="flex flex-col gap-1">
+            {skill.confirm.map((c) => (
+              <li key={c.text} className="flex gap-2">
+                <span className={cn("shrink-0 rounded px-1.5 font-mono text-[12px]", c.kind === "auto" ? "bg-page text-accent-blue" : "bg-warn-bg text-maint")}>
+                  {c.kind === "auto" ? "otomatis" : "operator"}
+                </span>
+                <span>{c.text}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div className="flex flex-col gap-1.5 rounded-md border border-line bg-surface p-3">
+          <h4 className="text-[13px] font-semibold tracking-wide text-muted-ink uppercase">2 · Akar penyebab</h4>
+          {top ? (
+            <>
+              <p className="font-semibold">{top.cause}</p>
+              {top.evidence_found && <p className="font-semibold text-running">Paling mungkin: kasus yang sama ditemukan untuk alarm ini</p>}
+              {top.evidence && <p className="text-muted-ink">Bukti: {top.evidence}</p>}
+              <SourceChips ids={top.sources} />
+              {rest.map((c) => (
+                <div key={c.cause} className="border-t border-line pt-1.5">
+                  <p>{c.cause}</p>
+                  <SourceChips ids={c.sources} />
+                </div>
+              ))}
+            </>
+          ) : (
+            <p className="text-muted-ink">Skill ini belum punya akar penyebab.</p>
+          )}
+        </div>
+        <div className="flex flex-col gap-1.5 rounded-md border border-line bg-surface p-3">
+          <h4 className="text-[13px] font-semibold tracking-wide text-muted-ink uppercase">3 · Tugas mekanik</h4>
+          <ol className="list-decimal pl-5">
+            {skill.tasks.slice(0, 5).map((t) => <li key={t}>{t}</li>)}
+          </ol>
+        </div>
+      </div>
+      {doc?.citation && <p className="text-muted-ink">Referensi: {doc.citation}</p>}
+      <div>
+        <h4 className="mb-1 text-[13px] font-semibold tracking-wide text-muted-ink uppercase">4 · Aksi di mesin</h4>
+        <ProposedAction machineId={plcAlarm.machine_id} />
+        {!plcAlarm.proposed_action && <p className="text-muted-ink">Tidak ada aksi PLC yang menunggu persetujuan.</p>}
+      </div>
+    </section>
+  );
+}
+
+function SourceChips({ ids }: { ids: string[] }) {
+  return (
+    <span className="flex flex-wrap gap-1.5">
+      {ids.map((id) => (
+        <Mono key={id} className="rounded border border-line px-1.5 py-0.5 text-[12px]">{id}</Mono>
+      ))}
+    </span>
   );
 }
 
