@@ -62,6 +62,7 @@ TOOLS: List[Dict[str, Any]] = [
 TOOL_BY_NAME = {t["name"]: t for t in TOOLS}
 TOOL_ORDER = [t["name"] for t in TOOLS]
 ACTIVE = ("planning", "running")
+FINISHED = ("done", "approved", "failed", "rejected")
 
 
 @dataclass
@@ -206,7 +207,11 @@ class AgentRunner:
         return self.runs.get(run_id)
 
     def latest(self) -> Optional[Dict[str, Any]]:
-        return next(reversed(self.runs.values()), None) if self.runs else None
+        """The run the cockpit should show: one still working, else one waiting for approval, else the newest."""
+        runs = list(reversed(self.runs.values()))
+        return (next((r for r in runs if r["status"] in ACTIVE), None)
+                or next((r for r in runs if r["status"] == "awaiting_approval"), None)
+                or (runs[0] if runs else None))
 
     def busy_for(self, machine_id: str, alarm_code: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """A run still planning/running on this machine, or one waiting for approval on the same alarm."""
@@ -234,8 +239,9 @@ class AgentRunner:
                "finished_at": None, "planner": None, "plan": [], "steps": [], "pending_approval": None,
                "summary": None, "summary_model": None, "approval": None, "error": None}
         self.runs[run_id] = run
-        while len(self.runs) > MAX_RUNS:
-            del self.runs[next(iter(self.runs))]
+        # Evict the oldest finished runs only; a run still working or waiting for approval stays.
+        for old in [k for k, r in self.runs.items() if r["status"] in FINISHED][:max(0, len(self.runs) - MAX_RUNS)]:
+            del self.runs[old]
         return run
 
     # ── execute ──────────────────────────────────────────────────────────────
@@ -387,6 +393,9 @@ class AgentRunner:
         scenarios = await asyncio.to_thread(self.deps.solve, state, disruption)
         for s in scenarios:
             s["disruption"] = dict(disruption)
+            # The solver reuses scenario_a/b/c on every solve; a run-scoped id keeps this run's
+            # scenario approvable after a later /api/disrupt or another run issues its own.
+            s["id"] = f"{run['id']}:{s['id']}"
         self.deps.issue_scenarios(scenarios)
         best = next((s for s in scenarios if s.get("recommended")), scenarios[0] if scenarios else None)
         reason = (f"menunggu suku cadang ~{lead_days} hari" if lead_days
@@ -447,31 +456,54 @@ class AgentRunner:
         if run["status"] != "awaiting_approval":
             raise ValueError(f"run is {run['status']}, not awaiting approval")
         pending = run["pending_approval"] or {}
-        receipts: Dict[str, Any] = {}
-        # Reroute first: it is the write that Tier 1 / drift checks can refuse, and a
-        # refusal must not leave a parts order behind without its schedule change.
-        scenario = pending.get("scenario")
-        if scenario:
-            version = int(self.deps.get_state()["_meta"]["version"])
-            receipts["scenario"] = await self.deps.approve_scenario(scenario["id"], scenario, version, approved_by)
-        parts = pending.get("parts")
-        if parts and (parts["reservations"] or parts["purchase_requisitions"]):
-            receipts["parts"] = self._apply_parts(run, parts, approved_by)
+        # Receipts of writes already applied survive a failed attempt, so a retry never repeats them.
+        receipts: Dict[str, Any] = run.setdefault("receipts", {})
+        try:
+            # Reroute first: it is the write that Tier 1 / drift checks can refuse, and a
+            # refusal must not leave a parts order behind without its schedule change.
+            scenario = pending.get("scenario")
+            if scenario and "scenario" not in receipts:
+                version = int(self.deps.get_state()["_meta"]["version"])
+                receipts["scenario"] = await self.deps.approve_scenario(scenario["id"], scenario, version,
+                                                                        approved_by)
+            parts = pending.get("parts")
+            if parts and (parts["reservations"] or parts["purchase_requisitions"]) and "parts" not in receipts:
+                receipts["parts"] = self._apply_parts(run, parts, approved_by)
+        except ApprovalRefused as exc:
+            run["status"], run["error"] = "rejected", f"Persetujuan ditolak: {exc}"
+            run["finished_at"] = _iso()
+            raise
+        except Exception as exc:  # e.g. SAP drift: the run stays approvable, with the reason shown
+            run["error"] = f"Persetujuan gagal, coba lagi: {type(exc).__name__}: {str(exc)[:200]}"
+            raise
         run["approval"] = {"approved_by": approved_by, "at": _iso(), **receipts}
-        run["status"] = "approved"
+        run["status"], run["error"] = "approved", None
         return run
 
     def _apply_parts(self, run, order, approved_by) -> Dict[str, Any]:
         state = self.deps.get_state()
         stock = {p["part_no"]: p for p in state.get("spare_parts", [])}
         now = _iso()
-        reservations = [{**r, "status": "RESERVED", "approved_by": approved_by, "created_at": now}
-                        for r in order["reservations"]]
-        requisitions = [{**p, "status": "RELEASED", "approved_by": approved_by, "created_at": now}
-                        for p in order["purchase_requisitions"]]
-        updates = [{"part_no": r["part_no"],
-                    "stock_qty": max(0, (stock.get(r["part_no"], {}).get("stock_qty") or 0) - r["qty"])}
-                   for r in reservations]
+        # Stock may have moved since planning: reserve only what is still on the shelf,
+        # and turn the rest into a purchase requisition.
+        left = {no: p.get("stock_qty") or 0 for no, p in stock.items()}
+        reservations, requisitions = [], []
+        for r in order["reservations"]:
+            if left.get(r["part_no"], 0) >= r["qty"]:
+                left[r["part_no"]] -= r["qty"]
+                reservations.append({**r, "status": "RESERVED", "approved_by": approved_by, "created_at": now})
+            else:
+                p = stock.get(r["part_no"], {})
+                requisitions.append({k: v for k, v in r.items() if k != "storage_location"} | {
+                    "id": r["id"].replace("RSV-", "PR-", 1), "supplier": p.get("supplier"),
+                    "lead_time_days": p.get("lead_time_days"),
+                    "value_idr": (p.get("unit_price_idr") or 0) * r["qty"],
+                    "status": "RELEASED", "approved_by": approved_by, "created_at": now,
+                    "note": "stok habis saat persetujuan"})
+        requisitions += [{**p, "status": "RELEASED", "approved_by": approved_by, "created_at": now}
+                         for p in order["purchase_requisitions"]]
+        updates = [{"part_no": no, "stock_qty": qty} for no, qty in left.items()
+                   if qty != (stock[no].get("stock_qty") or 0)]
         version = int(state["_meta"]["version"])
         new_state = self.deps.apply_delta({"spare_part_updates": updates, "reservations_add": reservations,
                                            "purchase_requisitions_add": requisitions}, version)
@@ -486,6 +518,10 @@ class AgentRunner:
         return {"receipt_id": entry["id"], "sha256_hash": entry["sha256_hash"],
                 "reservations": [r["id"] for r in reservations],
                 "purchase_requisitions": [p["id"] for p in requisitions]}
+
+
+class ApprovalRefused(Exception):
+    """A business rule refused the run's SAP write (Tier 1, scenario mismatch); retrying will not help."""
 
 
 class _Skip(Exception):

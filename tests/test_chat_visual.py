@@ -58,3 +58,10 @@ def test_chat_endpoint_returns_visual_and_prompts_for_it(monkeypatch):
     assert out.reply == "WO-2025-001 di CNC-01 punya denda tertinggi."
     assert out.visual and "<table>" in out.visual
     assert "html-visual" in captured["prompt"] and "Stok suku cadang" in captured["prompt"]
+
+
+def test_machine_id_alone_does_not_ground_a_visual():
+    ctx = "CNC-01 suhu 78 C, CNC-02 suhu 65 C"
+    made_up = "<div><b>CNC-01</b> 91 · 47 · 33</div>"
+    assert not cv.grounded(made_up, ctx)
+    assert cv.grounded("<div><b>CNC-01</b> 78 · <b>CNC-02</b> 65</div>", ctx)

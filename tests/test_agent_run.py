@@ -176,3 +176,91 @@ def test_plc_alarm_starts_a_run_by_itself(runner, monkeypatch):
     assert run is not before and run["trigger"]["tag"] == "spindle_vibration_mm_per_s"
     assert run["trigger"]["value"] == 7.4
     assert [f["event"] for f in frames] == ["agent_run"]
+
+
+# ── review fixes (PR #32 follow-up) ──────────────────────────────────────────
+
+def _pending_run():
+    run = client.post("/api/agent/run", json={"machine_id": "CNC-01", "alarm_code": "ALM-162",
+                                              "alarm_text": "SPINDLE OVERLOAD"}).json()
+    run = _wait(run["id"])
+    assert run["status"] == "awaiting_approval", run.get("error")
+    return run
+
+
+def test_run_stays_approvable_after_a_later_solve(runner):
+    run = _pending_run()
+    assert run["pending_approval"]["scenario"]["id"].startswith(run["id"] + ":")
+    r = client.post("/api/disrupt", json={"machine_id": "CNC-02", "disruption_type": "BREAKDOWN",
+                                          "start_hour": 2, "end_hour": 5})
+    assert r.status_code == 200
+    ok = client.post(f"/api/agent/runs/{run['id']}/approve", json={"approved_by": "Supervisor Budi"})
+    assert ok.status_code == 200, ok.text
+
+
+def test_placeholder_signer_cannot_approve(runner):
+    run = _pending_run()
+    r = client.post(f"/api/agent/runs/{run['id']}/approve", json={"approved_by": "Production Supervisor"})
+    assert r.status_code == 422
+    assert client.get(f"/api/agent/runs/{run['id']}").json()["status"] == "awaiting_approval"
+
+
+def test_part_gone_since_planning_becomes_a_requisition(runner):
+    run = _pending_run()
+    assert "SEAL-SP-0031" in [r["part_no"] for r in run["pending_approval"]["parts"]["reservations"]]
+    state = m._sap.get_state()
+    m._sap.apply_delta({"spare_part_updates": [{"part_no": "SEAL-SP-0031", "stock_qty": 0}]},
+                       expected_version=state["_meta"]["version"])
+    done = client.post(f"/api/agent/runs/{run['id']}/approve", json={"approved_by": "Supervisor Budi"}).json()
+    parts = done["approval"]["parts"]
+    state = m._sap.get_state()
+    seal_rows = [p for p in state["purchase_requisitions"] if p["part_no"] == "SEAL-SP-0031"]
+    assert len(seal_rows) == 1 and seal_rows[0]["id"] in parts["purchase_requisitions"]
+    assert not any(r["part_no"] == "SEAL-SP-0031" for r in state["reservations"])
+    seal = next(p for p in m._sap.get_state()["spare_parts"] if p["part_no"] == "SEAL-SP-0031")
+    assert seal["stock_qty"] == 0
+
+
+def test_refused_approval_is_recorded_on_the_run(runner, monkeypatch):
+    run = _pending_run()
+
+    async def refuse(*_a):
+        raise ar.ApprovalRefused("Mesin CNC-02 berstatus FAULT")
+
+    monkeypatch.setattr(m._agent_runner.deps, "approve_scenario", refuse)
+    r = client.post(f"/api/agent/runs/{run['id']}/approve", json={"approved_by": "Supervisor Budi"})
+    assert r.status_code == 409
+    after = client.get(f"/api/agent/runs/{run['id']}").json()
+    assert after["status"] == "rejected" and "FAULT" in after["error"]
+
+
+def test_retry_after_failed_parts_step_does_not_reroute_twice(runner, monkeypatch):
+    run = _pending_run()
+    real = m._agent_runner._apply_parts
+    calls = {"n": 0}
+
+    def flaky(*a):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("SAP busy")
+        return real(*a)
+
+    monkeypatch.setattr(m._agent_runner, "_apply_parts", flaky)
+    first = client.post(f"/api/agent/runs/{run['id']}/approve", json={"approved_by": "Supervisor Budi"})
+    assert first.status_code == 503
+    mid = client.get(f"/api/agent/runs/{run['id']}").json()
+    assert mid["status"] == "awaiting_approval" and "SAP busy" in mid["error"]
+    downtime = len(m._sap.get_state()["_meta"].get("downtime_events") or [])
+    ok = client.post(f"/api/agent/runs/{run['id']}/approve", json={"approved_by": "Supervisor Budi"})
+    assert ok.status_code == 200, ok.text
+    assert len(m._sap.get_state()["_meta"].get("downtime_events") or []) == downtime
+
+
+def test_pending_runs_are_never_evicted_and_stay_latest():
+    r = ar.AgentRunner(m._agent_runner.deps)
+    pending = r.create({"machine_id": "CNC-01"})
+    pending["status"] = "awaiting_approval"
+    for _ in range(ar.MAX_RUNS + 5):
+        r.create({"machine_id": "CNC-03"})["status"] = "done"
+    assert pending["id"] in r.runs and len(r.runs) <= ar.MAX_RUNS + 1
+    assert r.latest()["id"] == pending["id"]
