@@ -1962,7 +1962,7 @@ async def _compose_llm(body: SkillComposeRequest, cases: list[dict[str, Any]]) -
         "menyarankan bypass interlock atau switch keselamatan; maksimal 4 penyebab dan 6 tugas."
     )
     try:
-        text = (await _call_gemini(prompt, max_tokens=1500)).strip()
+        text = (await _call_llm(prompt, max_tokens=1500)).strip()
     except Exception:
         return None
     fenced = re.search(r"\{[\s\S]*\}", text)
@@ -2022,7 +2022,7 @@ async def post_skills_compose(body: SkillComposeRequest) -> SkillComposeResponse
     provenance = {k: {"by": "rules", "from": ids} for k in ("name", "trigger", "confirm", "root_causes", "tasks")}
     provenance["allowed_actions"] = {"by": "rules", "from": ["plc_adapter/machine_limits.json"]}
     model_used, warnings = None, []
-    ai = await _compose_llm(body, cases) if (_gemini_client is not None or aicore.configured()) else None
+    ai = await _compose_llm(body, cases) if aicore.configured() else None
     if ai:
         model_used = _active_model()
         for key in ("confirm", "root_causes", "tasks"):
