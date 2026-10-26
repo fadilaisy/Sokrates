@@ -4,7 +4,7 @@
 > **Hackathon:** Sokrates Hackathon  
 > **Repo:** https://github.com/fadilaisy/Sokrates  
 > **Handover Date:** 10 October 2026 (Phases 1–6 verified complete)  
-> **Stack:** Python 3.9 · FastAPI · OR-Tools CP-SAT · Gemini 3.5 Flash (Google) · SAP S/4HANA Mock  
+> **Stack:** Python 3.9 · FastAPI · OR-Tools CP-SAT · SAP AI Core (GPT-5.4 + fallbacks) · SAP S/4HANA Mock  
 
 ---
 
@@ -15,7 +15,7 @@ When a machine breaks down, it automatically:
 
 1. Detects the disruption via telemetry or manual input
 2. Runs an **OR-Tools CP-SAT solver** to generate 3 recovery scenarios in seconds
-3. Asks **Gemini 3.5 Flash** to write a Bahasa Indonesia executive summary with IDR cost figures
+3. Asks **SAP AI Core** to write a Bahasa Indonesia executive summary with IDR cost figures
 4. Presents scenarios to a human supervisor for one-click approval
 5. Applies the approved schedule change to the mock SAP system with **drift detection** (optimistic locking)
 6. Writes every decision to a **tamper-evident SHA-256 hash-chained audit ledger**
@@ -69,7 +69,7 @@ sokrates hackathon/
 
 ### Prerequisites
 - macOS with Python 3.9+ installed
-- A Google Gemini API key (Gemini 3.5 Flash)
+- An SAP AI Core service key (hackathon key broker)
 
 ### First-time setup
 
@@ -88,8 +88,10 @@ cp .env.example .env
 Edit `.env` and fill in your key:
 
 ```env
-GEMINI_API_KEY=your-gemini-api-key-here
-GEMINI_MODEL=gemini-3.5-flash
+AICORE_AUTH_URL=...
+AICORE_CLIENT_ID=...
+AICORE_CLIENT_SECRET=...
+AI_API_URL=...
 PORT=8000
 ```
 
@@ -111,7 +113,7 @@ Open **http://localhost:8000/docs** for the interactive Swagger UI.
 |--------|----------|-------------|
 | `GET` | `/api/state` | Full SAP mock state (machines, orders, maintenance) |
 | `POST` | `/api/state/reset` | Reset SAP mock to baseline (ledger is kept) |
-| `POST` | `/api/disrupt` | Trigger disruption → CP-SAT solver → Gemini summary. Logs `DISRUPTION_DETECTED` + `SCENARIOS_GENERATED` |
+| `POST` | `/api/disrupt` | Trigger disruption → CP-SAT solver → AI summary. Logs `DISRUPTION_DETECTED` + `SCENARIOS_GENERATED` |
 | `POST` | `/api/disrupt/inject` | Inject a real second disruption (sets machine status, bumps version, logs `EXTERNAL_CHANGE`) — failure-drill trigger for real 409s |
 | `POST` | `/api/approve` | Approve scenario, apply to SAP, write audit entry (409 on stale `expected_sap_version`) |
 | `GET` | `/api/ledger` | Full tamper-evident audit ledger |
@@ -131,7 +133,7 @@ Open **http://localhost:8000/docs** for the interactive Swagger UI.
 | `POST` | `/api/maintenance/chat` | Secondary chat: `rag` cited answer, case citations mapped to ledger ids |
 | `GET` | `/api/maintenance/ledger/verify` | Hash-chain check for the maintenance ledger |
 | `WS` | `/ws/telemetry` | Real-time telemetry stream + AI analysis (severity from skill files). Abnormal readings also run the proactive flow (`maintenance_playbook` frame, debounced 5 min per machine+metric) |
-| `GET` | `/health` | Health check (Gemini configured? SAP version?) |
+| `GET` | `/health` | Health check (AI Core configured? SAP version?) |
 
 ### Example: Trigger a disruption
 
@@ -143,7 +145,7 @@ curl -X POST http://localhost:8000/api/disrupt \
 
 Response includes:
 - `scenarios` — 3 options (Status Quo / Lembur / Rerute Optimal) with IDR costs
-- `claude_summary` — 2-3 sentence Bahasa Indonesia recommendation from Gemini 3.5 Flash (kept as-is for backward compatibility)
+- `claude_summary` — 2-3 sentence Bahasa Indonesia recommendation from SAP AI Core (kept as-is for backward compatibility)
 - `sap_version` — current version number for optimistic locking
 
 ### Example: Approve a scenario
@@ -286,7 +288,7 @@ interview → draft → lint → approve drawer backed by `/api/skills/*`.
 | **Optimistic locking** on SAP state via `version` field | Prevents two simultaneous approvals from corrupting state without needing a database |
 | **SHA-256 hash chaining** in audit ledger | Tamper-evident record keeping, verifiable without blockchain infrastructure |
 | **CP-SAT 5-second timeout** | Keeps `/api/disrupt` latency fast enough for demo use |
-| **`run_in_executor` for Gemini** | Gemini SDK is synchronous; executor prevents blocking the async FastAPI event loop |
+| **`asyncio.to_thread` for AI Core** | The AI Core client is synchronous httpx; a thread keeps the async FastAPI event loop free |
 | **Three-tier constraint hierarchy** | Mirrors real industrial ISA-95 / safety engineering practice |
 | **SKILL.md as declarative playbook** | Domain knowledge is separated from solver code — skills are swappable without changing Python |
 | **Skill-driven costs + telemetry** | Solver and WebSocket classifier read `sla_penalties.json` / `safety_interlocks.json` / `hooks.json` fresh from disk; Tier 1 statuses are never routed to |
@@ -311,7 +313,7 @@ message to the best-matched mechanic. Chat is a collapsed, secondary panel on th
 
 **Citations.** Every step/warning/part carries `source_case_ids`; each resolves to the ledger entry + `sha256_hash`
 and to the indexed chunk (`doc_id#p1`). The LLM only phrases the mechanic message and is rejected (template fallback)
-if it cites a case outside the retrieved set. Telemetry-triggered flows use the template (keeps Gemini quota).
+if it cites a case outside the retrieved set. Telemetry-triggered flows use the template (keeps the AI call budget).
 
 **Additions to `rag/` for exact codes** (all existing tests still pass):
 - `metadata.py`: OCR-tolerant fault codes (`SVO401`→`SV0401`, `ALM-I62`→`ALM162`), controller codes `PREFIX-NNNN`
@@ -333,7 +335,7 @@ grounding and `/api/answer` may now cite repair history too (authority 0.6, belo
 |------|-------|
 | Frontend | `frontend/` is a SkillForge cockpit (Dasbor / Cockpit / Lantai Pabrik + Skill Studio overlay). Downtime & OEE cards are labelled "data contoh" until the backend exposes them. |
 | Mock SAP state resets on server restart | No persistent DB — wire to a real SAP OData API or PostgreSQL for production |
-| Gemini model name | `gemini-3.5-flash` — verify latest model ID at aistudio.google.com if errors occur |
+| AI Core model names | `AICORE_MODEL_NAME` + `AICORE_FALLBACK_MODELS` — smoke-test new names with `scripts/aicore_check.py` |
 | Single-machine solver | CP-SAT currently solves one disruption at a time — extend for multi-disruption scenarios |
 | No authentication | Add OAuth2 / API key middleware before production deployment |
 | No vector retrieval | `rag` is BM25 + metadata + lexicon (no embeddings). The mentor asked for hybrid vector+keyword; cross-language paraphrases ("dinginkan spindel" vs "let the spindle cool") are still missed. Add an embedding score as another R feature in `rag/scoring.py` |
@@ -355,7 +357,7 @@ python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 4
 ## 14. Git History
 
 ```
-f8a2b1c  refactor: swap Claude Haiku for Gemini 3.5 Flash (Google)
+f8a2b1c  refactor: swap Claude Haiku for SAP AI Core (GPT-5.4 + fallbacks)
 5ab97bb  feat: SkillForge complete Python backend
 c558251  Add files via upload (initial repo creation)
 ```

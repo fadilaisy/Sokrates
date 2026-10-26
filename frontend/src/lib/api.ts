@@ -376,7 +376,7 @@ export interface RagStatus {
   ocr: { available: boolean; languages: string | null };
   llm_providers: string[];
   provider_order: string;
-  models: { gemini: string; claude: string };
+  models: { aicore: string[]; claude: string };
 }
 
 /** The cockpit acts as a supervisor (uploads allowed). No real auth in the backend yet. */

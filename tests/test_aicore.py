@@ -1,5 +1,5 @@
 """SAP AI Core client: orchestration + direct modes, token caching, 401 re-login,
-and the llm-layer provider wiring (orchestration vs public vendor APIs)."""
+model fallbacks on the tenant, and the llm-layer provider wiring."""
 import httpx
 import pytest
 
@@ -51,7 +51,7 @@ def fake(monkeypatch):
     for k, v in ENV.items():
         monkeypatch.setenv(k, v)
     for k in ("AICORE_DEPLOYMENT_ID", "AICORE_RESOURCE_GROUP", "AICORE_ORCHESTRATION_ID",
-              "AICORE_MODEL_NAME", "AICORE_MODEL_LABEL"):
+              "AICORE_MODEL_NAME", "AICORE_MODEL_LABEL", "AICORE_FALLBACK_MODELS"):
         monkeypatch.delenv(k, raising=False)
     aicore.reset_token()
     f = FakeAICore()
@@ -92,10 +92,10 @@ def test_orchestration_id_defaults_to_tenant_deployment(fake):
 
 
 def test_per_call_model_override(fake):
-    assert aicore.ask("q", model="gemini-3.5-flash") == "Halo!"
+    assert aicore.ask("q", model="anthropic--claude-4.5-sonnet") == "Halo!"
     _, body, _ = fake.chat_requests[-1]
     llm_cfg = body["orchestration_config"]["module_configurations"]["llm_module_config"]
-    assert llm_cfg["model_name"] == "gemini-3.5-flash"
+    assert llm_cfg["model_name"] == "anthropic--claude-4.5-sonnet"
 
 
 def test_orchestration_reply_tolerates_mirror_only_body(fake):
@@ -112,8 +112,8 @@ def test_orchestration_empty_reply_raises(fake):
 
 def test_model_label_reflects_orchestration_model(fake, monkeypatch):
     assert aicore.model_label() == "gpt-5.4"
-    monkeypatch.setenv("AICORE_MODEL_NAME", "gemini-3.5-flash")
-    assert aicore.model_label() == "gemini-3.5-flash"
+    monkeypatch.setenv("AICORE_MODEL_NAME", "anthropic--claude-4.5-sonnet")
+    assert aicore.model_label() == "anthropic--claude-4.5-sonnet"
     monkeypatch.setenv("AICORE_MODEL_LABEL", "label override")
     assert aicore.model_label() == "label override"
 
@@ -137,15 +137,11 @@ def test_model_label_direct_mode(fake_direct):
     assert aicore.model_label() == "gpt-5.4"          # same label as before orchestration
 
 
-def test_direct_mode_provider_listing_needs_vendor_keys(fake_direct, monkeypatch):
-    """Orchestration off: only the direct gpt-5.4 deployment is served by AI Core;
-    gemini/claude are not simulated through it and need their vendor keys."""
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    assert llm.available_providers() == ["aicore"]
-
-    monkeypatch.setenv("GEMINI_API_KEY", "g")
-    assert llm.available_providers() == ["aicore", "gemini"]
+def test_direct_mode_has_no_fallback_models(fake_direct, monkeypatch):
+    """Orchestration off: only the direct gpt-5.4 deployment exists, so no model fallbacks."""
+    monkeypatch.setenv("AICORE_FALLBACK_MODELS", "anthropic--claude-4.5-sonnet")
+    assert aicore.fallback_models() == []
+    assert aicore.models_in_order() == ["gpt-5.4"]
 
 
 # ── aicore: token handling (both modes share the machinery) ─────────────────
@@ -174,129 +170,107 @@ def test_not_configured(monkeypatch):
         aicore.get_token()
 
 
+# ── aicore: model fallbacks on the same tenant ──────────────────────────────
+
+def _model_of(request_body):
+    return request_body["orchestration_config"]["module_configurations"]["llm_module_config"]["model_name"]
+
+
+def test_default_fallback_is_claude_sonnet(fake):
+    assert aicore.models_in_order() == ["gpt-5.4", "anthropic--claude-4.5-sonnet"]
+
+
+def test_fallback_models_env(fake, monkeypatch):
+    monkeypatch.setenv("AICORE_FALLBACK_MODELS", " amazon--nova-pro , gpt-5.4, ")
+    assert aicore.models_in_order() == ["gpt-5.4", "amazon--nova-pro"]     # no duplicates
+    assert aicore.models_in_order("anthropic--claude-4.7-opus")[0] == "anthropic--claude-4.7-opus"
+    monkeypatch.setenv("AICORE_FALLBACK_MODELS", "")
+    assert aicore.models_in_order() == ["gpt-5.4"]
+
+
+def test_ask_any_falls_back_to_next_model(fake):
+    fake.chat_statuses = [400]                       # gpt-5.4: "model not found"
+    text, used = aicore.ask_any("hi")
+    assert (text, used) == ("Halo!", "anthropic--claude-4.5-sonnet")
+    assert [_model_of(b) for _, b, _ in fake.chat_requests] == ["gpt-5.4", "anthropic--claude-4.5-sonnet"]
+
+
+def test_ask_any_raises_when_every_model_fails(fake):
+    fake.chat_statuses = [500, 500]
+    with pytest.raises(aicore.AICoreError) as e:
+        aicore.ask_any("hi")
+    assert "gpt-5.4" in str(e.value) and "anthropic--claude-4.5-sonnet" in str(e.value)
+
+
+def test_ask_any_stops_after_login_failure(fake, monkeypatch):
+    def post(url, **kw):
+        raise httpx.ConnectError("Name or service not known")
+    monkeypatch.setattr(aicore.httpx, "post", post)
+    with pytest.raises(aicore.AICoreError) as e:
+        aicore.ask_any("hi")
+    assert "login" in str(e.value) and "anthropic--claude-4.5-sonnet" not in str(e.value)
+
+
 # ── llm layer: provider wiring ───────────────────────────────────────────────
 
 def test_llm_auto_prefers_aicore(fake, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "g")
-    assert llm.available_providers()[0] == "aicore"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "a")
+    assert llm.available_providers() == ["aicore", "claude"]
     res, errors = llm.complete("sys", "user", json_mode=False, provider="auto")
-    assert res.ok and res.provider == "aicore" and res.text == "Halo!" and not errors
+    assert res.ok and res.provider == "aicore" and res.model == "gpt-5.4"
+    assert res.text == "Halo!" and not errors
     url, _, _ = fake.chat_requests[-1]
     assert url == f"https://api.example/v2/inference/deployments/{ORCHESTRATION_ID}/completion"
 
 
-def test_gemini_and_claude_route_through_aicore(fake, monkeypatch):
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+def test_llm_reports_the_fallback_model_that_answered(fake, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    # No vendor keys: both logical providers are still available via the tenant.
-    assert llm.available_providers() == ["aicore", "gemini", "claude"]
-
-    res, errors = llm.complete("sys", "user", json_mode=False, provider="gemini")
-    assert res.ok and res.provider == "gemini" and res.model == "gemini-3.5-flash"
-    assert res.text == "Halo!" and not errors
-    url, body, headers = fake.chat_requests[-1]
-    assert url.endswith(f"/deployments/{ORCHESTRATION_ID}/completion")
-    assert headers["AI-Resource-Group"] == "default"
-    assert (body["orchestration_config"]["module_configurations"]["llm_module_config"]["model_name"]
-            == "gemini-3.5-flash")
-
-    res, errors = llm.complete("sys", "user", json_mode=False, provider="claude")
-    assert res.ok and res.provider == "claude" and res.model == "anthropic--claude-4.5-haiku"
-    _, body, _ = fake.chat_requests[-1]
-    assert (body["orchestration_config"]["module_configurations"]["llm_module_config"]["model_name"]
-            == "anthropic--claude-4.5-haiku")
+    fake.chat_statuses = [503]
+    res, errors = llm.complete("sys", "user", json_mode=False)
+    assert res.ok and res.provider == "aicore" and res.model == "anthropic--claude-4.5-sonnet"
+    assert not errors
 
 
-def test_orchestration_model_env_overrides(fake, monkeypatch):
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+def test_no_gemini_provider_left(fake, monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "g")        # ignored now
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setenv("AICORE_GEMINI_MODEL", "gemini-3.5-flash-lite")
-    monkeypatch.setenv("AICORE_CLAUDE_MODEL", "anthropic--claude-4.6-sonnet")
-    res, _ = llm.complete("s", "u", json_mode=False, provider="gemini")
-    assert res.model == "gemini-3.5-flash-lite"
-    res, _ = llm.complete("s", "u", json_mode=False, provider="claude")
-    assert res.model == "anthropic--claude-4.6-sonnet"
+    assert llm.available_providers() == ["aicore"]
+    assert not hasattr(llm, "GEMINI_URL")
 
 
 def test_orchestration_json_mode_is_prompt_steered_and_parses(fake, monkeypatch):
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     fake.reply = '```json\n{"claims": [{"text": "x", "sources": ["S1"]}]}\n```'
-    res, errors = llm.complete("sys", "user", json_mode=True, provider="gemini")
+    res, errors = llm.complete("sys", "user", json_mode=True)
     assert res.ok and res.data == {"claims": [{"text": "x", "sources": ["S1"]}]} and not errors
     _, body, _ = fake.chat_requests[-1]
     template = body["orchestration_config"]["module_configurations"]["templating_module_config"]["template"]
     assert template[-1]["role"] == "user" and llm.JSON_STEER.strip() in template[-1]["content"]
 
 
-class FakeVendorHTTP:
-    """httpx.post double for the public Google/Anthropic REST APIs."""
+class FakeAnthropicHTTP:
+    """httpx.post double for the public Anthropic REST API."""
 
     def __init__(self):
         self.requests = []                # (url, json body, headers)
 
     def post(self, url, *, json=None, headers=None, timeout=None):
         self.requests.append((url, json, headers))
-        req = httpx.Request("POST", url)
-        if "generativelanguage.googleapis.com" in url:
-            return httpx.Response(200, request=req, json={
-                "candidates": [{"finishReason": "STOP",
-                                "content": {"parts": [{"text": "Halo dunia"}]}}]})
-        return httpx.Response(200, request=req, json={
+        return httpx.Response(200, request=httpx.Request("POST", url), json={
             "content": [{"type": "text", "text": "Hello from Claude"}]})
 
 
-@pytest.fixture
-def vendor_only(monkeypatch):
-    """AI Core NOT configured; only the public vendor keys are present."""
+def test_claude_api_used_when_aicore_not_configured(monkeypatch):
     for k in ENV:
         monkeypatch.delenv(k, raising=False)
-    monkeypatch.delenv("AICORE_ORCHESTRATION_ID", raising=False)
-    monkeypatch.setenv("GEMINI_API_KEY", "g")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "a")
     aicore.reset_token()
-    f = FakeVendorHTTP()
+    f = FakeAnthropicHTTP()
     monkeypatch.setattr(llm.httpx, "post", f.post)
-    yield f
-    aicore.reset_token()
-
-
-def test_vendor_path_used_when_aicore_not_configured(vendor_only):
-    assert llm.available_providers() == ["gemini", "claude"]
-
-    res, errors = llm.complete("sys", "user", json_mode=False, provider="gemini")
-    assert res.ok and res.provider == "gemini" and res.text == "Halo dunia" and not errors
-    url, _, headers = vendor_only.requests[-1]
-    assert url == llm.GEMINI_URL.format(model="gemini-3.5-flash")
-    assert headers["x-goog-api-key"] == "g"
-
-    res, errors = llm.complete("sys", "user", json_mode=False, provider="claude")
+    assert llm.available_providers() == ["claude"]
+    res, errors = llm.complete("sys", "user", json_mode=False)
     assert res.ok and res.provider == "claude" and res.text == "Hello from Claude" and not errors
-    url, payload, headers = vendor_only.requests[-1]
+    url, payload, headers = f.requests[-1]
     assert url == llm.ANTHROPIC_URL
     assert payload["model"] == "claude-haiku-4-5"
     assert headers["x-api-key"] == "a"
-
-
-def test_vendor_keys_back_up_aicore_when_tenant_unreachable(monkeypatch):
-    """AI Core login fails (as on Railway with a ConnectError): RAG still answers
-    through the Gemini key instead of failing aicore → gemini → claude on the same login."""
-    for k, v in ENV.items():
-        monkeypatch.setenv(k, v)
-    monkeypatch.delenv("AICORE_ORCHESTRATION_ID", raising=False)
-    monkeypatch.setenv("GEMINI_API_KEY", "g")
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    aicore.reset_token()
-    vendor = FakeVendorHTTP()
-
-    def post(url, **kw):
-        if url.endswith("/oauth/token"):
-            raise httpx.ConnectError("Name or service not known")
-        return vendor.post(url, json=kw.get("json"), headers=kw.get("headers"))
-
-    monkeypatch.setattr(httpx, "post", post)
-    assert llm.available_providers() == ["aicore", "gemini", "claude", "gemini_direct"]
-    res, errors = llm.complete("sys", "user", json_mode=False)
-    assert res.ok and res.provider == "gemini" and res.text == "Halo dunia"
-    assert len(errors) == 3 and "auth.example" in errors[0] and "ConnectError" in errors[0]
-    aicore.reset_token()

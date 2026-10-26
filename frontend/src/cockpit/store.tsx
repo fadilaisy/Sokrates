@@ -304,10 +304,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       setSapVersion(s._meta.version);
       if (l) noteLedger(l);
       setOnline(h.status === "ok");
-      setAiConfigured(
-        String(h.gemini_configured ?? "").startsWith("yes") ||
-        String(h.aicore_configured ?? "").startsWith("yes"),
-      );
+      setAiConfigured(String(h.aicore_configured ?? "").startsWith("yes"));
       setError(null);
     } catch (e) {
       setOnline(false);
@@ -842,7 +839,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
         setChatOpen(false);
         setLedgerOpen(true);
       } else {
-        // Hybrid fallback: free-form questions go to Gemini via /api/chat,
+        // Hybrid fallback: free-form questions go to SAP AI Core via /api/chat,
         // grounded on live SAP state. Scripted fast paths above stay instant
         // and key-free; the solver/SAP paths are never touched by the LLM.
         setChatBusy(true);
@@ -855,7 +852,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
           setMessages((cur) => cur.filter((m) => m.id !== pid));
           push({
             from: "ai",
-            text: "AI tidak dapat dihubungi (periksa backend / GEMINI_API_KEY). Untuk sekarang saya bisa: status semua mesin, simulasi What-if, dan membuka audit ledger.",
+            text: "AI tidak dapat dihubungi (periksa backend / kredensial SAP AI Core). Untuk sekarang saya bisa: status semua mesin, simulasi What-if, dan membuka audit ledger.",
           });
         } finally {
           setChatBusy(false);

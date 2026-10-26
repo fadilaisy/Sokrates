@@ -8,7 +8,7 @@ Grounded, cited answer generation.
 2. Treat document text as untrusted data: instruction-like lines are neutralised
    before they reach the model (prompt-injection guard), and the system prompt
    says sources are data, never instructions.
-3. The LLM (Gemini or Claude Haiku 4.5) returns JSON: a list of claims, each with
+3. The LLM (SAP AI Core orchestration, or Claude directly) returns JSON: a list of claims, each with
    the source ids it relies on.
 4. Post-check: every cited id must exist, and the cited text must support the
    claim (all numbers present + lexical overlap, with a small ID↔EN glossary so
@@ -209,7 +209,7 @@ def answer_from_retrieval(query: str, retrieval: Dict[str, Any], *, store: Optio
 
     if not available_providers():
         return {**base, "status": "llm_unavailable",
-                "message": "LLM belum dikonfigurasi (AICORE_* / GEMINI_API_KEY / ANTHROPIC_API_KEY). "
+                "message": "LLM belum dikonfigurasi (AICORE_* / ANTHROPIC_API_KEY). "
                            "Menampilkan passage sumber teratas tanpa ringkasan.",
                 "answer": None, "claims": [], "rejected_claims": [],
                 "sources": [_public_source(p) for p in packed], "injection_flags": injection,

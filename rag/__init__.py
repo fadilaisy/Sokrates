@@ -8,7 +8,7 @@ filters, then a deterministic scoring layer (decision model) ranks them:
 
     S = w1·R + w2·M + w3·F + w4·A − w5·P
 
-The top passages are handed to a generative LLM (Gemini, or Claude Haiku 4.5)
+The top passages are handed to a generative LLM (SAP AI Core orchestration, or Claude directly)
 that must cite every claim; a post-check drops anything the sources do not
 support. Below the score threshold the system abstains.
 
@@ -24,7 +24,7 @@ store.py      SQLite schema (documents, sections, chunks, FTS5 index)
 ingest.py     the five-stage pipeline: upload → parse/OCR → chunk → metadata → index
 scoring.py    the scoring layer (decision model) with explainable breakdown
 retrieve.py   incident context → hard filters → candidates → score → abstain
-llm.py        Gemini + Claude Haiku 4.5 REST clients (sync, httpx)
+llm.py        SAP AI Core + Claude REST clients (sync, httpx)
 generate.py   cited answer generation, injection guard, citation post-check
 api.py        FastAPI router: /api/documents, /api/retrieve, /api/answer
 eval.py       golden-set evaluation harness (recall@k, MRR, nDCG, ablation)

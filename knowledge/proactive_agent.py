@@ -340,7 +340,7 @@ class ProactiveAgent:
         except Exception:
             return fallback, "template"
         cited = set(_CITE_RE.findall(text))
-        # "[Gemini …]" / "[AI …]" strings are the backend's error fallbacks, not answers.
+        # "[AI …]" strings are the backend's error fallbacks, not answers.
         if len(text) < 20 or text.startswith("[") or not cited or not cited <= set(pb["supporting_cases"]):
             return fallback, "template"
         return text, "llm"
