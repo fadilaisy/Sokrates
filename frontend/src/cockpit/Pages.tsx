@@ -5,6 +5,7 @@ import { cn } from "../lib/utils";
 import { fmt1, ordersToday, STATUS_STYLE, telemetryOf } from "../lib/shift";
 import type { MachineStatus } from "../lib/shift";
 import { AgentArea } from "./AgentArea";
+import { AgentRunPanel } from "./AgentRun";
 import { ApprovalModal, ChatDrawer, LedgerBar, LedgerDrawer } from "./Overlays";
 import { MaintenancePage } from "./MaintenancePage";
 import { MachineStrip, PlcPanel, TelemetryPanel, WhatIfPanel } from "./Panels";
@@ -241,6 +242,7 @@ function CockpitPage() {
         </div>
       </div>
       <PlcPanel />
+      <AgentRunPanel />
       <AgentArea />
       <LedgerBar />
       <ApprovalModal />

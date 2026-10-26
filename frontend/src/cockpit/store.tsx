@@ -138,6 +138,11 @@ interface CockpitValue {
   toggleMute: () => void;
   toast: string | null;
   reset: () => Promise<void>;
+  /** Reload SAP state, metrics and ledger (after a write made outside the store, e.g. an agent run). */
+  reload: () => Promise<void>;
+  showToast: (t: string) => void;
+  /** Bumped when the PLC feed reports a new agent run, so the run panel refreshes at once. */
+  agentRunPing: number;
   resetting: boolean;
   skillStudioOpen: boolean;
   setSkillStudioOpen: (v: boolean) => void;
@@ -189,6 +194,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   const [approving, setApproving] = useState(false);
   const [conflict, setConflict] = useState<DriftDetail | null>(null);
   const [approver, setApprover] = useState(savedApprover);
+  const [agentRunPing, setAgentRunPing] = useState(0);
   const [injecting, setInjecting] = useState(false);
 
   const [live, setLive] = useState<Record<string, Record<string, number>>>({});
@@ -402,6 +408,10 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     if (f.event === "plc_alarm") {
       playSound("telemetry");
       setPlcAlarm(f as unknown as PlcAlarmFrame);
+      return;
+    }
+    if (f.event === "agent_run") {
+      setAgentRunPing((n) => n + 1);
       return;
     }
     if (f.event === "plc_prediction") {
@@ -904,7 +914,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       plcMachines, plcPrediction, plcAction, plcBusy, approvePlcAction, setPlcAutonomy, setPlcLockout, planMaintenance,
       ledgerOpen, setLedgerOpen, verifying, verifyResult, verify,
       chatOpen, chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat,
-      muted, toggleMute, toast, reset, resetting,
+      muted, toggleMute, toast, reset, resetting, reload: load, showToast, agentRunPing,
       // Phase 3: Skill Studio
       skillStudioOpen, setSkillStudioOpen, skillStudioState, setSkillStudioState,
       skillStudioFormData, setSkillStudioFormData, skillStudioDraft, setSkillStudioDraft,
@@ -916,6 +926,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       lastAnalysis, safety, sendTelemetry, runFullAnalysis, autoIn, plcOn, plcStatus, plcInfo, plcAlarm, plcOffline, startPlcScenario,
       plcMachines, plcPrediction, plcAction, plcBusy, approvePlcAction, setPlcAutonomy, setPlcLockout, planMaintenance, ledgerOpen, verifying, verifyResult, verify, chatOpen,
       chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat, muted, toggleMute, toast, reset, resetting,
+      load, showToast, agentRunPing,
       skillStudioOpen, skillStudioState, skillStudioFormData, skillStudioDraft, skillStudioLintResult,
     ],
   );

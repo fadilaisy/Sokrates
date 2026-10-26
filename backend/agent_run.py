@@ -80,6 +80,14 @@ class AgentDeps:
     step_delay: float = 0.35      # seconds between steps, so a watcher can follow the run live
 
 
+def _rp(v: Any) -> str:
+    """Rupiah with Indonesian thousands dots: Rp 18.500.000."""
+    return "Rp " + f"{float(v or 0):,.0f}".replace(",", ".")
+
+
+AWAITING = " Menunggu persetujuan supervisor."
+
+
 def _iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -364,8 +372,8 @@ class AgentRunner:
         if order["purchase_requisitions"]:
             value = sum(p["value_idr"] or 0 for p in order["purchase_requisitions"])
             bits.append(f"purchase requisition {len(order['purchase_requisitions'])} item "
-                        f"(Rp {value:,.0f}, tiba ~{order['max_lead_time_days']} hari)")
-        return "Diusulkan: " + " dan ".join(bits) + ". Menunggu persetujuan supervisor.", order
+                        f"({_rp(value)}, tiba ~{order['max_lead_time_days']} hari)")
+        return "Diusulkan: " + " dan ".join(bits) + "." + AWAITING, order
 
     async def _tool_reschedule_orders(self, run, ctx):
         t = run["trigger"]
@@ -394,7 +402,7 @@ class AgentRunner:
         targets = sorted({m["to"] for m in moved})
         return (f"Solver CP-SAT ({reason}): {best.get('name_id') or best['id']} — "
                 f"{len(moved)} order dipindah ke {', '.join(targets) or 'mesin yang sama'}, "
-                f"biaya Rp {best.get('total_cost_idr', 0):,.0f}. Menunggu persetujuan supervisor.",
+                f"biaya {_rp(best.get('total_cost_idr'))}, hemat {_rp(best.get('net_savings_idr'))}." + AWAITING,
                 {"disruption": disruption, "scenario_id": best["id"], "scenario_name": best.get("name_id"),
                  "moves": moves, "total_cost_idr": best.get("total_cost_idr"),
                  "net_savings_idr": best.get("net_savings_idr"),
@@ -417,9 +425,10 @@ class AgentRunner:
 
     async def _summarize(self, run, ctx) -> None:
         facts = "\n".join(f"- {s['label']}: {s['summary']}" for s in run["steps"] if s["summary"])
-        fallback = " ".join(s["summary"] for s in run["steps"]
-                            if s["tool"] in ("route_to_expert", "order_spare_parts", "reschedule_orders")
-                            and s["status"] == "done")
+        picked = [s["summary"].replace(AWAITING, "") for s in run["steps"]
+                  if s["tool"] in ("route_to_expert", "order_spare_parts", "reschedule_orders")
+                  and s["status"] == "done"]
+        fallback = " ".join(picked) + (AWAITING if run["pending_approval"] else "")
         prompt = ("Ringkas hasil kerja agen maintenance berikut untuk supervisor dalam 2-3 kalimat Bahasa "
                   "Indonesia. Pakai hanya fakta di bawah, sebut angka persis, dan akhiri dengan apa yang "
                   "perlu disetujui.\n" + facts + "\n\nJawab HANYA ringkasannya.")
