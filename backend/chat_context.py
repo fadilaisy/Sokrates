@@ -37,6 +37,15 @@ def _rp(v: Any) -> str:
         return "Rp ?"
 
 
+def late_note(order: Dict[str, Any]) -> str:
+    """', TERLAMBAT …' when the planned end is past the deadline (both ISO timestamps), else ''."""
+    end, due = str(order.get("planned_end") or ""), str(order.get("deadline") or "")
+    iso = lambda t: len(t) >= 16 and t[10] == "T"  # noqa: E731
+    if iso(end) and iso(due) and end[:16] > due[:16]:
+        return f", TERLAMBAT: rencana selesai {_hhmm(end)} melewati deadline {_hhmm(due)}"
+    return ""
+
+
 def scenario_name(scenario_id: Any, name: Optional[str] = None) -> str:
     """Readable plan name; agent runs prefix ids as 'RUN-XXXX:scenario_c'."""
     if name:
@@ -180,11 +189,12 @@ def metrics_block(metrics: Optional[Dict[str, Any]]) -> str:
         return "- Metrik shift tidak tersedia."
     sh, dt, oee = metrics.get("shift") or {}, metrics.get("downtime") or {}, metrics.get("oee") or {}
     lines = [f"- Shift {sh.get('date', '?')} {sh.get('start', '?')}–{sh.get('end', '?')}, "
-             f"{sh.get('machines', '?')} mesin × {sh.get('hours_per_machine', '?')} jam.",
+             f"{sh.get('machines', '?')} mesin × {sh.get('hours_per_machine', '?')} jam "
+             f"= {sh.get('total_hours', '?')} jam-mesin. Semua angka downtime di bawah dalam jam-mesin.",
              f"- OEE {oee.get('oee')}% (target {oee.get('target')}%): availability {oee.get('availability')}%, "
              f"performance {oee.get('performance')}%, quality {oee.get('quality')}% (quality adalah asumsi, "
              f"mock belum punya data scrap).",
-             f"- Downtime total {dt.get('total_hours')} jam ({dt.get('percent_of_shift')}% shift): "
+             f"- Downtime total {dt.get('total_hours')} jam-mesin ({dt.get('percent_of_shift')}% dari total jam-mesin shift): "
              + ", ".join(f"{c.get('label')} {c.get('hours')} jam" for c in dt.get("by_category") or [])]
     for m in dt.get("by_machine") or []:
         if m.get("total_hours"):

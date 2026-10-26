@@ -114,3 +114,10 @@ def test_metrics_block_and_history_block():
     turns = [{"role": "user", "text": f"q{i}"} for i in range(8)] + [{"role": "assistant", "text": "a  \n b"}]
     hist = cc.history_block(turns)
     assert hist.splitlines()[-1] == "AI Supervisor: a b" and "q2" not in hist and len(hist.splitlines()) == 6
+
+
+def test_late_note_flags_orders_planned_past_their_deadline():
+    late = {"planned_end": "2025-01-15T15:00:00", "deadline": "2025-01-15T12:00:00"}
+    assert cc.late_note(late) == ", TERLAMBAT: rencana selesai 15:00 melewati deadline 12:00"
+    assert cc.late_note({"planned_end": "2025-01-15T11:00:00", "deadline": "2025-01-15T12:00:00"}) == ""
+    assert cc.late_note({"planned_end": "13:00 WIB", "deadline": "2025-01-15T12:00:00"}) == ""
