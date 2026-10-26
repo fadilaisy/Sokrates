@@ -112,6 +112,23 @@ _skills.index()
 # /api/approve only accepts a payload identical to one of these, so a client
 # cannot invent reroutes, target blocked machines or forge downtime events.
 _issued_scenarios: dict[str, dict[str, Any]] = {}
+_ISSUED_MAX = 300   # ~100 solves; cleared on /api/state/reset
+
+
+def _remember_scenario(s: dict[str, Any]) -> None:
+    """Store an issued scenario, dropping the oldest once over _ISSUED_MAX.
+
+    A scenario an agent run is still waiting to approve is never dropped.
+    """
+    _issued_scenarios.pop(s["id"], None)          # re-insert so a re-solve counts as newest
+    _issued_scenarios[s["id"]] = copy.deepcopy(s)
+    excess = len(_issued_scenarios) - _ISSUED_MAX
+    if excess <= 0:
+        return
+    pending = {((r.get("pending_approval") or {}).get("scenario") or {}).get("id")
+               for r in _agent_runner.runs.values() if r["status"] == "awaiting_approval"}
+    for old in [k for k in _issued_scenarios if k not in pending][:excess]:
+        del _issued_scenarios[old]
 
 # Maintenance case ledger (hash-chained, seeded with synthetic cases on first start).
 # Resolved cases are indexed into the RAG store at startup for similar-case search.
@@ -491,8 +508,11 @@ async def _call_llm(prompt: str, max_tokens: int = 512, *, interactive: bool = T
                 "Silakan tinjau skenario solver secara manual.")
     try:
         # GPT-5.x counts hidden reasoning against the limit, so give it headroom.
-        text, used = await asyncio.to_thread(aicore.ask_any, prompt,
-                                             max_tokens=max(max_tokens, 2048), first=model)
+        # A person waits on interactive calls, so the whole fallback chain gets one
+        # deadline; background calls keep the full 60 s per model.
+        timeout, total = aicore.interactive_timeouts() if interactive else (60.0, None)
+        text, used = await asyncio.to_thread(aicore.ask_any, prompt, max_tokens=max(max_tokens, 2048),
+                                             first=model, timeout=timeout, total_timeout=total)
     except aicore.AICoreError as exc:
         print(f"[aicore] {exc}", file=sys.stderr)
         return f"[AI error: {str(exc)[:300]}] Silakan tinjau skenario solver secara manual."
@@ -515,7 +535,12 @@ async def get_state() -> dict[str, Any]:
 @app.post("/api/state/reset", summary="Reset SAP mock state to initial baseline")
 async def post_state_reset() -> dict[str, Any]:
     """Reset the mock SAP in-memory state back to its pristine initial state."""
-    return _sap.reset()
+    state = _sap.reset()
+    # Scenarios were solved against the old state; approving one now would write a
+    # stale schedule onto the reset plan. Runs waiting on them can't be approved either.
+    _issued_scenarios.clear()
+    _agent_runner.expire_pending("SAP direset; jalankan agen lagi untuk rencana baru.")
+    return state
 
 
 @app.post(
@@ -560,7 +585,7 @@ async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
     # confirmed downtime (used by /api/metrics) without trusting extra client fields.
     for s in scenarios:
         s["disruption"] = dict(disruption)
-        _issued_scenarios[s["id"]] = copy.deepcopy(s)
+        _remember_scenario(s)
 
     disruption_hours = body.end_hour - body.start_hour
 
@@ -2648,7 +2673,7 @@ async def _agent_run_approve(scenario_id: str, scenario: dict[str, Any], version
 
 def _issue_scenarios(scenarios: list[dict[str, Any]]) -> None:
     for s in scenarios:
-        _issued_scenarios[s["id"]] = copy.deepcopy(s)
+        _remember_scenario(s)
 
 
 _agent_runner = AgentRunner(AgentDeps(
@@ -3197,6 +3222,11 @@ async def _plc_tick(scenario: Optional[str], peak: dict[tuple[str, str], str], a
 @app.on_event("startup")
 async def _start_plc_loop() -> None:
     _ensure_plc_loop()
+
+
+@app.on_event("shutdown")
+async def _stop_agent_runs() -> None:
+    await _agent_runner.shutdown()
 
 
 @app.on_event("shutdown")

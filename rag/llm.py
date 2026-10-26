@@ -64,13 +64,14 @@ def _provider_order(provider: Optional[str]) -> List[str]:
 JSON_STEER = "\n\nBalas dengan JSON saja, tanpa teks lain."
 
 
-def _call_aicore(system: str, user: str, max_tokens: int, json_mode: bool, timeout: float) -> LLMResult:
+def _call_aicore(system: str, user: str, max_tokens: int, json_mode: bool, timeout: float,
+                 total_timeout: Optional[float] = None) -> LLMResult:
     if json_mode and aicore.orchestration_id():
         user = f"{user}{JSON_STEER}"
     try:
         # GPT-5.x counts hidden reasoning against the token budget, so give it headroom.
         text, model = aicore.ask_any(user, system=system, max_tokens=max(max_tokens, 2048),
-                                     timeout=timeout)
+                                     timeout=timeout, total_timeout=total_timeout)
         return LLMResult(True, text=text, provider="aicore", model=model)
     except Exception as exc:
         return LLMResult(False, provider="aicore", model=aicore.model_label(), error=str(exc)[:400])
@@ -147,15 +148,21 @@ def parse_json_loose(text: str) -> Optional[Any]:
 
 
 def complete(system: str, user: str, *, max_tokens: int = 1200, json_mode: bool = True,
-             provider: Optional[str] = None, timeout: float = 45.0) -> Tuple[LLMResult, List[str]]:
-    """Run the prompt against providers in order. Returns (result, errors_from_failed_attempts)."""
+             provider: Optional[str] = None, timeout: float = 45.0,
+             total_timeout: Optional[float] = None) -> Tuple[LLMResult, List[str]]:
+    """Run the prompt against providers in order. Returns (result, errors_from_failed_attempts).
+
+    `timeout` is per model; `total_timeout` caps the AI Core fallback chain as a whole.
+    """
     errors: List[str] = []
     order = _provider_order(provider)
     if not order:
         return LLMResult(False, error="Tidak ada LLM yang dikonfigurasi (set AICORE_* atau ANTHROPIC_API_KEY)."), errors
     for p in order:
-        fn = _call_aicore if p == "aicore" else _call_claude
-        res = fn(system, user, max_tokens, json_mode, timeout)
+        if p == "aicore":
+            res = _call_aicore(system, user, max_tokens, json_mode, timeout, total_timeout)
+        else:
+            res = _call_claude(system, user, max_tokens, json_mode, timeout)
         if res.ok and json_mode:
             res.data = parse_json_loose(res.text)
             if res.data is None:

@@ -244,6 +244,20 @@ class AgentRunner:
             del self.runs[old]
         return run
 
+    def expire_pending(self, reason: str) -> List[str]:
+        """Close every run waiting for approval (its plan no longer fits SAP); returns their ids."""
+        expired = [r for r in self.runs.values() if r["status"] == "awaiting_approval"]
+        for r in expired:
+            r["status"], r["error"], r["finished_at"] = "rejected", reason, _iso()
+        return [r["id"] for r in expired]
+
+    async def shutdown(self) -> None:
+        """Cancel runs still working so the app can stop without orphaned tasks."""
+        tasks = list(self._tasks)
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     # ── execute ──────────────────────────────────────────────────────────────
 
     async def execute(self, run_id: str) -> Dict[str, Any]:

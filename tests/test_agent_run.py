@@ -264,3 +264,40 @@ def test_pending_runs_are_never_evicted_and_stay_latest():
         r.create({"machine_id": "CNC-03"})["status"] = "done"
     assert pending["id"] in r.runs and len(r.runs) <= ar.MAX_RUNS + 1
     assert r.latest()["id"] == pending["id"]
+
+
+def test_reset_clears_issued_scenarios_and_expires_pending_runs(runner):
+    run = _pending_run()
+    assert m._issued_scenarios
+    assert client.post("/api/state/reset").status_code == 200
+    assert m._issued_scenarios == {}
+    after = client.get(f"/api/agent/runs/{run['id']}").json()
+    assert after["status"] == "rejected" and "direset" in after["error"]
+    r = client.post(f"/api/agent/runs/{run['id']}/approve", json={"approved_by": "Supervisor Budi"})
+    assert r.status_code == 409
+
+
+def test_issued_scenarios_are_capped_but_keep_pending_ones(runner, monkeypatch):
+    run = _pending_run()
+    sid = run["pending_approval"]["scenario"]["id"]
+    monkeypatch.setattr(m, "_ISSUED_MAX", 5)
+    for i in range(20):
+        m._remember_scenario({"id": f"x{i}"})
+    assert len(m._issued_scenarios) <= 6 and sid in m._issued_scenarios and "x19" in m._issued_scenarios
+
+
+def test_shutdown_cancels_runs_still_working():
+    r = ar.AgentRunner(m._agent_runner.deps)
+
+    async def go():
+        started = asyncio.Event()
+
+        async def slow():
+            started.set()
+            await asyncio.sleep(60)
+        t = asyncio.create_task(slow())
+        r._tasks.add(t)
+        await started.wait()
+        await r.shutdown()
+        return t
+    assert asyncio.run(go()).cancelled()

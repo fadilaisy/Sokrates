@@ -211,6 +211,44 @@ def test_ask_any_stops_after_login_failure(fake, monkeypatch):
     assert "login" in str(e.value) and "anthropic--claude-4.5-sonnet" not in str(e.value)
 
 
+def _slow_tenant(fake, monkeypatch):
+    """Every chat call times out after using its whole timeout on a fake clock."""
+    clock, waits = [0.0], []
+    real_post = fake.post
+
+    def post(url, *, timeout=None, **kw):
+        if url.endswith("/oauth/token"):
+            return real_post(url, timeout=timeout, **kw)
+        waits.append(timeout)
+        clock[0] += timeout
+        raise httpx.ReadTimeout("timed out")
+    monkeypatch.setattr(aicore.httpx, "post", post)
+    monkeypatch.setattr(aicore.time, "monotonic", lambda: clock[0])
+    return waits
+
+
+def test_ask_any_total_timeout_caps_the_fallback_chain(fake, monkeypatch):
+    waits = _slow_tenant(fake, monkeypatch)
+    with pytest.raises(aicore.AICoreError):
+        aicore.ask_any("hi", timeout=35, total_timeout=50)
+    assert waits == [35, 15]                         # the fallback only gets what is left
+
+
+def test_ask_any_skips_a_model_when_too_little_time_is_left(fake, monkeypatch):
+    waits = _slow_tenant(fake, monkeypatch)
+    with pytest.raises(aicore.AICoreError) as e:
+        aicore.ask_any("hi", timeout=48, total_timeout=50)
+    assert waits == [48] and "total timeout" in str(e.value)
+
+
+def test_interactive_timeouts_env(monkeypatch):
+    monkeypatch.delenv("AICORE_CHAT_TIMEOUT", raising=False)
+    monkeypatch.setenv("AICORE_CHAT_TOTAL_TIMEOUT", "40")
+    assert aicore.interactive_timeouts() == (35.0, 40.0)
+    monkeypatch.setenv("AICORE_CHAT_TIMEOUT", "abc")
+    assert aicore.interactive_timeouts()[0] == 35.0
+
+
 # ── llm layer: provider wiring ───────────────────────────────────────────────
 
 def test_llm_auto_prefers_aicore(fake, monkeypatch):
