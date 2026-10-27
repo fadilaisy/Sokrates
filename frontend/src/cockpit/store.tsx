@@ -8,6 +8,12 @@ import type { MachineStatus } from "../lib/shift";
 import type { SkillStudioFormData, SkillStudioDraft, SkillStudioLintResult } from "../lib/api";
 
 export type Page = "dashboard" | "cockpit" | "floor" | "maintenance";
+
+function pageFromHash(): Page {
+  const h = window.location.hash.replace("#", "").split("/")[0];
+  return h === "cockpit" || h === "floor" || h === "maintenance" ? h : "dashboard";
+}
+
 export type Phase = "normal" | "detecting" | "proposing" | "resolved";
 
 export interface DisruptionParams {
@@ -184,10 +190,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   const [ledger, setLedger] = useState<LedgerEntry[]>([]);
   const [sapVersion, setSapVersion] = useState(1);
 
-  const [page, setPage] = useState<Page>(() => {
-    const h = window.location.hash.replace("#", "");
-    return h === "cockpit" || h === "floor" || h === "maintenance" ? h : "dashboard";
-  });
+  const [page, setPage] = useState<Page>(pageFromHash);
 
   const [phase, setPhase] = useState<Phase>("normal");
   const [detectStep, setDetectStep] = useState(0);
@@ -342,8 +345,14 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   }, [load]);
 
   useEffect(() => {
-    window.location.hash = page;
+    // Keep a deep link such as #maintenance/CASE-0031 (the Telegram button) while on its page.
+    if (pageFromHash() !== page) window.location.hash = page;
   }, [page]);
+  useEffect(() => {
+    const onHash = () => setPage(pageFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
 
   // ── frames from /ws/telemetry and /ws/plc ──────────────────────────────────
   const applyFrame = useCallback((data: string) => {

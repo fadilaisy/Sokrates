@@ -417,3 +417,13 @@ def test_plan_timestamp_parses_solver_labels():
     assert _plan_timestamp("25:00 WIB (Overtime)", d) == "2025-01-16T01:00:00"
     assert _plan_timestamp("2025-01-15T07:00:00", d) == "2025-01-15T07:00:00"
     assert _plan_timestamp("?", d) == "?" and _plan_timestamp("09:00 WIB", None) == "09:00 WIB"
+
+
+def test_maintenance_flows_filter_by_case():
+    """The Telegram button opens #maintenance/CASE-x; the page loads that one playbook."""
+    for cid in ("CASE-9001", "CASE-9002"):
+        m._maint_ledger.append("PLAYBOOK", "PB", {"case_id": cid, "mechanic_id": None, "message": cid,
+                                                  "playbook": {"steps": [], "confidence": "none"}})
+    rows = client.get("/api/maintenance/flows", params={"case_id": "CASE-9001"}).json()
+    assert [r["case_id"] for r in rows] == ["CASE-9001"]
+    assert client.get("/api/maintenance/flows", params={"case_id": "CASE-0000"}).json() == []

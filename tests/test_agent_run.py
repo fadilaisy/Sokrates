@@ -332,7 +332,8 @@ def test_notify_team_summary_follows_delivery(runner, monkeypatch, delivery, exp
                                                     "alarm_text": "SPINDLE OVERLOAD"}).json()["id"])
     step = next(s for s in run["steps"] if s["tool"] == "notify_team")
     assert expect in step["summary"] and step["output"]["delivery"] == delivery
-    assert seen == [{"agent_run_id": run["id"], "machine_id": "CNC-01"}]
+    case_id = m._agent.ledger.playbooks()[-1]["case_id"]           # the Telegram button opens this case
+    assert seen == [{"agent_run_id": run["id"], "machine_id": "CNC-01", "maintenance_case_id": case_id}]
 
 
 def test_agent_run_approval_tells_the_routed_mechanic(runner, monkeypatch):

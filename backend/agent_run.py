@@ -438,7 +438,9 @@ class AgentRunner:
         flow = await self._flow(run, ctx)
         mech = flow["mechanic"]
         name = mech.get("name") or "tim mekanik"
-        delivery = (await self.deps.notify(mech, flow.get("chat_messages") or [flow["message"]], {"agent_run_id": run["id"], "machine_id": run["trigger"]["machine_id"]})
+        context = {"agent_run_id": run["id"], "machine_id": run["trigger"]["machine_id"],
+                   "maintenance_case_id": flow.get("trigger_entry_id")}
+        delivery = (await self.deps.notify(mech, flow.get("chat_messages") or [flow["message"]], context)
                     if self.deps.notify else {"status": "not_configured"})
         if delivery.get("status") == "sent":
             head = f"Playbook dikirim ke {name} via Telegram ({delivery.get('to')})"

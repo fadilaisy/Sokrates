@@ -93,6 +93,13 @@ def test_checklist_gets_playbook_button_on_public_url(env, monkeypatch):
     assert steps["reply_markup"]["inline_keyboard"][0][0]["url"] == "https://app.example.com/#maintenance"
 
 
+def test_playbook_button_opens_the_assigned_case(env, monkeypatch):
+    monkeypatch.setenv("PUBLIC_APP_URL", "https://app.example.com")
+    asyncio.run(m._notify_mechanic({"id": "MECH-4"}, ["alert", "steps"], {"maintenance_case_id": "CASE-0031"}))
+    _, steps = (b for _, b in env)
+    assert steps["reply_markup"]["inline_keyboard"][0][0]["url"] == "https://app.example.com/#maintenance/CASE-0031"
+
+
 def test_notify_mechanic_failure_is_logged_and_stops(env):
     env.reply = _Resp(403, {"ok": False, "description": "Forbidden"})
     before = len(m._ledger.get_all())

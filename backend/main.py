@@ -47,6 +47,7 @@ from collections import deque
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, Optional
+from urllib.parse import quote as url_quote
 
 # ── Load .env before everything else ─────────────────────────────────────────
 from dotenv import load_dotenv
@@ -2666,10 +2667,12 @@ async def get_maintenance_code(code: str) -> dict[str, Any]:
 
 
 @app.get("/api/maintenance/flows", summary="Recent playbooks sent to mechanics")
-async def get_maintenance_flows(mechanic_id: str = "", limit: int = 20) -> list[dict[str, Any]]:
+async def get_maintenance_flows(mechanic_id: str = "", case_id: str = "", limit: int = 20) -> list[dict[str, Any]]:
     rows = _maint_ledger.playbooks()
     if mechanic_id:
         rows = [r for r in rows if r.get("mechanic_id") == mechanic_id]
+    if case_id:
+        rows = [r for r in rows if r.get("case_id") == case_id]
     out = []
     for r in reversed(rows[-limit:]):
         case = _maint_ledger.get_case(r.get("case_id", ""))
@@ -2768,10 +2771,15 @@ _notify_recent: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 _NOTIFY_DEDUPE_S = 60.0
 
 
-def _playbook_button() -> Optional[tuple[str, str]]:
-    """Link from the Telegram checklist to the Perawatan page. Telegram refuses localhost links."""
+def _playbook_button(case_id: Optional[str] = None) -> Optional[tuple[str, str]]:
+    """Link from the Telegram checklist straight to the mechanic's case on the Perawatan page.
+
+    Telegram refuses localhost links, so there is no button without an https PUBLIC_APP_URL.
+    """
     base = os.getenv("PUBLIC_APP_URL", "").strip().rstrip("/")
-    return ("📋 Lihat langkah lengkap", f"{base}/#maintenance") if base.startswith("https://") else None
+    if not base.startswith("https://"):
+        return None
+    return ("📋 Lihat langkah lengkap", f"{base}/#maintenance/{url_quote(case_id)}" if case_id else f"{base}/#maintenance")
 
 
 async def _notify_mechanic(mech: dict[str, Any], messages: list[str], context: dict[str, Any]) -> dict[str, Any]:
@@ -2789,7 +2797,8 @@ async def _notify_mechanic(mech: dict[str, Any], messages: list[str], context: d
     sent: list[dict[str, Any]] = []
     for i, text in enumerate(messages):
         last = i == len(messages) - 1
-        sent.append(await asyncio.to_thread(telegram.send_text, text, _playbook_button() if last else None))
+        sent.append(await asyncio.to_thread(telegram.send_text, text,
+                                       _playbook_button(context.get("maintenance_case_id")) if last else None))
         if sent[-1]["status"] != "sent":
             break
     res = {**sent[-1], "message_ids": [r["message_id"] for r in sent if r.get("message_id") is not None]}
