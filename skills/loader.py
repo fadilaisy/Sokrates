@@ -23,7 +23,9 @@ _SKILL_METADATA_COMMENT_RE = re.compile(r"<!--\s*skill_metadata\b(.*?)-->", re.D
 # are also always evaluated, so a narrower skill can add rules but never skip one.
 DEFAULT_SKILL_ID = "cnc_milling"
 SKILL_SPEC_SCHEMA = "skillforge_skill_v2"
-_SKILL_STATUSES = {"active", "draft", "disabled"}
+# "trial": field trial, the skill advises but never triggers a PLC action on its own.
+_SKILL_STATUSES = {"active", "trial", "draft", "disabled"}
+ROUTED_STATUSES = ("active", "trial")
 _TRIGGER_LIST_KEYS = ("machines", "metrics", "alarm_codes")
 
 
@@ -41,8 +43,9 @@ def _split_machine_types(value: str) -> list[str]:
 
 
 def normalize_alarm_code(code: str) -> str:
-    """'Alarm 970', 'ALARM-970' and 'alarm970' compare equal."""
-    return re.sub(r"[^A-Z0-9]", "", str(code).upper())
+    """'Alarm 970', 'ALARM-970' and 'alarm970' compare equal, and so do OCR slips like 'ALM-I62' and 'ALM-162'."""
+    code = re.sub(r"[^A-Z0-9]", "", str(code).upper())
+    return re.sub(r"(?<=\d)[IO]|[IO](?=\d)", lambda m: "1" if m.group(0) == "I" else "0", code)
 
 
 def trigger_score(
@@ -287,7 +290,7 @@ class SkillRegistry:
         best: tuple[int, int, str] | None = None
         for skill_id, entry in self._registry.items():
             spec = entry.get("spec")
-            if not spec or spec["status"] != "active":
+            if not spec or spec["status"] not in ROUTED_STATUSES:
                 continue
             score = trigger_score(spec, machine_id, metric, alarm_code, prediction)
             if score == 0:

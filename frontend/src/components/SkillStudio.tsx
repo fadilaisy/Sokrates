@@ -4,6 +4,7 @@ import { useCockpit } from "../cockpit/store";
 import { Btn, Mono, Spinner } from "../cockpit/ui";
 import { cn } from "../lib/utils";
 import { SkillLibraryView, SkillTeach, SkillToolsView } from "./SkillTeach";
+import type { TeachTarget } from "./SkillTeach";
 
 function NumField({
   label, value, onChange, min, step,
@@ -297,11 +298,11 @@ const TABS: { id: Tab; label: string }[] = [
 export default function SkillStudio() {
   const { skillStudioOpen, setSkillStudioOpen } = useCockpit();
   const [tab, setTab] = useState<Tab>("library");
-  const [editId, setEditId] = useState<{ id: string; clone: boolean } | null>(null);
+  const [editId, setEditId] = useState<TeachTarget | null>(null);
   if (!skillStudioOpen) return null;
   const close = () => setSkillStudioOpen(false);
-  const openTeach = (id: string | null, clone = false) => {
-    setEditId(id ? { id, clone } : null);
+  const openTeach = (id: string | null, clone = false, proposal?: string) => {
+    setEditId(id || proposal ? { id: id ?? "", clone, proposal } : null);
     setTab("teach");
   };
   return (
@@ -354,7 +355,7 @@ export default function SkillStudio() {
           ))}
         </div>
         {tab === "library" && <SkillLibraryView onTeach={openTeach} />}
-        {tab === "teach" && <SkillTeach key={editId ? `${editId.id}-${editId.clone}` : "new"} edit={editId} onDone={() => setTab("library")} />}
+        {tab === "teach" && <SkillTeach key={editId ? `${editId.id}-${editId.clone}-${editId.proposal ?? ""}` : "new"} edit={editId} onDone={() => setTab("library")} />}
         {tab === "tools" && <SkillToolsView />}
         {tab === "costs" && <CostInterview />}
       </aside>

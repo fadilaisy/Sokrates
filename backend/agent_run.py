@@ -80,6 +80,8 @@ class AgentDeps:
     planner_model: Callable[[], str]
     # (mechanic, message, context) → delivery result {"status": sent|failed|not_configured, …}
     notify: Optional[Callable[[Dict[str, Any], List[str], Dict[str, Any]], Awaitable[Dict[str, Any]]]] = None
+    # (machine_id, metric, alarm_code, evidence case ids) → the routed skill's guidance, or None
+    skill_guidance: Optional[Callable[[str, Optional[str], Optional[str], List[str]], Optional[Dict[str, Any]]]] = None
     now: Callable[[], datetime] = lambda: datetime.now(_WIB)
     step_delay: float = 0.35      # seconds between steps, so a watcher can follow the run live
 
@@ -348,15 +350,40 @@ class AgentRunner:
         pb = flow["playbook"]
         top = [{"case_id": h.get("case_id"), "score": h.get("score"), "exact_match": h.get("exact_match"),
                 "citation": h.get("citation")} for h in hits[:3]]
+        skill = self._skill(run, [h.get("case_id") for h in hits if h.get("case_id")])
+        skill_note = ""
+        if skill:
+            first = (skill["root_causes"] or [{}])[0].get("cause")
+            skill_note = (f" Memakai skill {skill['name']} v{skill.get('version') or '-'}"
+                          + (" (uji lapangan, saran saja)" if skill.get("status") == "trial" else "")
+                          + (f"; penyebab paling mungkin: {first}." if first else "."))
         if not hits:
-            return "Tidak ada kasus serupa yang cukup relevan; eskalasi ke mekanik senior.", {"hits": 0}
+            return ("Tidak ada kasus serupa yang cukup relevan; eskalasi ke mekanik senior." + skill_note,
+                    {"hits": 0, "skill": skill})
         return (f"{len(hits)} kasus serupa ditemukan (keyakinan {pb['confidence']}); "
                 f"playbook {len(pb['steps'])} langkah, estimasi downtime "
-                f"{pb['est_downtime_hours'] if pb['est_downtime_hours'] is not None else '?'} jam.",
-                {"hits": len(hits), "top": top, "case_id": ctx["case"]["id"],
+                f"{pb['est_downtime_hours'] if pb['est_downtime_hours'] is not None else '?'} jam." + skill_note,
+                {"hits": len(hits), "skill": skill, "top": top, "case_id": ctx["case"]["id"],
                  "playbook_steps": [s["text"] for s in pb["steps"][:5]],
                  "est_downtime_hours": pb["est_downtime_hours"], "confidence": pb["confidence"],
                  "parts": [p["code"] for p in pb.get("parts", [])]})
+
+    def _skill(self, run, evidence: List[str]) -> Optional[Dict[str, Any]]:
+        """The skill the plant's experts wrote for this alarm, with causes backed by the retrieved cases first."""
+        if not self.deps.skill_guidance:
+            return None
+        t = run["trigger"]
+        g = self.deps.skill_guidance(t["machine_id"], t.get("tag"), t.get("alarm_code"), evidence)
+        if not g or not g.get("has_know_how"):
+            return None
+        out = {k: g.get(k) for k in ("skill_id", "name", "version", "owner", "status")}
+        out["root_causes"] = [{k: c.get(k) for k in ("cause", "sources", "evidence_found")}
+                              for c in g.get("root_causes", [])[:3]]
+        out["tasks"] = list(g.get("tasks", []))[:6]
+        self.deps.ledger_append({"action_type": "SKILL_FIRED", "skill_id": g["skill_id"],
+                                 "skill_version": g.get("version"), "agent_run_id": run["id"],
+                                 "machine_id": t["machine_id"], "trigger": "agent_run"})
+        return out
 
     async def _tool_route_to_expert(self, run, ctx):
         mech = (await self._flow(run, ctx))["mechanic"]
