@@ -2599,7 +2599,7 @@ async def post_maintenance_entry(body: MaintenanceEntryRequest) -> dict[str, Any
     """
     res = await _agent.handle_new_entry(body.model_dump())
     flow = res["flow"]
-    flow["delivery"] = await _notify_mechanic(flow["mechanic"], flow["message"],
+    flow["delivery"] = await _notify_mechanic(flow["mechanic"], flow["chat_messages"],
                                               {"maintenance_case_id": res["entry"].get("id"),
                                                "machine_id": body.machine_id})
     return res
@@ -2760,25 +2760,40 @@ _notify_recent: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 _NOTIFY_DEDUPE_S = 60.0
 
 
-async def _notify_mechanic(mech: dict[str, Any], message: str, context: dict[str, Any]) -> dict[str, Any]:
-    """Send the playbook message to the mechanic on Telegram and record the attempt in the audit ledger.
+def _playbook_button() -> Optional[tuple[str, str]]:
+    """Link from the Telegram checklist to the Perawatan page. Telegram refuses localhost links."""
+    base = os.getenv("PUBLIC_APP_URL", "").strip().rstrip("/")
+    return ("📋 Lihat langkah lengkap", f"{base}/#maintenance") if base.startswith("https://") else None
 
-    The same text for the same mechanic within a minute is sent once (an alarm can reach this twice).
+
+async def _notify_mechanic(mech: dict[str, Any], messages: list[str], context: dict[str, Any]) -> dict[str, Any]:
+    """Send the playbook to the mechanic on Telegram (short alert, then the checklist) and log it in the ledger.
+
+    The same messages for the same mechanic within a minute are sent once (an alarm can reach this twice).
     """
     if not telegram.configured():
         return {"channel": "telegram", "status": "not_configured"}
-    key = (str(mech.get("id") or mech.get("name")), message)
+    key = (str(mech.get("id") or mech.get("name")), "\n".join(messages))
     now = time.monotonic()
     hit = _notify_recent.get(key)
     if hit and now - hit[0] < _NOTIFY_DEDUPE_S:
         return {**hit[1], "duplicate": True}
-    res = await asyncio.to_thread(telegram.send_text, message)
+    sent: list[dict[str, Any]] = []
+    for i, text in enumerate(messages):
+        last = i == len(messages) - 1
+        sent.append(await asyncio.to_thread(telegram.send_text, text, _playbook_button() if last else None))
+        if sent[-1]["status"] != "sent":
+            break
+    res = {**sent[-1], "message_ids": [r["message_id"] for r in sent if r.get("message_id") is not None]}
+    res.pop("message_id", None)
+    if res["status"] == "sent" and len(sent) < len(messages):
+        res["status"] = "failed"
     _notify_recent[key] = (now, res)
     for k in [k for k, (at, _) in _notify_recent.items() if now - at >= _NOTIFY_DEDUPE_S]:
         del _notify_recent[k]
     _ledger.append({"action_type": "TELEGRAM_SENT" if res["status"] == "sent" else "TELEGRAM_FAILED",
                     "mechanic_id": mech.get("id"), "mechanic_name": mech.get("name"), "to": res.get("to"),
-                    "message_id": res.get("message_id"), "error": res.get("error"), **context})
+                    "message_ids": res["message_ids"], "error": res.get("error"), **context})
     return res
 
 

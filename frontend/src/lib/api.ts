@@ -780,7 +780,7 @@ export interface CaseHit {
   case?: MaintCase;
 }
 
-export type Delivery = { channel: "telegram"; to?: string; status: "sent" | "failed" | "not_configured"; message_id?: string; error?: string };
+export type Delivery = { channel: "telegram"; to?: string; status: "sent" | "failed" | "not_configured"; message_ids?: number[]; error?: string };
 
 export interface MaintFlow {
   trigger_entry_id: string;

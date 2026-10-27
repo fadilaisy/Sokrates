@@ -129,3 +129,28 @@ def test_resolved_case_becomes_searchable(agent):
                                           "fix_steps": ["Ganti bearing pompa PMP-BRG-0777"]}))
     assert res["rag"]["status"] == "indexed"
     assert cid in exact_ids(agent.search("PMP-BRG-0777", cases_only=True))
+
+
+def test_chat_messages_are_short_alert_then_checklist():
+    from knowledge.proactive_agent import ProactiveAgent
+    entry = {"id": "CASE-0099", "machine_id": "CNC-01", "machine_model": "Haas VF-2", "error_codes": ["ALM-162"],
+             "symptom": "Spindle overload"}
+    pb = {"steps": [{"n": i, "text": f"step {i}", "source_case_ids": ["CASE-0001"]} for i in range(1, 8)],
+          "parts": [{"code": "SEAL-SP-0031"}], "safety": [{"text": "LOTO dulu."}],
+          "warnings": [{"text": "Perbaikan ini pernah berulang (2024-12-27): seal tidak diganti."}],
+          "est_downtime_hours": 6.0, "confidence": "high", "supporting_cases": ["CASE-0001", "CASE-0026"]}
+    alert, steps = ProactiveAgent.chat_messages(entry, {"name": "Hendra Wijaya"}, pb, [])
+    assert alert == "🚨 CNC-01 (Haas VF-2) · ALM-162\nSpindle overload\nHendra, tolong ke CNC-01 sekarang. Estimasi ~6 jam."
+    assert steps.splitlines() == [
+        "📋 Langkah (CASE-0099):", "1. step 1", "2. step 2", "3. step 3", "4. step 4", "5. step 5",
+        "+2 langkah lagi di playbook", "🧰 Bawa: SEAL-SP-0031", "⚠️ Pernah berulang: seal tidak diganti.",
+        "🦺 LOTO dulu.", "Ref: CASE-0001, CASE-0026 · keyakinan tinggi"]
+    assert "[CASE" not in steps                                   # tags only on the Ref line
+
+
+def test_chat_messages_without_precedent():
+    from knowledge.proactive_agent import ProactiveAgent
+    entry = {"id": "CASE-0099", "machine_id": "CNC-02", "symptom": "Bunyi aneh"}
+    pb = {"steps": [], "est_downtime_hours": None}
+    alert, steps = ProactiveAgent.chat_messages(entry, {}, pb, [])
+    assert alert.endswith("Tim, tolong ke CNC-02 sekarang.") and "eskalasi" in steps

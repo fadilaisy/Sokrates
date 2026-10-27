@@ -322,6 +322,38 @@ class ProactiveAgent:
         return (f"{head} Kasus serupa: {', '.join(pb['supporting_cases'])}. Langkah awal: {steps}{tail}{warn}{ref}"
                 f" (keyakinan: {pb['confidence']})")
 
+    @staticmethod
+    def chat_messages(entry: Dict[str, Any], mech: Dict[str, Any], pb: Dict[str, Any],
+                      refs: List[Dict[str, Any]], max_steps: int = 5) -> List[str]:
+        """The mechanic's phone gets two short messages: an alert to read at a glance, then a checklist.
+
+        Unlike `template_message`, case tags sit on one line at the end instead of after every step.
+        """
+        codes = ", ".join(entry.get("error_codes") or [])
+        hours = f" Estimasi ~{pb['est_downtime_hours']:g} jam." if pb["est_downtime_hours"] else ""
+        alert = (f"🚨 {entry['machine_id']} ({entry.get('machine_model') or '-'}){' · ' + codes if codes else ''}\n"
+                 f"{entry['symptom']}\n"
+                 f"{(mech.get('name') or 'Tim mekanik').split()[0]}, tolong ke {entry['machine_id']} sekarang.{hours}")
+        if not pb["steps"]:
+            return [alert, f"📋 {entry['id']}: belum ada kasus serupa di ledger. Cek langsung dan eskalasi ke "
+                           "mekanik senior."]
+        lines = [f"📋 Langkah ({entry['id']}):"]
+        lines += [f"{i}. {s['text']}" for i, s in enumerate(pb["steps"][:max_steps], 1)]
+        if len(pb["steps"]) > max_steps:
+            lines.append(f"+{len(pb['steps']) - max_steps} langkah lagi di playbook")
+        if pb["parts"]:
+            lines.append("🧰 Bawa: " + ", ".join(p["code"] for p in pb["parts"]))
+        if pb["warnings"]:
+            lines.append("⚠️ Pernah berulang: " + pb["warnings"][0]["text"].split("): ", 1)[-1])
+        safety_ref = next((d for d in refs if d.get("constraint_tier") == "Safety"), None)
+        if pb["safety"]:
+            lines.append("🦺 " + pb["safety"][0]["text"])
+        elif safety_ref:
+            lines.append(f"🦺 Lihat {safety_ref['doc_title']}")
+        conf = {"high": "tinggi", "medium": "sedang", "low": "rendah"}.get(pb["confidence"], pb["confidence"])
+        lines.append(f"Ref: {', '.join(pb['supporting_cases'])} · keyakinan {conf}")
+        return [alert, "\n".join(lines)]
+
     async def message(self, entry: Dict[str, Any], mech: Dict[str, Any], pb: Dict[str, Any],
                       refs: List[Dict[str, Any]], use_llm: bool = True) -> Tuple[str, str]:
         fallback = self.template_message(entry, mech, pb, refs)
@@ -394,6 +426,7 @@ class ProactiveAgent:
             "mechanic": {k: mech.get(k) for k in ("id", "name", "role", "whatsapp", "shift", "reasons")},
             "message": msg,
             "message_source": msg_source,
+            "chat_messages": self.chat_messages(entry, mech, pb, refs),
             "timings_ms": {"ledger_write": round((t1 - t0) * 1e3, 1),
                            "similar_case_search": round((t2 - t1) * 1e3, 1),
                            "playbook_and_message": round((t3 - t2) * 1e3, 1)},

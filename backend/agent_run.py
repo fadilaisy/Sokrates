@@ -79,7 +79,7 @@ class AgentDeps:
     active_model: Callable[[], str]
     planner_model: Callable[[], str]
     # (mechanic, message, context) → delivery result {"status": sent|failed|not_configured, …}
-    notify: Optional[Callable[[Dict[str, Any], str, Dict[str, Any]], Awaitable[Dict[str, Any]]]] = None
+    notify: Optional[Callable[[Dict[str, Any], List[str], Dict[str, Any]], Awaitable[Dict[str, Any]]]] = None
     now: Callable[[], datetime] = lambda: datetime.now(_WIB)
     step_delay: float = 0.35      # seconds between steps, so a watcher can follow the run live
 
@@ -438,7 +438,7 @@ class AgentRunner:
         flow = await self._flow(run, ctx)
         mech = flow["mechanic"]
         name = mech.get("name") or "tim mekanik"
-        delivery = (await self.deps.notify(mech, flow["message"], {"agent_run_id": run["id"], "machine_id": run["trigger"]["machine_id"]})
+        delivery = (await self.deps.notify(mech, flow.get("chat_messages") or [flow["message"]], {"agent_run_id": run["id"], "machine_id": run["trigger"]["machine_id"]})
                     if self.deps.notify else {"status": "not_configured"})
         if delivery.get("status") == "sent":
             head = f"Playbook dikirim ke {name} via Telegram ({delivery.get('to')})"

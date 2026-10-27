@@ -17,7 +17,7 @@ still runs and the UI says the message was only prepared.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
@@ -33,15 +33,21 @@ def mask(chat_id: str) -> str:
     return "•" * max(0, len(chat_id) - 3) + chat_id[-3:] if len(chat_id) > 3 else chat_id
 
 
-def send_text(body: str) -> Dict[str, Any]:
-    """Send one message to TELEGRAM_CHAT_ID. Never raises: status sent / failed / not_configured."""
+def send_text(body: str, button: Optional[Tuple[str, str]] = None) -> Dict[str, Any]:
+    """Send one message to TELEGRAM_CHAT_ID, optionally with one (label, url) link button.
+
+    Never raises: status sent / failed / not_configured.
+    """
     chat = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     out: Dict[str, Any] = {"channel": "telegram", "to": mask(chat)}
     if not configured():
         return {**out, "status": "not_configured"}
     url = f"{API_URL}/bot{os.environ['TELEGRAM_BOT_TOKEN'].strip()}/sendMessage"
     try:
-        r = httpx.post(url, json={"chat_id": chat, "text": body[:4096]}, timeout=TIMEOUT_S)
+        payload: Dict[str, Any] = {"chat_id": chat, "text": body[:4096]}
+        if button:
+            payload["reply_markup"] = {"inline_keyboard": [[{"text": button[0], "url": button[1]}]]}
+        r = httpx.post(url, json=payload, timeout=TIMEOUT_S)
         data = r.json() if r.content else {}
     except Exception as exc:  # the token is in the URL, so never echo the request
         return {**out, "status": "failed", "error": type(exc).__name__}

@@ -32,6 +32,7 @@ def env(monkeypatch):
         sent.append((url, json))
         return sent.reply
 
+    monkeypatch.delenv("PUBLIC_APP_URL", raising=False)
     monkeypatch.setattr(tg.httpx, "post", post)
     monkeypatch.setattr(m, "_notify_recent", {})
     return sent
@@ -71,26 +72,36 @@ def test_network_error_never_raises_or_leaks_token(env, monkeypatch):
     assert res == {"channel": "telegram", "to": "••••••321", "status": "failed", "error": "ConnectError"}
 
 
-def test_notify_mechanic_logs_once_and_dedupes(env):
-    mech = {"id": "MECH-1", "name": "Hendra", "whatsapp": "+62-812-5550-0101"}
+def test_notify_mechanic_sends_alert_then_checklist_once(env):
+    mech = {"id": "MECH-1", "name": "Hendra"}
     before = len(m._ledger.get_all())
-    first = asyncio.run(m._notify_mechanic(mech, "Ganti bearing", {"machine_id": "CNC-01"}))
-    again = asyncio.run(m._notify_mechanic(mech, "Ganti bearing", {"machine_id": "CNC-01"}))
-    assert first["status"] == "sent" and again.get("duplicate") and len(env) == 1
+    first = asyncio.run(m._notify_mechanic(mech, ["alert", "steps"], {"machine_id": "CNC-01"}))
+    again = asyncio.run(m._notify_mechanic(mech, ["alert", "steps"], {"machine_id": "CNC-01"}))
+    assert first["status"] == "sent" and first["message_ids"] == [7, 7]
+    assert again.get("duplicate") and [b["text"] for _, b in env] == ["alert", "steps"]
+    assert all("reply_markup" not in b for _, b in env)             # no public URL, no button
     new = m._ledger.get_all()[before:]
     assert [e["action_type"] for e in new] == ["TELEGRAM_SENT"]
     assert new[0]["mechanic_name"] == "Hendra" and new[0]["machine_id"] == "CNC-01"
 
 
-def test_notify_mechanic_failure_is_logged(env):
+def test_checklist_gets_playbook_button_on_public_url(env, monkeypatch):
+    monkeypatch.setenv("PUBLIC_APP_URL", "https://app.example.com/")
+    asyncio.run(m._notify_mechanic({"id": "MECH-3"}, ["alert", "steps"], {}))
+    alert, steps = (b for _, b in env)
+    assert "reply_markup" not in alert
+    assert steps["reply_markup"]["inline_keyboard"][0][0]["url"] == "https://app.example.com/#maintenance"
+
+
+def test_notify_mechanic_failure_is_logged_and_stops(env):
     env.reply = _Resp(403, {"ok": False, "description": "Forbidden"})
     before = len(m._ledger.get_all())
-    res = asyncio.run(m._notify_mechanic({"id": "MECH-2", "name": "Ani"}, "x", {}))
-    assert res["status"] == "failed"
+    res = asyncio.run(m._notify_mechanic({"id": "MECH-2", "name": "Ani"}, ["alert", "steps"], {}))
+    assert res["status"] == "failed" and len(env) == 1
     assert m._ledger.get_all()[before]["action_type"] == "TELEGRAM_FAILED"
 
 
 def test_notify_mechanic_not_configured(monkeypatch):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-    res = asyncio.run(m._notify_mechanic({"id": "MECH-1"}, "x", {}))
+    res = asyncio.run(m._notify_mechanic({"id": "MECH-1"}, ["x"], {}))
     assert res == {"channel": "telegram", "status": "not_configured"}
