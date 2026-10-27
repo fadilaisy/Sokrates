@@ -632,6 +632,11 @@ export const api = {
     }),
   skills: () => req<SkillLibrary>("/api/skills"),
   skill: (id: string) => req<SkillFiles>(`/api/skills/${encodeURIComponent(id)}`),
+  costs: () => req<PlantCosts>("/api/costs"),
+  requestCostChange: (b: { key: string; value: number; effective_from?: string; requested_by: string; reason?: string }) =>
+    req<CostRequest>("/api/costs/requests", { method: "POST", body: JSON.stringify(b) }),
+  decideCostChange: (id: string, decision: "approve" | "reject", by: string) =>
+    req<CostRequest>(`/api/costs/requests/${encodeURIComponent(id)}/${decision}`, { method: "POST", body: JSON.stringify({ by }) }),
   skillProposals: () => req<SkillProposal[]>("/api/skills/proposals"),
   skillProposalDraft: (id: string) =>
     req<SkillCompose & { proposal: SkillProposal }>(`/api/skills/proposals/${encodeURIComponent(id)}/draft`, { method: "POST" }),
@@ -971,4 +976,37 @@ export interface SkillTestRun {
   checks: { id: string; label: string; ok: boolean; detail?: string }[];
   spec_sha256: string;
   ledger_entry_id: string;
+}
+
+// ── Plant costs (Biaya & SLA) ───────────────────────────────────────────────
+
+export interface CostRequest {
+  request_id: string;
+  key: string;
+  label: string;
+  old_value: number | null;
+  value: number;
+  effective_from: string;
+  requested_by: string;
+  reason?: string;
+  status: "pending" | "approved" | "rejected" | "applied";
+  approved_by?: string;
+  timestamp?: string;
+  applied_at?: string;
+}
+
+export interface CostRow {
+  key: string;
+  label: string;
+  unit: string;
+  value: number | null;
+  open_request: CostRequest | null;
+  last_change: CostRequest | null;
+}
+
+export interface PlantCosts {
+  rows: CostRow[];
+  currency: string;
+  facility: string | null;
+  source: string;
 }
