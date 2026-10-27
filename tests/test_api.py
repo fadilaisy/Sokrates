@@ -372,3 +372,38 @@ def test_dashboard_approval_records_its_source_and_reset_marks_the_ledger():
     entry = m._ledger.get_all()[-1]
     assert entry["action_type"] == "SCENARIO_APPROVED" and entry["source"] == {"kind": "dashboard"}
     client.post("/api/state/reset")
+
+
+def test_approved_reroute_stores_iso_times_on_the_plan_day():
+    """SAP keeps ISO timestamps; the solver's '09:00 WIB' labels are display text only."""
+    import backend.main as m
+
+    client.post("/api/state/reset")
+    r = client.post("/api/disrupt", json={"machine_id": "CNC-02", "disruption_type": "BREAKDOWN",
+                                          "start_hour": 2, "end_hour": 5}).json()
+    for sid in ("scenario_c", "scenario_b"):
+        sc = next(s for s in r["scenarios"] if s["id"] == sid)
+        if sc["gantt_changes"]:
+            break
+    ok = client.post("/api/approve", json={"scenario_id": sc["id"], "scenario_data": sc,
+                                           "expected_sap_version": r["sap_version"],
+                                           "approved_by": "Supervisor Budi"})
+    assert ok.status_code == 200, ok.text
+    orders = {o["id"]: o for o in m._sap.get_state()["production_orders"]}
+    for c in sc["gantt_changes"]:
+        o = orders[c["order_id"]]
+        assert o["planned_start"] == "2025-01-15T" + c["new_start_time"][:5] + ":00", o
+        assert o["planned_end"].startswith("2025-01-15T") and "WIB" not in o["planned_end"]
+    client.post("/api/state/reset")
+
+
+def test_plan_timestamp_parses_solver_labels():
+    from datetime import date
+    from backend.main import _plan_timestamp
+
+    d = date(2025, 1, 15)
+    assert _plan_timestamp("09:00 WIB", d) == "2025-01-15T09:00:00"
+    assert _plan_timestamp("21:00 WIB (Lembur)", d) == "2025-01-15T21:00:00"
+    assert _plan_timestamp("25:00 WIB (Overtime)", d) == "2025-01-16T01:00:00"
+    assert _plan_timestamp("2025-01-15T07:00:00", d) == "2025-01-15T07:00:00"
+    assert _plan_timestamp("?", d) == "?" and _plan_timestamp("09:00 WIB", None) == "09:00 WIB"

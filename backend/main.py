@@ -44,7 +44,7 @@ import sys
 import time
 import traceback
 from collections import deque
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, Optional
 
@@ -782,12 +782,15 @@ async def _approve_scenario(body: ApproveRequest, source: dict[str, Any]) -> App
             )
 
     gantt_changes: list[dict] = body.scenario_data.get("gantt_changes", [])
+    # The solver labels times for display ("09:00 WIB", "15:00 WIB (Lembur)"); SAP keeps
+    # ISO timestamps on the order's own plan day, like every other order.
+    _plan_day = {o.get("id"): _plan_date(o, _live) for o in _live.get("production_orders", [])}
     order_updates = [
         {
             "id":             change["order_id"],
             "work_center_id": change.get("to_machine"),
-            "planned_start":  change.get("new_start_time", ""),
-            "planned_end":    change.get("new_end_time", ""),
+            "planned_start":  _plan_timestamp(change.get("new_start_time", ""), _plan_day.get(change["order_id"])),
+            "planned_end":    _plan_timestamp(change.get("new_end_time", ""), _plan_day.get(change["order_id"])),
             "status":         "RESCHEDULED",
         }
         for change in gantt_changes
@@ -949,6 +952,27 @@ def _hhmm(ts: Any) -> str:
     """'2025-01-15T07:00:00' -> '07:00'; anything else is passed through."""
     t = str(ts or "")
     return t[11:16] if len(t) >= 16 and t[10] == "T" else (t or "?")
+
+
+def _plan_date(order: dict[str, Any], state: dict[str, Any]) -> Optional[date]:
+    """The plan day an order belongs to: its own planned_start, else the SAP snapshot's day."""
+    for v in (order.get("planned_start"), (state.get("_meta") or {}).get("generated_at")):
+        try:
+            return datetime.fromisoformat(str(v).replace("Z", "+00:00")).date()
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _plan_timestamp(label: Any, day: Optional[date]) -> str:
+    """'09:00 WIB' / '17:00 WIB (Lembur)' → '2025-01-15T09:00:00' on `day`; ISO and unparsable values pass through."""
+    text = str(label or "")
+    m = re.match(r"\s*(\d{1,2})[:.](\d{2})\b", text)
+    if day is None or m is None or "T" in text:
+        return text
+    hours, minutes = int(m.group(1)), int(m.group(2))
+    at = datetime.combine(day, datetime.min.time()) + timedelta(hours=hours, minutes=minutes)  # 24:00+ rolls over
+    return at.isoformat(timespec="seconds")
 
 
 def _maintenance_context(state: dict[str, Any]) -> str:
