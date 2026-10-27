@@ -74,7 +74,7 @@ from rag.api import router as rag_router
 from rag.retrieve import Retriever
 from rag.generate import sanitize as rag_sanitize
 from rag import aicore
-from backend import chat_context, chat_visual, telegram
+from backend import chat_context, chat_visual, mechanic_updates, telegram
 from backend.agent_run import AgentDeps, AgentRunner, ApprovalRefused
 from backend.metrics import compute_metrics, events_for_approval
 from knowledge.maintenance_ledger import MaintenanceLedger
@@ -736,7 +736,13 @@ async def post_disrupt_inject(body: DisruptionInjectRequest) -> DisruptionInject
     summary="Approve a recovery scenario and apply to SAP state",
 )
 async def post_approve(body: ApproveRequest) -> ApproveResponse:
-    return await _approve_scenario(body, {"kind": "dashboard"})
+    res = await _approve_scenario(body, {"kind": "dashboard"})
+    changes = _issued_scenarios.get(body.scenario_id, {}).get("gantt_changes") or []
+    machine = next((c.get("from_machine") for c in changes), None)
+    await _notify_mechanic({"name": "Tim mekanik"},
+                           [mechanic_updates.approved(body.approved_by, machine, changes)],
+                           {"update": "approved", "scenario_receipt_id": res.receipt_id, "machine_id": machine})
+    return res
 
 
 async def _approve_scenario(body: ApproveRequest, source: dict[str, Any]) -> ApproveResponse:
@@ -2279,6 +2285,8 @@ async def post_ledger_revert(entry_id: str, body: LedgerEntryId) -> ApproveRespo
         "sap_version_after":  version_after,
         "approved_by":        body.approved_by,
     })
+    await _notify_mechanic({"name": "Tim mekanik"}, [mechanic_updates.reverted(body.approved_by, order_updates)],
+                           {"update": "reverted", "original_entry_id": entry_id})
 
     return ApproveResponse(
         receipt_id=entry["id"],
@@ -2879,10 +2887,14 @@ async def get_agent_run(run_id: str) -> dict[str, Any]:
 @app.post("/api/agent/runs/{run_id}/approve", summary="Approve the run's SAP writes: parts order + reroute")
 async def post_agent_run_approve(run_id: str, body: AgentApproveRequest) -> dict[str, Any]:
     try:
-        return await _agent_runner.approve(run_id, body.approved_by)
+        run = await _agent_runner.approve(run_id, body.approved_by)
     except KeyError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown run: {run_id}")
-    except (ValueError, ApprovalRefused) as exc:
+    except ApprovalRefused as exc:
+        await _notify_run_mechanic(_agent_runner.get(run_id), "refused",
+                                   mechanic_updates.refused(_run_machine(run_id), str(exc)))
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
     except DriftError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,
@@ -2890,6 +2902,37 @@ async def post_agent_run_approve(run_id: str, body: AgentApproveRequest) -> dict
     except Exception as exc:  # the run keeps the reason and stays approvable
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                             detail=f"{type(exc).__name__}: {str(exc)[:200]}")
+    approval = run.get("approval") or {}
+    state = _sap.get_state()
+    parts = approval.get("parts") or {}
+    rsv, prs = set(parts.get("reservations") or []), set(parts.get("purchase_requisitions") or [])
+    scenario = (run.get("pending_approval") or {}).get("scenario") or {}
+    text = mechanic_updates.approved(
+        body.approved_by, _run_machine(run_id), scenario.get("gantt_changes") or [],
+        [r for r in state.get("reservations", []) if r.get("id") in rsv],
+        [p for p in state.get("purchase_requisitions", []) if p.get("id") in prs],
+        mechanic=_run_mechanic(run).get("name"))
+    await _notify_run_mechanic(run, "approved", text)
+    return run
+
+
+def _run_machine(run_id: str) -> Optional[str]:
+    run = _agent_runner.get(run_id) or {}
+    return (run.get("trigger") or {}).get("machine_id")
+
+
+def _run_mechanic(run: Optional[dict[str, Any]]) -> dict[str, Any]:
+    step = next((s for s in (run or {}).get("steps", []) if s.get("tool") == "route_to_expert"), None)
+    out = (step or {}).get("output") or {}
+    return {"id": out.get("mechanic_id"), "name": out.get("name") or "Tim mekanik"}
+
+
+async def _notify_run_mechanic(run: Optional[dict[str, Any]], update: str, text: str) -> None:
+    """The agent run's decision, sent to the mechanic it routed the ticket to."""
+    run = run or {}
+    await _notify_mechanic(_run_mechanic(run), [text],
+                           {"update": update, "agent_run_id": run.get("id"),
+                            "machine_id": (run.get("trigger") or {}).get("machine_id")})
 
 
 async def _autorun_agent(m: dict[str, Any], code: str, text: str) -> None:

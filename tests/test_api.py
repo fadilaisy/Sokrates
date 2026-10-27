@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+import backend.main as m
 from backend.main import app
 
 client = TestClient(app)
@@ -78,7 +79,14 @@ def test_approve_requires_an_approver_name():
     assert "SCENARIO_APPROVED" not in _ledger_types()[-1:]
 
 
-def test_revert_roundtrip_keeps_chain_valid():
+def test_revert_roundtrip_keeps_chain_valid(monkeypatch):
+    sent = []
+
+    async def notify(mech, messages, context):
+        sent.append((messages[0], context["update"]))
+        return {"channel": "telegram", "status": "sent"}
+
+    monkeypatch.setattr(m, "_notify_mechanic", notify)
     d = client.post("/api/disrupt", json=DISRUPTION).json()
     sc = next(s for s in d["scenarios"] if s["recommended"])
     client.post("/api/approve", json={
@@ -90,6 +98,8 @@ def test_revert_roundtrip_keeps_chain_valid():
                     json={"id": approved["id"], "approved_by": "Tester"})
     assert r.status_code == 200, r.text[:300]
     assert "SCENARIO_REVERTED" in _ledger_types()
+    assert [u for _, u in sent] == ["approved", "reverted"]            # the mechanic hears both
+    assert sent[0][0].startswith("✅ Rencana") and "kembali ke jadwal semula" in sent[1][0]
     v = client.get("/api/ledger/verify").json()
     assert v["valid"] is True
 

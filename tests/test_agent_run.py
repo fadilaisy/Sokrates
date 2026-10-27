@@ -333,3 +333,20 @@ def test_notify_team_summary_follows_delivery(runner, monkeypatch, delivery, exp
     step = next(s for s in run["steps"] if s["tool"] == "notify_team")
     assert expect in step["summary"] and step["output"]["delivery"] == delivery
     assert seen == [{"agent_run_id": run["id"], "machine_id": "CNC-01"}]
+
+
+def test_agent_run_approval_tells_the_routed_mechanic(runner, monkeypatch):
+    sent = []
+
+    async def notify(mech, messages, context):
+        sent.append((mech, messages, context))
+        return {"channel": "telegram", "status": "sent"}
+
+    run = _wait(client.post("/api/agent/run", json={"machine_id": "CNC-01", "alarm_code": "ALM-162",
+                                                    "alarm_text": "SPINDLE OVERLOAD"}).json()["id"])
+    monkeypatch.setattr(m, "_notify_mechanic", notify)
+    assert client.post(f"/api/agent/runs/{run['id']}/approve", json={"approved_by": "Supervisor Budi"}).status_code == 200
+    mech, (text,), context = sent[-1]
+    assert mech["name"] == "Hendra Wijaya" and context["update"] == "approved" and context["agent_run_id"] == run["id"]
+    assert text.startswith("✅ Rencana CNC-01 disetujui oleh Supervisor Budi")
+    assert "NSK-7014CTYNSULP4" in text and "🔀 Jadwal produksi diperbarui:" in text

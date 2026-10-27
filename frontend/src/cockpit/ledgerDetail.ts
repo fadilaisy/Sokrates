@@ -38,6 +38,8 @@ export function ledgerSubject(e: LedgerEntry): string {
   return "";
 }
 
+const UPDATE_LABEL: Record<string, string> = { approved: "rencana disetujui", refused: "rencana ditolak", reverted: "persetujuan dibatalkan" };
+
 /** What the entry records, in plain words: shown when the operator hovers or taps an entry. */
 export function ledgerDetail(e: LedgerEntry): string[] {
   const m = String(e.machine_id ?? "");
@@ -91,6 +93,8 @@ export function ledgerDetail(e: LedgerEntry): string[] {
     case "SKILL_APPROVED":
       return [`${person(e.approved_by)} menyetujui skill ${e.skill_id} versi ${e.skill_version}: ${e.hooks_count ?? 0} hook, ${e.interlocks_count ?? 0} interlock.`];
     case "TELEGRAM_SENT":
+      if (e.update)
+        return [`Kabar "${UPDATE_LABEL[String(e.update)] ?? e.update}" dikirim via Telegram ke ${e.mechanic_name ?? "mekanik"}${m ? ` (${m})` : ""}.`];
       return [`Pesan perbaikan ${m ? `untuk ${m} ` : ""}dikirim via Telegram ke ${e.mechanic_name ?? "mekanik"} (${e.to ?? "?"}).`];
     case "TELEGRAM_FAILED":
       return [`Pesan Telegram ke ${e.mechanic_name ?? "mekanik"} (${e.to ?? "?"}) gagal: ${e.error ?? "tanpa alasan"}.`, "Playbook tetap ada di halaman Perawatan."];
