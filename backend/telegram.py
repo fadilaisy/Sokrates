@@ -1,0 +1,54 @@
+"""
+backend/telegram.py
+───────────────────
+Fallback channel for the mechanic's repair message: a Telegram bot (Bot API).
+
+Env:
+TELEGRAM_BOT_TOKEN  token from @BotFather
+TELEGRAM_CHAT_ID    chat that receives the messages (the demo phone; mechanics in the
+                    roster have no Telegram ids). Find it by sending the bot any message,
+                    then open https://api.telegram.org/bot<token>/getUpdates → message.chat.id
+
+Unlike WhatsApp there is no 24-hour window: once the person has pressed Start on the
+bot, it can message them at any time.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any, Dict
+
+import httpx
+
+API_URL = "https://api.telegram.org"
+TIMEOUT_S = 10.0
+
+
+def configured() -> bool:
+    return bool(os.getenv("TELEGRAM_BOT_TOKEN", "").strip() and os.getenv("TELEGRAM_CHAT_ID", "").strip())
+
+
+def mask(chat_id: str) -> str:
+    return "•" * max(0, len(chat_id) - 3) + chat_id[-3:] if len(chat_id) > 3 else chat_id
+
+
+def send_text(body: str) -> Dict[str, Any]:
+    """Send one message to TELEGRAM_CHAT_ID. Never raises: status sent / failed / not_configured."""
+    chat = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    out: Dict[str, Any] = {"channel": "telegram", "to": mask(chat)}
+    if not configured():
+        return {**out, "status": "not_configured"}
+    url = f"{API_URL}/bot{os.environ['TELEGRAM_BOT_TOKEN'].strip()}/sendMessage"
+    try:
+        r = httpx.post(url, json={"chat_id": chat, "text": body[:4096]}, timeout=TIMEOUT_S)
+        data = r.json() if r.content else {}
+    except Exception as exc:  # the token is in the URL, so never echo the request
+        return {**out, "status": "failed", "error": type(exc).__name__}
+    if data.get("ok"):
+        return {**out, "status": "sent", "message_id": (data.get("result") or {}).get("message_id")}
+    reason = data.get("description") or f"HTTP {r.status_code}"
+    if r.status_code == 403:
+        reason = "penerima belum menekan Start di bot Telegram SkillForge"
+    elif r.status_code == 401:
+        reason = "token bot Telegram tidak valid"
+    return {**out, "status": "failed", "error": str(reason)[:300], "code": r.status_code}

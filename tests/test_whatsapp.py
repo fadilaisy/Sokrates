@@ -1,4 +1,4 @@
-"""tests/test_whatsapp.py — WhatsApp Cloud API sending (HTTP mocked) and the mechanic notify path."""
+"""tests/test_whatsapp.py — WhatsApp Cloud API and Telegram sending (HTTP mocked) and the mechanic notify path."""
 
 import asyncio
 
@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 import backend.main as m
+from backend import telegram as tg
 from backend import whatsapp as wa
 
 
@@ -28,6 +29,8 @@ def env(monkeypatch):
     monkeypatch.setenv("WHATSAPP_PHONE_ID", "123")
     monkeypatch.delenv("WHATSAPP_DEMO_TO", raising=False)
     monkeypatch.delenv("WHATSAPP_API_VERSION", raising=False)
+    for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "NOTIFY_CHANNELS"):
+        monkeypatch.delenv(k, raising=False)
     sent = _Sent()
 
     def post(url, json, timeout, headers):
@@ -82,7 +85,7 @@ def test_network_error_never_raises(env, monkeypatch):
 
 
 def test_notify_mechanic_logs_once_and_dedupes(env, monkeypatch):
-    monkeypatch.setattr(m, "_wa_recent", {})
+    monkeypatch.setattr(m, "_notify_recent", {})
     mech = {"id": "MECH-1", "name": "Hendra", "whatsapp": "+62-812-5550-0101"}
     before = len(m._ledger.get_all())
     first = asyncio.run(m._notify_mechanic(mech, "Ganti bearing", {"machine_id": "CNC-01"}))
@@ -94,9 +97,60 @@ def test_notify_mechanic_logs_once_and_dedupes(env, monkeypatch):
 
 
 def test_notify_mechanic_failure_is_logged(env, monkeypatch):
-    monkeypatch.setattr(m, "_wa_recent", {})
+    monkeypatch.setattr(m, "_notify_recent", {})
     env.reply = _Resp(401, {"error": {"code": 190, "message": "expired"}})
     before = len(m._ledger.get_all())
     res = asyncio.run(m._notify_mechanic({"name": "Ani", "whatsapp": "0812"}, "x", {}))
     assert res["status"] == "failed"
     assert m._ledger.get_all()[before]["action_type"] == "WHATSAPP_FAILED"
+
+
+# ── Telegram fallback ────────────────────────────────────────────────────────
+
+@pytest.fixture
+def tg_env(env, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "bot:tok")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "987654321")
+    sent = _Sent()
+    sent.reply = _Resp(200, {"ok": True, "result": {"message_id": 7}})
+
+    meta_post = tg.httpx.post  # the fake Graph API from `env`: both modules share httpx
+
+    def post(url, json, timeout, headers=None):
+        if "api.telegram.org" not in url:
+            return meta_post(url, json=json, timeout=timeout, headers=headers)
+        sent.append((url, json))
+        return sent.reply
+
+    monkeypatch.setattr(tg.httpx, "post", post)
+    monkeypatch.setattr(m, "_notify_recent", {})
+    return sent
+
+
+def test_telegram_send_and_errors(tg_env):
+    assert tg.send_text("Ganti bearing") == {"channel": "telegram", "to": "••••••321", "status": "sent", "message_id": 7}
+    url, body = tg_env[0]
+    assert url == "https://api.telegram.org/botbot:tok/sendMessage" and body == {"chat_id": "987654321", "text": "Ganti bearing"}
+    tg_env.reply = _Resp(403, {"ok": False, "description": "Forbidden: bot can't initiate conversation"})
+    res = tg.send_text("x")
+    assert res["status"] == "failed" and "Start" in res["error"]
+
+
+def test_whatsapp_failure_falls_back_to_telegram(env, tg_env):
+    env.reply = _Resp(400, {"error": {"code": 131047, "message": "Re-engagement"}})
+    before = len(m._ledger.get_all())
+    res = asyncio.run(m._notify_mechanic({"id": "MECH-1", "name": "Hendra", "whatsapp": "0812"}, "x", {}))
+    assert res["status"] == "sent" and res["channel"] == "telegram"
+    assert [a["channel"] for a in res["attempts"]] == ["whatsapp", "telegram"]
+    assert [e["action_type"] for e in m._ledger.get_all()[before:]] == ["WHATSAPP_FAILED", "TELEGRAM_SENT"]
+
+
+def test_whatsapp_success_skips_telegram(env, tg_env):
+    res = asyncio.run(m._notify_mechanic({"id": "MECH-1", "whatsapp": "0812"}, "y", {}))
+    assert res["channel"] == "whatsapp" and "attempts" not in res and not tg_env
+
+
+def test_notify_channels_can_skip_whatsapp(env, tg_env, monkeypatch):
+    monkeypatch.setenv("NOTIFY_CHANNELS", "telegram")
+    res = asyncio.run(m._notify_mechanic({"id": "MECH-1", "whatsapp": "0812"}, "z", {}))
+    assert res["channel"] == "telegram" and not env

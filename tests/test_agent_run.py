@@ -319,6 +319,10 @@ def test_agent_reroute_is_tagged_and_the_chat_can_say_so(runner):
     ({"status": "sent", "to": "6281••••101"}, "dikirim ke"),
     ({"status": "failed", "error": "token kedaluwarsa"}, "gagal: token kedaluwarsa"),
     ({"status": "not_configured"}, "belum dikonfigurasi"),
+    ({"channel": "telegram", "status": "sent", "to": "••321",
+      "attempts": [{"channel": "whatsapp", "status": "failed", "error": "token kedaluwarsa"},
+                   {"channel": "telegram", "status": "sent", "to": "••321"}]},
+     "via Telegram (••321) setelah WhatsApp gagal: token kedaluwarsa"),
 ])
 def test_notify_team_summary_follows_delivery(runner, monkeypatch, delivery, expect):
     seen = []

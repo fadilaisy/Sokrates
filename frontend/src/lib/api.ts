@@ -780,6 +780,8 @@ export interface CaseHit {
   case?: MaintCase;
 }
 
+export type Delivery = { channel: "whatsapp" | "telegram"; to?: string; status: "sent" | "failed" | "not_configured"; message_id?: string; error?: string };
+
 export interface MaintFlow {
   trigger_entry_id: string;
   machine_id: string;
@@ -789,7 +791,7 @@ export interface MaintFlow {
   mechanic: { id: string; name: string; role: string; whatsapp: string; shift: string; reasons: string[] };
   message: string;
   message_source: "llm" | "template";
-  delivery?: { channel: "whatsapp"; to: string; status: "sent" | "failed" | "not_configured"; message_id?: string; error?: string };
+  delivery?: Delivery & { attempts?: Delivery[] };
   timings_ms: Record<string, number>;
   playbook_ledger_id: string;
   playbook_ledger_hash: string;

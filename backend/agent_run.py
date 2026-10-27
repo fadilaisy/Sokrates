@@ -65,6 +65,9 @@ ACTIVE = ("planning", "running")
 FINISHED = ("done", "approved", "failed", "rejected")
 
 
+CHANNEL_NAMES = {"whatsapp": "WhatsApp", "telegram": "Telegram"}
+
+
 @dataclass
 class AgentDeps:
     get_state: Callable[[], Dict[str, Any]]
@@ -440,12 +443,16 @@ class AgentRunner:
         name = mech.get("name") or "tim mekanik"
         delivery = (await self.deps.notify(mech, flow["message"], {"agent_run_id": run["id"], "machine_id": run["trigger"]["machine_id"]})
                     if self.deps.notify else {"status": "not_configured"})
+        via = CHANNEL_NAMES.get(delivery.get("channel"), "WhatsApp")
+        failed = [a for a in delivery.get("attempts", []) if a.get("status") == "failed"]
         if delivery.get("status") == "sent":
-            head = f"Playbook dikirim ke {name} via WhatsApp ({delivery.get('to')})"
+            head = f"Playbook dikirim ke {name} via {via} ({delivery.get('to')})"
+            if failed:
+                head += f" setelah {CHANNEL_NAMES.get(failed[0].get('channel'), '?')} gagal: {failed[0].get('error')}"
         elif delivery.get("status") == "failed":
-            head = f"Pesan WhatsApp ke {name} gagal: {delivery.get('error')}; playbook tetap ada di halaman Perawatan"
+            head = f"Pesan {via} ke {name} gagal: {delivery.get('error')}; playbook tetap ada di halaman Perawatan"
         else:
-            head = f"Pesan WhatsApp untuk {name} disiapkan (pengiriman WhatsApp belum dikonfigurasi)"
+            head = f"Pesan untuk {name} disiapkan (pengiriman WhatsApp/Telegram belum dikonfigurasi)"
         return (head + "; supervisor menerima ringkasan di cockpit.",
                 {"message": flow["message"], "playbook_ledger_id": flow.get("playbook_ledger_id"),
                  "mechanic_id": mech.get("id"), "delivery": delivery})
