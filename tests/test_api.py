@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+import backend.main as m
 from backend.main import app
 
 client = TestClient(app)
@@ -78,7 +79,14 @@ def test_approve_requires_an_approver_name():
     assert "SCENARIO_APPROVED" not in _ledger_types()[-1:]
 
 
-def test_revert_roundtrip_keeps_chain_valid():
+def test_revert_roundtrip_keeps_chain_valid(monkeypatch):
+    sent = []
+
+    async def notify(mech, messages, context):
+        sent.append((messages[0], context["update"]))
+        return {"channel": "telegram", "status": "sent"}
+
+    monkeypatch.setattr(m, "_notify_mechanic", notify)
     d = client.post("/api/disrupt", json=DISRUPTION).json()
     sc = next(s for s in d["scenarios"] if s["recommended"])
     client.post("/api/approve", json={
@@ -90,6 +98,8 @@ def test_revert_roundtrip_keeps_chain_valid():
                     json={"id": approved["id"], "approved_by": "Tester"})
     assert r.status_code == 200, r.text[:300]
     assert "SCENARIO_REVERTED" in _ledger_types()
+    assert [u for _, u in sent] == ["approved", "reverted"]            # the mechanic hears both
+    assert sent[0][0].startswith("✅ Rencana") and "kembali ke jadwal semula" in sent[1][0]
     v = client.get("/api/ledger/verify").json()
     assert v["valid"] is True
 
@@ -407,3 +417,13 @@ def test_plan_timestamp_parses_solver_labels():
     assert _plan_timestamp("25:00 WIB (Overtime)", d) == "2025-01-16T01:00:00"
     assert _plan_timestamp("2025-01-15T07:00:00", d) == "2025-01-15T07:00:00"
     assert _plan_timestamp("?", d) == "?" and _plan_timestamp("09:00 WIB", None) == "09:00 WIB"
+
+
+def test_maintenance_flows_filter_by_case():
+    """The Telegram button opens #maintenance/CASE-x; the page loads that one playbook."""
+    for cid in ("CASE-9001", "CASE-9002"):
+        m._maint_ledger.append("PLAYBOOK", "PB", {"case_id": cid, "mechanic_id": None, "message": cid,
+                                                  "playbook": {"steps": [], "confidence": "none"}})
+    rows = client.get("/api/maintenance/flows", params={"case_id": "CASE-9001"}).json()
+    assert [r["case_id"] for r in rows] == ["CASE-9001"]
+    assert client.get("/api/maintenance/flows", params={"case_id": "CASE-0000"}).json() == []

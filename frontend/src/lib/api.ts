@@ -780,6 +780,8 @@ export interface CaseHit {
   case?: MaintCase;
 }
 
+export type Delivery = { channel: "telegram"; to?: string; status: "sent" | "failed" | "not_configured"; message_ids?: number[]; error?: string };
+
 export interface MaintFlow {
   trigger_entry_id: string;
   machine_id: string;
@@ -789,6 +791,7 @@ export interface MaintFlow {
   mechanic: { id: string; name: string; role: string; whatsapp: string; shift: string; reasons: string[] };
   message: string;
   message_source: "llm" | "template";
+  delivery?: Delivery;
   timings_ms: Record<string, number>;
   playbook_ledger_id: string;
   playbook_ledger_hash: string;
@@ -824,10 +827,10 @@ export const maintApi = {
     if (f.cases_only) p.set("cases_only", "true");
     return req<MaintSearch>(`/api/maintenance/search?${p}`);
   },
-  flows: () =>
+  flows: (f: { case_id?: string } = {}) =>
     req<{ id: string; case_id: string; message: string; message_source: string; playbook: Playbook; logged_at: string;
           ledger_hash: string; case: MaintCase | null; mechanic: { name: string; role: string } | null }[]>(
-      "/api/maintenance/flows",
+      f.case_id ? `/api/maintenance/flows?case_id=${encodeURIComponent(f.case_id)}` : "/api/maintenance/flows",
     ),
   chat: (question: string, machine_id?: string) =>
     req<MaintChat>("/api/maintenance/chat", { method: "POST", body: JSON.stringify({ question, machine_id }) }),

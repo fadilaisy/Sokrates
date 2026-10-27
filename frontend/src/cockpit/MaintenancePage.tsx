@@ -179,8 +179,81 @@ function Section({ title, sub, children }: { title: string; sub?: string; childr
   );
 }
 
+/** Case id in a deep link such as #maintenance/CASE-0031 (the button on the mechanic's Telegram checklist). */
+function caseFromHash(): string | null {
+  const [page, id] = window.location.hash.replace("#", "").split("/");
+  return page === "maintenance" && id ? decodeURIComponent(id) : null;
+}
+
+type FeedItem = Awaited<ReturnType<typeof maintApi.flows>>[number];
+
+/** The case the mechanic was sent to: what is wrong, who it is assigned to and the full cited playbook. */
+function AssignedCase({ id, onOpen, onClose }: { id: string; onOpen: (id: string) => void; onClose: () => void }) {
+  const [item, setItem] = useState<FeedItem | null>(null);
+  const [missing, setMissing] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    setItem(null);
+    setMissing(false);
+    setErr(null);
+    maintApi
+      .flows({ case_id: id })
+      .then((rows) => (rows[0] ? setItem(rows[0]) : setMissing(true)))
+      .catch((e) => setErr(String(e)));
+  }, [id]);
+  const c = item?.case;
+  return (
+    <Card className="flex flex-col gap-4 border-2 border-accent-blue p-5" aria-label={`Tugas ${id}`}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-[13px] font-bold uppercase tracking-wide text-accent-blue">Tugas perbaikan</p>
+          <h2 className="text-[22px] font-bold">
+            {item?.mechanic ? `Untuk ${item.mechanic.name}` : "Kasus"} · <Mono>{id}</Mono>
+          </h2>
+          {item?.mechanic && <p className="text-[15px] text-muted-ink">{item.mechanic.role}</p>}
+        </div>
+        <Btn variant="secondary" onClick={onClose}>Tutup</Btn>
+      </div>
+      {err && <p className="text-fault">{err}</p>}
+      {missing && (
+        <p className="text-[16px] text-muted-ink">
+          Kasus {id} tidak ditemukan di server ini. Link mungkin dari server lain atau dari data uji yang sudah dihapus.
+        </p>
+      )}
+      {!item && !missing && !err && <Spinner />}
+      {item && (
+        <>
+          {c && (
+            <div className="flex flex-col gap-1">
+              <p className="text-muted-ink">
+                {c.machine_id} · {c.machine_model} · {c.logged_at.slice(0, 16).replace("T", " ")}
+              </p>
+              <p className="text-[18px] font-semibold">{c.symptom}</p>
+              {c.error_codes.length > 0 && <Mono className="text-[14px] text-accent-blue">{c.error_codes.join(" · ")}</Mono>}
+            </div>
+          )}
+          <PlaybookView pb={item.playbook} onOpen={onOpen} />
+          <p className="text-[14px] text-muted-ink">
+            <CaseChip id={id} onOpen={onOpen} /> bukti di ledger · sha256 {item.ledger_hash?.slice(0, 12)}…
+          </p>
+        </>
+      )}
+    </Card>
+  );
+}
+
 export function MaintenancePage() {
   const [open, setOpen] = useState<string | null>(null);
+  const [assigned, setAssigned] = useState<string | null>(caseFromHash);
+  useEffect(() => {
+    const onHash = () => setAssigned(caseFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  function closeAssigned() {
+    setAssigned(null);
+    window.history.replaceState(null, "", "#maintenance");
+  }
   const [err, setErr] = useState<string | null>(null);
   const [cases, setCases] = useState<MaintCase[]>([]);
   const [feed, setFeed] = useState<Awaited<ReturnType<typeof maintApi.flows>>>([]);
@@ -259,6 +332,7 @@ export function MaintenancePage() {
     <>
       <Header />
       {open && <CaseDrawer id={open} onClose={() => setOpen(null)} />}
+      {assigned && <AssignedCase id={assigned} onOpen={setOpen} onClose={closeAssigned} />}
       {err && <p role="alert" className="rounded-lg border border-danger-line bg-danger-bg px-4 py-3 text-[16px] text-fault">{err}</p>}
 
       <Section
@@ -323,8 +397,17 @@ export function MaintenancePage() {
             )}
             <div className="rounded-lg border border-line bg-surface p-4">
               <p className="mb-1 text-[13px] text-muted-ink">
-                Pesan ke {flow.mechanic.name} · {flow.mechanic.whatsapp} · {flow.message_source === "llm" ? "ditulis AI, sitasi diverifikasi" : "templat"}
+                Pesan ke {flow.mechanic.name} · {flow.message_source === "llm" ? "ditulis AI, sitasi diverifikasi" : "templat"}
               </p>
+              {flow.delivery && (
+                <p className={`mb-1 text-[13px] font-semibold ${flow.delivery.status === "failed" ? "text-red-700" : flow.delivery.status === "sent" ? "text-green-700" : "text-muted-ink"}`}>
+                  {flow.delivery.status === "sent"
+                    ? `Terkirim via Telegram ke ${flow.delivery.to}`
+                    : flow.delivery.status === "failed"
+                      ? `Telegram gagal: ${flow.delivery.error ?? "tanpa alasan"}`
+                      : "Disiapkan saja (bot Telegram belum dikonfigurasi)"}
+                </p>
+              )}
               <p className="text-[16px]">{flow.message}</p>
             </div>
           </div>
