@@ -40,6 +40,7 @@ import json
 import math
 import os
 import re
+import uuid
 from types import SimpleNamespace
 import sys
 import time
@@ -106,7 +107,15 @@ _answered_by: contextvars.ContextVar[str] = contextvars.ContextVar("answered_by"
 
 _sap       = SAPClient()
 _ledger    = AuditLedger(os.getenv("AUDIT_LEDGER_PATH") or None)
-_solver    = ScheduleSolver()
+class _CostAwareSolver(ScheduleSolver):
+    """Applies approved cost changes whose date has come before every solve."""
+
+    def solve(self, shop_floor_state, disruption):
+        _apply_due_costs()
+        return super().solve(shop_floor_state, disruption)
+
+
+_solver    = _CostAwareSolver()
 _skills    = SkillRegistry()
 _skills.index()
 
@@ -2323,6 +2332,155 @@ async def get_skill(skill_id: str) -> dict[str, Any]:
             "interlocks": json.loads((d / "rules" / "safety_interlocks.json").read_text(encoding="utf-8"))
             if (d / "rules" / "safety_interlocks.json").exists() else [],
             "sla_penalties": _skills.load_sla_penalties(skill_id)}
+
+
+# ── Plant costs (Biaya & SLA): one row at a time, a second person approves ──
+#
+# The solver reads skills/cnc_milling/rules/sla_penalties.json on every solve,
+# so an applied change reaches what-if scenarios, agent reroutes and the chat
+# at once. Requests, approvals and applications live in the audit ledger.
+
+_COST_ROWS: list[dict[str, Any]] = [
+    {"key": "penalty_A", "label": "Penalti telat, kelas A", "unit": "/ jam", "path": ("order_classes", "A", "penalty_per_hour_idr")},
+    {"key": "penalty_B", "label": "Penalti telat, kelas B", "unit": "/ jam", "path": ("order_classes", "B", "penalty_per_hour_idr")},
+    {"key": "penalty_C", "label": "Penalti telat, kelas C", "unit": "/ jam", "path": ("order_classes", "C", "penalty_per_hour_idr")},
+    {"key": "overtime", "label": "Lembur per jam", "unit": "/ jam", "path": ("operational_costs", "overtime_cost_per_hour_idr")},
+    {"key": "changeover", "label": "Changeover per pindah mesin", "unit": "", "path": ("operational_costs", "changeover_cost_idr")},
+]
+_COST_ROW_BY_KEY = {r["key"]: r for r in _COST_ROWS}
+
+
+def _costs_path() -> Path:
+    import solver.schedule_solver as _ss
+    return _ss._SKILL_SLA_PATH
+
+
+def _read_costs() -> dict[str, Any]:
+    try:
+        return json.loads(_costs_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _cost_value(data: dict[str, Any], path: tuple[str, ...]) -> Optional[int]:
+    cur: Any = data
+    for k in path:
+        cur = cur.get(k) if isinstance(cur, dict) else None
+    return int(cur) if isinstance(cur, (int, float)) else None
+
+
+def _cost_requests() -> list[dict[str, Any]]:
+    """Every change request with its state, folded from the audit ledger (oldest first)."""
+    reqs: dict[str, dict[str, Any]] = {}
+    for e in _ledger.get_all():
+        t, rid = e.get("action_type"), e.get("request_id")
+        if t == "COST_CHANGE_REQUESTED":
+            reqs[rid] = {k: e.get(k) for k in ("request_id", "key", "label", "old_value", "value",
+                                                "effective_from", "requested_by", "reason", "timestamp")}
+            reqs[rid]["status"] = "pending"
+        elif rid in reqs and t == "COST_CHANGE_APPROVED":
+            reqs[rid].update(status="approved", approved_by=e.get("approved_by"), approved_at=e.get("timestamp"))
+        elif rid in reqs and t == "COST_CHANGE_REJECTED":
+            reqs[rid].update(status="rejected", rejected_by=e.get("rejected_by"))
+        elif rid in reqs and t == "COST_CHANGE_APPLIED":
+            reqs[rid].update(status="applied", applied_at=e.get("timestamp"))
+    return list(reqs.values())
+
+
+def _apply_due_costs() -> list[str]:
+    """Write every approved change whose effective date has come into the cost file; returns the request ids."""
+    today = date.today().isoformat()
+    due = [r for r in _cost_requests() if r["status"] == "approved" and (r.get("effective_from") or today) <= today]
+    if not due:
+        return []
+    data = _read_costs()
+    if not data:
+        return []
+    for r in due:
+        cur = data
+        *head, last = _COST_ROW_BY_KEY[r["key"]]["path"]
+        for k in head:
+            cur = cur.setdefault(k, {})
+        cur[last] = int(r["value"])
+    _costs_path().write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    for r in due:
+        _ledger.append({"action_type": "COST_CHANGE_APPLIED", "request_id": r["request_id"], "key": r["key"],
+                        "value": r["value"]})
+    return [r["request_id"] for r in due]
+
+
+class CostChangeRequest(BaseModel):
+    key: str
+    value: int = Field(ge=0, le=10_000_000_000)
+    effective_from: Optional[date] = None
+    requested_by: str = Field(min_length=2, max_length=120)
+    reason: str = Field(default="", max_length=300)
+
+
+class CostDecision(BaseModel):
+    by: str = Field(min_length=2, max_length=120)
+
+
+@app.get("/api/costs", summary="Plant costs the solver uses, with pending and scheduled changes")
+async def get_costs() -> dict[str, Any]:
+    _apply_due_costs()
+    data = _read_costs()
+    reqs = _cost_requests()
+    rows = []
+    for r in _COST_ROWS:
+        open_ = [q for q in reqs if q["key"] == r["key"] and q["status"] in ("pending", "approved")]
+        last = next((q for q in reversed(reqs) if q["key"] == r["key"] and q["status"] == "applied"), None)
+        rows.append({"key": r["key"], "label": r["label"], "unit": r["unit"],
+                     "value": _cost_value(data, r["path"]), "open_request": open_[-1] if open_ else None,
+                     "last_change": last})
+    return {"rows": rows, "currency": data.get("currency", "IDR"), "facility": data.get("facility"),
+            "source": "skills/cnc_milling/rules/sla_penalties.json"}
+
+
+@app.post("/api/costs/requests", summary="Ask to change one cost row (applied after a second person approves)")
+async def post_cost_request(body: CostChangeRequest) -> dict[str, Any]:
+    row = _COST_ROW_BY_KEY.get(body.key)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Unknown cost row: {body.key}")
+    if any(q["key"] == body.key and q["status"] in ("pending", "approved") for q in _cost_requests()):
+        raise HTTPException(status_code=409, detail="Baris ini sudah punya perubahan yang menunggu.")
+    old = _cost_value(_read_costs(), row["path"])
+    if old == body.value:
+        raise HTTPException(status_code=422, detail="Nilai baru sama dengan nilai sekarang.")
+    rid = f"COST-{uuid.uuid4().hex[:6].upper()}"
+    _ledger.append({"action_type": "COST_CHANGE_REQUESTED", "request_id": rid, "key": body.key,
+                    "label": row["label"], "old_value": old, "value": body.value,
+                    "effective_from": (body.effective_from or date.today()).isoformat(),
+                    "requested_by": body.requested_by.strip(), "reason": body.reason.strip()})
+    return next(q for q in _cost_requests() if q["request_id"] == rid)
+
+
+def _open_cost_request(request_id: str) -> dict[str, Any]:
+    req = next((q for q in _cost_requests() if q["request_id"] == request_id), None)
+    if req is None:
+        raise HTTPException(status_code=404, detail=f"Unknown request: {request_id}")
+    if req["status"] != "pending":
+        raise HTTPException(status_code=409, detail=f"Permintaan ini sudah {req['status']}.")
+    return req
+
+
+@app.post("/api/costs/requests/{request_id}/approve", summary="Second person approves a cost change")
+async def post_cost_approve(request_id: str, body: CostDecision) -> dict[str, Any]:
+    req = _open_cost_request(request_id)
+    if body.by.strip().lower() == str(req["requested_by"]).strip().lower():
+        raise HTTPException(status_code=403, detail="Perubahan harus disetujui orang lain, bukan yang meminta.")
+    _ledger.append({"action_type": "COST_CHANGE_APPROVED", "request_id": request_id, "key": req["key"],
+                    "approved_by": body.by.strip()})
+    _apply_due_costs()
+    return next(q for q in _cost_requests() if q["request_id"] == request_id)
+
+
+@app.post("/api/costs/requests/{request_id}/reject", summary="Turn down a cost change")
+async def post_cost_reject(request_id: str, body: CostDecision) -> dict[str, Any]:
+    req = _open_cost_request(request_id)
+    _ledger.append({"action_type": "COST_CHANGE_REJECTED", "request_id": request_id, "key": req["key"],
+                    "rejected_by": body.by.strip()})
+    return next(q for q in _cost_requests() if q["request_id"] == request_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
