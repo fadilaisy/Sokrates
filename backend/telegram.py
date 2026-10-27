@@ -1,7 +1,7 @@
 """
 backend/telegram.py
 ───────────────────
-Fallback channel for the mechanic's repair message: a Telegram bot (Bot API).
+Sends the mechanic's repair message through a Telegram bot (Bot API).
 
 Env:
 TELEGRAM_BOT_TOKEN  token from @BotFather
@@ -9,8 +9,9 @@ TELEGRAM_CHAT_ID    chat that receives the messages (the demo phone; mechanics i
                     roster have no Telegram ids). Find it by sending the bot any message,
                     then open https://api.telegram.org/bot<token>/getUpdates → message.chat.id
 
-Unlike WhatsApp there is no 24-hour window: once the person has pressed Start on the
-bot, it can message them at any time.
+Once the person has pressed Start on the bot, it can message them at any time. Without
+the token and chat id nothing is sent and the result says "not_configured", so the flow
+still runs and the UI says the message was only prepared.
 """
 
 from __future__ import annotations

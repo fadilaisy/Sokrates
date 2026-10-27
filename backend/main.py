@@ -74,7 +74,7 @@ from rag.api import router as rag_router
 from rag.retrieve import Retriever
 from rag.generate import sanitize as rag_sanitize
 from rag import aicore
-from backend import chat_context, chat_visual, telegram, whatsapp
+from backend import chat_context, chat_visual, telegram
 from backend.agent_run import AgentDeps, AgentRunner, ApprovalRefused
 from backend.metrics import compute_metrics, events_for_approval
 from knowledge.maintenance_ledger import MaintenanceLedger
@@ -2758,46 +2758,27 @@ def _issue_scenarios(scenarios: list[dict[str, Any]]) -> None:
 
 _notify_recent: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 _NOTIFY_DEDUPE_S = 60.0
-_CHANNELS = {
-    "whatsapp": (whatsapp.configured, lambda mech, msg: whatsapp.send_text(mech.get("whatsapp"), msg)),
-    "telegram": (telegram.configured, lambda mech, msg: telegram.send_text(msg)),
-}
-
-
-def _notify_channels() -> list[str]:
-    """Configured channels in NOTIFY_CHANNELS order (default: WhatsApp, then Telegram as fallback)."""
-    order = [c.strip().lower() for c in os.getenv("NOTIFY_CHANNELS", "whatsapp,telegram").split(",")]
-    return [c for c in dict.fromkeys(order) if c in _CHANNELS and _CHANNELS[c][0]()]
 
 
 async def _notify_mechanic(mech: dict[str, Any], message: str, context: dict[str, Any]) -> dict[str, Any]:
-    """Send the playbook message to the mechanic and record every attempt in the audit ledger.
+    """Send the playbook message to the mechanic on Telegram and record the attempt in the audit ledger.
 
-    Channels are tried in order until one accepts the message, so a WhatsApp failure falls back
-    to Telegram. The same text for the same mechanic within a minute is sent once (an alarm can
-    reach this twice).
+    The same text for the same mechanic within a minute is sent once (an alarm can reach this twice).
     """
-    channels = _notify_channels()
-    if not channels:
-        return {"channel": "whatsapp", "status": "not_configured"}
-    key = (str(mech.get("id") or mech.get("whatsapp")), message)
+    if not telegram.configured():
+        return {"channel": "telegram", "status": "not_configured"}
+    key = (str(mech.get("id") or mech.get("name")), message)
     now = time.monotonic()
     hit = _notify_recent.get(key)
     if hit and now - hit[0] < _NOTIFY_DEDUPE_S:
         return {**hit[1], "duplicate": True}
-    attempts: list[dict[str, Any]] = []
-    for ch in channels:
-        res = await asyncio.to_thread(_CHANNELS[ch][1], mech, message)
-        attempts.append(res)
-        _ledger.append({"action_type": f"{ch.upper()}_{'SENT' if res['status'] == 'sent' else 'FAILED'}",
-                        "mechanic_id": mech.get("id"), "mechanic_name": mech.get("name"), "to": res.get("to"),
-                        "message_id": res.get("message_id"), "error": res.get("error"), **context})
-        if res["status"] == "sent":
-            break
-    res = {**attempts[-1], **({"attempts": attempts} if len(attempts) > 1 else {})}
+    res = await asyncio.to_thread(telegram.send_text, message)
     _notify_recent[key] = (now, res)
     for k in [k for k, (at, _) in _notify_recent.items() if now - at >= _NOTIFY_DEDUPE_S]:
         del _notify_recent[k]
+    _ledger.append({"action_type": "TELEGRAM_SENT" if res["status"] == "sent" else "TELEGRAM_FAILED",
+                    "mechanic_id": mech.get("id"), "mechanic_name": mech.get("name"), "to": res.get("to"),
+                    "message_id": res.get("message_id"), "error": res.get("error"), **context})
     return res
 
 

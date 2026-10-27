@@ -15,7 +15,6 @@ import { Btn, Card, Mono, Spinner } from "./ui";
  * Chat is secondary and collapsed at the bottom.
  */
 
-const CHANNEL = { whatsapp: "WhatsApp", telegram: "Telegram" } as const;
 const MACHINES = ["CNC-01", "CNC-02", "CNC-03", "CNC-04", "CNC-05"];
 const field =
   "min-h-12 w-full rounded-lg border border-line bg-surface px-3 text-[16px] text-navy focus:outline-none focus:ring-2 focus:ring-accent-blue";
@@ -324,16 +323,15 @@ export function MaintenancePage() {
             )}
             <div className="rounded-lg border border-line bg-surface p-4">
               <p className="mb-1 text-[13px] text-muted-ink">
-                Pesan ke {flow.mechanic.name} · {flow.mechanic.whatsapp} · {flow.message_source === "llm" ? "ditulis AI, sitasi diverifikasi" : "templat"}
+                Pesan ke {flow.mechanic.name} · {flow.message_source === "llm" ? "ditulis AI, sitasi diverifikasi" : "templat"}
               </p>
               {flow.delivery && (
                 <p className={`mb-1 text-[13px] font-semibold ${flow.delivery.status === "failed" ? "text-red-700" : flow.delivery.status === "sent" ? "text-green-700" : "text-muted-ink"}`}>
-                  {(flow.delivery.attempts ?? []).filter((a) => a.status === "failed").map((a) => `${CHANNEL[a.channel]} gagal (${a.error ?? "tanpa alasan"}) · `).join("")}
                   {flow.delivery.status === "sent"
-                    ? `Terkirim via ${CHANNEL[flow.delivery.channel]} ke ${flow.delivery.to}`
+                    ? `Terkirim via Telegram ke ${flow.delivery.to}`
                     : flow.delivery.status === "failed"
-                      ? `${CHANNEL[flow.delivery.channel]} gagal: ${flow.delivery.error ?? "tanpa alasan"}`
-                      : "Disiapkan saja (pengiriman WhatsApp/Telegram belum dikonfigurasi)"}
+                      ? `Telegram gagal: ${flow.delivery.error ?? "tanpa alasan"}`
+                      : "Disiapkan saja (bot Telegram belum dikonfigurasi)"}
                 </p>
               )}
               <p className="text-[16px]">{flow.message}</p>

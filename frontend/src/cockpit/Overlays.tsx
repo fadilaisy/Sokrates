@@ -163,8 +163,6 @@ const ACTION_LABEL: Record<string, string> = {
   PLC_WRITE_UNCONFIRMED: "Penulisan PLC belum terkonfirmasi",
   PLC_AUTONOMY_ENABLED: "Autonomi terbatas diaktifkan",
   PLC_AUTONOMY_DISABLED: "Autonomi terbatas dimatikan",
-  WHATSAPP_SENT: "WhatsApp terkirim",
-  WHATSAPP_FAILED: "WhatsApp gagal",
   TELEGRAM_SENT: "Telegram terkirim",
   TELEGRAM_FAILED: "Telegram gagal",
 };
