@@ -9,6 +9,11 @@ import type { TeachTarget } from "./SkillTeach";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const rp = (v: number | null | undefined) => (v == null ? "–" : `Rp ${v.toLocaleString("id-ID")}`);
+/** "400000" → "400.000" while typing (Indonesian thousands separator). */
+const groupThousands = (s: string) => {
+  const digits = s.replace(/[^0-9]/g, "").replace(/^0+(?=\d)/, "");
+  return digits ? Number(digits).toLocaleString("id-ID") : "";
+};
 const today = () => new Date().toISOString().slice(0, 10);
 const NAME_KEY = "sf.costs.name";
 
@@ -126,7 +131,7 @@ function Row({ row, last, name, editing, onEdit, onChanged, onError }: {
               autoFocus
               inputMode="numeric"
               value={value}
-              onChange={(e) => setValue(e.target.value)}
+              onChange={(e) => setValue(groupThousands(e.target.value))}
               placeholder={row.value?.toLocaleString("id-ID")}
               className={cn(field, "border-2 border-navy font-semibold")}
             />
