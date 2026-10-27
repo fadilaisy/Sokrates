@@ -607,10 +607,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ supervisor_description }),
     }),
-  chat: (message: string) =>
+  chat: (message: string, history: { role: "user" | "assistant"; text: string }[] = []) =>
     req<{ reply: string; model_used: string; sources?: RagSource[]; visual?: string | null }>("/api/chat", {
       method: "POST",
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, history }),
     }),
   // Phase 3: Skill Studio
   draftSkill: (b: SkillStudioFormData) =>

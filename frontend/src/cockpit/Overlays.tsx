@@ -153,6 +153,7 @@ const ACTION_LABEL: Record<string, string> = {
   SCENARIOS_GENERATED: "Skenario dibuat",
   EXTERNAL_CHANGE: "Perubahan eksternal",
   SCENARIO_REVERTED: "Skenario dikembalikan",
+  STATE_RESET: "SAP dimuat ulang",
   REVERT_REJECTED_DRIFT: "Revert ditolak · drift SAP",
   SKILLS_LOADED: "Skill dimuat",
   SKILL_APPROVED: "Skill disetujui",
@@ -445,7 +446,9 @@ export function ChatDrawer() {
                   <Spinner className="size-5" /> {m.text}
                 </span>
               ) : (
-                <CitedText text={m.text} />
+                <span className="whitespace-pre-line">
+                  <CitedText text={m.text} />
+                </span>
               )}
               {m.visual && <ChatVisual html={m.visual} />}
               <SourceCitations sources={m.sources} className="mt-3" />

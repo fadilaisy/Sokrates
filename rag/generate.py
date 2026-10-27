@@ -23,7 +23,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import config
+from . import aicore, config
 from .llm import available_providers, complete
 from .retrieve import Retriever
 from .store import Store, get_store
@@ -216,7 +216,10 @@ def answer_from_retrieval(query: str, retrieval: Dict[str, Any], *, store: Optio
                 "latency_ms": round((time.perf_counter() - t0) * 1000, 1)}
 
     user = _build_user_prompt(query, retrieval.get("incident") or {}, packed, lang)
-    res, errors = complete(SYSTEM_PROMPT, user, max_tokens=1200, json_mode=True, provider=provider)
+    # Someone is waiting on this answer: cap the whole model chain, not just each model.
+    per_model, total = aicore.interactive_timeouts()
+    res, errors = complete(SYSTEM_PROMPT, user, max_tokens=1200, json_mode=True, provider=provider,
+                           timeout=per_model, total_timeout=total)
     if not res.ok or not isinstance(res.data, dict):
         return {**base, "status": "error", "message": f"LLM gagal: {res.error}", "answer": None,
                 "claims": [], "rejected_claims": [], "sources": [_public_source(p) for p in packed],

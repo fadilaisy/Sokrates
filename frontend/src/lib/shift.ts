@@ -47,8 +47,8 @@ export function shiftDate(state: SapState | null): string | null {
 }
 
 /**
- * Orders that belong to today's shift. After /api/approve the backend writes display strings
- * ("15:00 WIB (Lembur)") into planned_start, which carry no date — those are today's by definition.
+ * Orders that belong to today's shift. /api/approve writes ISO timestamps on the plan day; an
+ * undated planned_start (state saved by an older backend) is today's by definition.
  */
 export function ordersToday(state: SapState | null): ProdOrder[] {
   if (!state) return [];

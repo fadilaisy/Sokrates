@@ -44,9 +44,9 @@ import sys
 import time
 import traceback
 from collections import deque
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Literal, Optional
 
 # ── Load .env before everything else ─────────────────────────────────────────
 from dotenv import load_dotenv
@@ -74,7 +74,7 @@ from rag.api import router as rag_router
 from rag.retrieve import Retriever
 from rag.generate import sanitize as rag_sanitize
 from rag import aicore
-from backend import chat_visual
+from backend import chat_context, chat_visual
 from backend.agent_run import AgentDeps, AgentRunner, ApprovalRefused
 from backend.metrics import compute_metrics, events_for_approval
 from knowledge.maintenance_ledger import MaintenanceLedger
@@ -112,6 +112,23 @@ _skills.index()
 # /api/approve only accepts a payload identical to one of these, so a client
 # cannot invent reroutes, target blocked machines or forge downtime events.
 _issued_scenarios: dict[str, dict[str, Any]] = {}
+_ISSUED_MAX = 300   # ~100 solves; cleared on /api/state/reset
+
+
+def _remember_scenario(s: dict[str, Any]) -> None:
+    """Store an issued scenario, dropping the oldest once over _ISSUED_MAX.
+
+    A scenario an agent run is still waiting to approve is never dropped.
+    """
+    _issued_scenarios.pop(s["id"], None)          # re-insert so a re-solve counts as newest
+    _issued_scenarios[s["id"]] = copy.deepcopy(s)
+    excess = len(_issued_scenarios) - _ISSUED_MAX
+    if excess <= 0:
+        return
+    pending = {((r.get("pending_approval") or {}).get("scenario") or {}).get("id")
+               for r in _agent_runner.runs.values() if r["status"] == "awaiting_approval"}
+    for old in [k for k in _issued_scenarios if k not in pending][:excess]:
+        del _issued_scenarios[old]
 
 # Maintenance case ledger (hash-chained, seeded with synthetic cases on first start).
 # Resolved cases are indexed into the RAG store at startup for similar-case search.
@@ -233,8 +250,15 @@ class SkillGenerateResponse(BaseModel):
     model_used: str
 
 
+class ChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str = Field(..., max_length=4000)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(..., max_length=2000, example="Mesin mana yang butuh perhatian?")
+    # Earlier turns of this conversation, oldest first, so follow-ups like "kenapa?" keep their context.
+    history: list[ChatTurn] = Field(default_factory=list, max_length=20)
 
 
 class ChatResponse(BaseModel):
@@ -491,8 +515,11 @@ async def _call_llm(prompt: str, max_tokens: int = 512, *, interactive: bool = T
                 "Silakan tinjau skenario solver secara manual.")
     try:
         # GPT-5.x counts hidden reasoning against the limit, so give it headroom.
-        text, used = await asyncio.to_thread(aicore.ask_any, prompt,
-                                             max_tokens=max(max_tokens, 2048), first=model)
+        # A person waits on interactive calls, so the whole fallback chain gets one
+        # deadline; background calls keep the full 60 s per model.
+        timeout, total = aicore.interactive_timeouts() if interactive else (60.0, None)
+        text, used = await asyncio.to_thread(aicore.ask_any, prompt, max_tokens=max(max_tokens, 2048),
+                                             first=model, timeout=timeout, total_timeout=total)
     except aicore.AICoreError as exc:
         print(f"[aicore] {exc}", file=sys.stderr)
         return f"[AI error: {str(exc)[:300]}] Silakan tinjau skenario solver secara manual."
@@ -515,7 +542,14 @@ async def get_state() -> dict[str, Any]:
 @app.post("/api/state/reset", summary="Reset SAP mock state to initial baseline")
 async def post_state_reset() -> dict[str, Any]:
     """Reset the mock SAP in-memory state back to its pristine initial state."""
-    return _sap.reset()
+    state = _sap.reset()
+    # Marks where the current schedule's history starts (chat order origins read from here on).
+    _ledger.append({"action_type": "STATE_RESET", "sap_version_after": state["_meta"]["version"]})
+    # Scenarios were solved against the old state; approving one now would write a
+    # stale schedule onto the reset plan. Runs waiting on them can't be approved either.
+    _issued_scenarios.clear()
+    _agent_runner.expire_pending("SAP direset; jalankan agen lagi untuk rencana baru.")
+    return state
 
 
 @app.post(
@@ -560,7 +594,7 @@ async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
     # confirmed downtime (used by /api/metrics) without trusting extra client fields.
     for s in scenarios:
         s["disruption"] = dict(disruption)
-        _issued_scenarios[s["id"]] = copy.deepcopy(s)
+        _remember_scenario(s)
 
     disruption_hours = body.end_hour - body.start_hour
 
@@ -702,6 +736,10 @@ async def post_disrupt_inject(body: DisruptionInjectRequest) -> DisruptionInject
     summary="Approve a recovery scenario and apply to SAP state",
 )
 async def post_approve(body: ApproveRequest) -> ApproveResponse:
+    return await _approve_scenario(body, {"kind": "dashboard"})
+
+
+async def _approve_scenario(body: ApproveRequest, source: dict[str, Any]) -> ApproveResponse:
     """
     Apply the approved scenario delta to the SAP state (with drift/version check),
     then write an immutable SHA-256 hash-chained audit entry.
@@ -744,12 +782,15 @@ async def post_approve(body: ApproveRequest) -> ApproveResponse:
             )
 
     gantt_changes: list[dict] = body.scenario_data.get("gantt_changes", [])
+    # The solver labels times for display ("09:00 WIB", "15:00 WIB (Lembur)"); SAP keeps
+    # ISO timestamps on the order's own plan day, like every other order.
+    _plan_day = {o.get("id"): _plan_date(o, _live) for o in _live.get("production_orders", [])}
     order_updates = [
         {
             "id":             change["order_id"],
             "work_center_id": change.get("to_machine"),
-            "planned_start":  change.get("new_start_time", ""),
-            "planned_end":    change.get("new_end_time", ""),
+            "planned_start":  _plan_timestamp(change.get("new_start_time", ""), _plan_day.get(change["order_id"])),
+            "planned_end":    _plan_timestamp(change.get("new_end_time", ""), _plan_day.get(change["order_id"])),
             "status":         "RESCHEDULED",
         }
         for change in gantt_changes
@@ -823,6 +864,9 @@ async def post_approve(body: ApproveRequest) -> ApproveResponse:
     entry = _ledger.append({
         "action_type":        "SCENARIO_APPROVED",
         "scenario_chosen":    body.scenario_id,
+        "scenario_name":      body.scenario_data.get("name_id"),
+        # Who set the change in motion (dashboard or an agent run), so the chat can say where an order came from.
+        "source":             source,
         # The applied delta is stored with pre-change order snapshots so the
         # revert endpoint can restore the exact previous schedule fields.
         "delta_applied":      {**delta, "order_snapshots": order_snapshots},
@@ -910,6 +954,27 @@ def _hhmm(ts: Any) -> str:
     return t[11:16] if len(t) >= 16 and t[10] == "T" else (t or "?")
 
 
+def _plan_date(order: dict[str, Any], state: dict[str, Any]) -> Optional[date]:
+    """The plan day an order belongs to: its own planned_start, else the SAP snapshot's day."""
+    for v in (order.get("planned_start"), (state.get("_meta") or {}).get("generated_at")):
+        try:
+            return datetime.fromisoformat(str(v).replace("Z", "+00:00")).date()
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _plan_timestamp(label: Any, day: Optional[date]) -> str:
+    """'09:00 WIB' / '17:00 WIB (Lembur)' → '2025-01-15T09:00:00' on `day`; ISO and unparsable values pass through."""
+    text = str(label or "")
+    m = re.match(r"\s*(\d{1,2})[:.](\d{2})\b", text)
+    if day is None or m is None or "T" in text:
+        return text
+    hours, minutes = int(m.group(1)), int(m.group(2))
+    at = datetime.combine(day, datetime.min.time()) + timedelta(hours=hours, minutes=minutes)  # 24:00+ rolls over
+    return at.isoformat(timespec="seconds")
+
+
 def _maintenance_context(state: dict[str, Any]) -> str:
     """
     Maintenance log for the chat prompt: one line per slot with machine, type,
@@ -974,7 +1039,7 @@ async def post_chat(body: ChatRequest) -> ChatResponse:
         f"- {o.get('id')} kelas {o.get('order_class')} di {o.get('work_center_id')}, "
         f"{_hhmm(o.get('planned_start'))}–{_hhmm(o.get('planned_end'))}, deadline {_hhmm(o.get('deadline'))}, "
         f"status {o.get('status')}, progres {o.get('progress_percent', 0)}%, "
-        f"denda SLA Rp {o.get('sla_penalty_per_hour_idr', 0):,}/jam"
+        f"denda SLA Rp {o.get('sla_penalty_per_hour_idr', 0):,}/jam{chat_context.late_note(o)}"
         for o in orders
     )
     stock_lines = "\n".join(
@@ -983,21 +1048,37 @@ async def post_chat(body: ChatRequest) -> ChatResponse:
         for p in state.get("spare_parts", [])
     )
     data_block = (
-        f"Status mesin: {machines}.\n"
+        f"Status mesin (SAP): {machines}.\n"
         "Jadwal/log maintenance (gunakan ini untuk menjawab alasan sebuah mesin maintenance):\n"
         f"{maintenance}\n"
         f"Order (total {len(orders)}, per status {by_status}):\n{order_lines}\n"
+        "Asal/riwayat order (dari audit ledger; gunakan ini untuk menjawab dari mana sebuah order "
+        "berasal atau kenapa dipindah):\n"
+        f"{chat_context.order_history_block(_ledger.get_all(), [o.get('id') for o in orders])}\n"
+        f"Bacaan PLC live, alarm aktif, dan prediksi tren:\n{_chat_plc_block()}\n"
+        f"Agent run terbaru (agen SkillForge):\n{chat_context.agent_runs_block(list(_agent_runner.runs.values()))}\n"
+        f"Skenario dari analisis gangguan terakhir:\n{chat_context.scenarios_block(_issued_scenarios)}\n"
+        f"Downtime dan OEE shift ini:\n{chat_context.metrics_block(_chat_metrics(state))}\n"
         f"Stok suku cadang:\n{stock_lines}\n"
         f"SAP version: {state.get('_meta', {}).get('version')}.\n"
     )
+    past = chat_context.history_block([t.model_dump() for t in body.history])
+    conversation = (
+        "Percakapan sebelumnya (untuk memahami pertanyaan lanjutan; fakta tetap dari data di atas):\n"
+        f"{past}\n\n" if past else ""
+    )
     prompt = (
         "Anda adalah AI Supervisor lantai produksi PT Karawang Precision Manufacturing. "
-        "Jawab dalam Bahasa Indonesia, singkat (maks 3 kalimat), hanya berdasarkan data berikut. "
+        "Jawab dalam Bahasa Indonesia, hanya berdasarkan data berikut. Biasanya 1-3 kalimat; jika "
+        "supervisor minta penjelasan, perbandingan, atau daftar, boleh lebih panjang (maks ~10 baris, "
+        "satu poin per baris diawali '- ', tanpa format markdown lain). Jika data tidak memuat jawabannya, "
+        "katakan bahwa itu tidak tercatat, jangan menebak. "
         "Anda HANYA memberi informasi/teks — Anda tidak bisa menyetujui skenario, mengubah jadwal, "
         "atau menulis ke SAP. Jika user meminta perubahan, arahkan ke tombol persetujuan di dasbor.\n\n"
         f"{data_block}"
         f"{grounding}\n"
         f"{chat_visual.VISUAL_INSTRUCTION}\n\n"
+        f"{conversation}"
         f"Pertanyaan supervisor: {body.message}\n\n"
         "Jawab HANYA jawabannya (plus visual bila perlu), tanpa kata pengantar."
     )
@@ -1015,6 +1096,24 @@ async def post_chat(body: ChatRequest) -> ChatResponse:
     reply, visual = chat_visual.extract(reply, data_block)
     reply, sources = _cite_chat_sources(reply, packed)
     return ChatResponse(reply=reply, model_used=_active_model(), sources=sources, visual=visual)
+
+
+def _chat_plc_block() -> str:
+    """Live PLC lines for the chat: nothing when the feed isn't running for the current scenario."""
+    if not _plc_loop_running() or _plc_latest["generation"] != _plc_generation():
+        return chat_context.plc_block(None, None, [], [])
+    now = time.monotonic()
+    preds = [f for at, f in _plc_latest["predictions"].values() if now - at < _PLC_PREDICTION_TTL_S]
+    return chat_context.plc_block(_plc_latest["scan"], _plc_latest["offline"],
+                                  list(_plc_latest["alarms"].values()), preds)
+
+
+def _chat_metrics(state: dict[str, Any]) -> Optional[dict[str, Any]]:
+    try:
+        return compute_metrics(state)
+    except Exception as exc:  # metrics must never break the chat
+        print(f"[chat] metrics skipped: {exc}", file=sys.stderr)
+        return None
 
 
 _CHAT_CITE = re.compile(r"[ \t]*\[(S\d+(?:\s*,\s*S\d+)*)\]")
@@ -2636,10 +2735,11 @@ async def _agent_run_llm(prompt: str, max_tokens: int, model: str | None) -> str
 
 
 async def _agent_run_approve(scenario_id: str, scenario: dict[str, Any], version: int,
-                             approved_by: str) -> dict[str, Any]:
+                             approved_by: str, source: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     try:
-        r = await post_approve(ApproveRequest(scenario_id=scenario_id, scenario_data=scenario,
-                                              expected_sap_version=version, approved_by=approved_by))
+        r = await _approve_scenario(ApproveRequest(scenario_id=scenario_id, scenario_data=scenario,
+                                                   expected_sap_version=version, approved_by=approved_by),
+                                    source or {"kind": "agent_run"})
     except HTTPException as exc:
         d = exc.detail
         raise ApprovalRefused(d.get("message", str(d)) if isinstance(d, dict) else str(d)) from exc
@@ -2648,7 +2748,7 @@ async def _agent_run_approve(scenario_id: str, scenario: dict[str, Any], version
 
 def _issue_scenarios(scenarios: list[dict[str, Any]]) -> None:
     for s in scenarios:
-        _issued_scenarios[s["id"]] = copy.deepcopy(s)
+        _remember_scenario(s)
 
 
 _agent_runner = AgentRunner(AgentDeps(
@@ -3197,6 +3297,11 @@ async def _plc_tick(scenario: Optional[str], peak: dict[tuple[str, str], str], a
 @app.on_event("startup")
 async def _start_plc_loop() -> None:
     _ensure_plc_loop()
+
+
+@app.on_event("shutdown")
+async def _stop_agent_runs() -> None:
+    await _agent_runner.shutdown()
 
 
 @app.on_event("shutdown")

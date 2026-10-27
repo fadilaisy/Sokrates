@@ -33,7 +33,7 @@ def test_background_calls_leave_room_for_interactive(monkeypatch):
 def test_call_llm_records_the_model_that_answered(llm_env):
     seen = {}
 
-    def ask_any(prompt, max_tokens, first=None):
+    def ask_any(prompt, max_tokens, first=None, **kw):
         seen["first"] = first
         return "Halo", "anthropic--claude-4.5-sonnet"
 
@@ -47,8 +47,21 @@ def test_call_llm_records_the_model_that_answered(llm_env):
     assert seen["first"] == "anthropic--claude-4.7-opus"
 
 
+def test_interactive_call_llm_gets_one_deadline(llm_env):
+    seen = []
+
+    def ask_any(prompt, max_tokens, first=None, **kw):
+        seen.append((kw.get("timeout"), kw.get("total_timeout")))
+        return "Halo", "gpt-5.4"
+
+    llm_env.setattr(m.aicore, "ask_any", ask_any)
+    asyncio.run(m._call_llm("chat question", 64))
+    asyncio.run(m._call_llm("background note", 64, interactive=False))
+    assert seen == [m.aicore.interactive_timeouts(), (60.0, None)]
+
+
 def test_call_llm_error_text_has_ai_prefix(llm_env):
-    def ask_any(prompt, max_tokens, first=None):
+    def ask_any(prompt, max_tokens, first=None, **kw):
         raise aicore.AICoreError("AI Core orchestration failed: HTTP 503: busy")
 
     llm_env.setattr(m.aicore, "ask_any", ask_any)

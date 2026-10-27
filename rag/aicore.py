@@ -39,6 +39,8 @@ AICORE_FALLBACK_MODELS  comma-separated model_names tried in order when the main
 AICORE_DEPLOYMENT_ID    default d1a82575de60e02a (gpt-5.4), direct mode only
 AICORE_RESOURCE_GROUP   default "default"
 AICORE_MODEL_LABEL      optional display-label override for model_label()
+AICORE_CHAT_TIMEOUT     seconds one model gets on a call a person waits for; default 35
+AICORE_CHAT_TOTAL_TIMEOUT  seconds for that whole call, fallbacks included; default 50
 """
 
 from __future__ import annotations
@@ -57,6 +59,7 @@ DEFAULT_ORCHESTRATION_ID = "d8c092efb8980093"   # orchestration → all chat mod
 DEFAULT_MODEL_NAME = "gpt-5.4"                  # orchestration model_name
 DEFAULT_FALLBACK_MODELS = "anthropic--claude-4.5-sonnet"
 TOKEN_REFRESH_MARGIN = 300                      # refresh 5 min before expiry
+MIN_MODEL_WAIT = 5.0                            # seconds left below which no next model is tried
 
 _token: Optional[str] = None
 _token_expires_at = 0.0
@@ -110,6 +113,16 @@ def models_in_order(first: Optional[str] = None) -> List[str]:
         if m and m not in out:
             out.append(m)
     return out
+
+
+def interactive_timeouts() -> Tuple[float, float]:
+    """(per-model, total) seconds for a call a person is waiting on, such as the chat."""
+    def num(name: str, default: float) -> float:
+        try:
+            return float(_env(name, str(default)))
+        except ValueError:
+            return default
+    return num("AICORE_CHAT_TIMEOUT", 35.0), num("AICORE_CHAT_TOTAL_TIMEOUT", 50.0)
 
 
 def resource_group() -> str:
@@ -253,16 +266,26 @@ def ask(prompt: str, *, system: Optional[str] = None, max_tokens: int = 1024,
 
 
 def ask_any(prompt: str, *, system: Optional[str] = None, max_tokens: int = 1024,
-            timeout: float = 60.0, first: Optional[str] = None) -> Tuple[str, str]:
+            timeout: float = 60.0, first: Optional[str] = None,
+            total_timeout: Optional[float] = None) -> Tuple[str, str]:
     """ask() on each model of models_in_order(first) until one answers.
 
     Returns (text, model_name that answered). A login failure ends the loop at
     once: every model sits behind the same tenant, so trying the next is pointless.
+    `total_timeout` caps the whole loop, so a slow tenant can't stack one full
+    `timeout` per model (two models at 60 s kept the chat waiting ~2 minutes).
     """
     errors: List[str] = []
+    deadline = time.monotonic() + total_timeout if total_timeout else None
     for m in models_in_order(first):
+        wait = timeout
+        if deadline is not None:
+            wait = min(timeout, deadline - time.monotonic())
+            if wait < MIN_MODEL_WAIT:
+                errors.append(f"{m}: skipped, {total_timeout:.0f}s total timeout reached")
+                break
         try:
-            return ask(prompt, system=system, max_tokens=max_tokens, timeout=timeout, model=m), m
+            return ask(prompt, system=system, max_tokens=max_tokens, timeout=wait, model=m), m
         except AICoreError as exc:
             errors.append(f"{m}: {exc}")
             if "login" in str(exc).lower():

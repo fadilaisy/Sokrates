@@ -83,7 +83,7 @@ def test_h4_ws_telemetry_list_payload_is_rejected_without_closing():
 def test_h5_llm_cache_is_capped(monkeypatch):
     monkeypatch.setattr(backend_main.aicore, "configured", lambda: True)
     monkeypatch.setattr(backend_main.aicore, "ask_any",
-                        lambda prompt, max_tokens, first=None: (f"reply {prompt}", "gpt-5.4"))
+                        lambda prompt, max_tokens, first=None, **kw: (f"reply {prompt}", "gpt-5.4"))
     monkeypatch.setattr(backend_main, "LLM_RPM", 10_000)
     backend_main._llm_cache.clear()
     try:

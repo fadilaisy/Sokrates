@@ -73,7 +73,8 @@ class AgentDeps:
     handle_case: Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]   # proactive flow
     solve: Callable[[Dict[str, Any], Dict[str, Any]], List[Dict[str, Any]]]
     issue_scenarios: Callable[[List[Dict[str, Any]]], None]
-    approve_scenario: Callable[[str, Dict[str, Any], int, str], Awaitable[Dict[str, Any]]]
+    # (scenario_id, scenario, sap_version, approved_by, source=…) → receipt
+    approve_scenario: Callable[..., Awaitable[Dict[str, Any]]]
     llm: Callable[[str, int, Optional[str]], Awaitable[str]]               # prompt, max_tokens, model
     active_model: Callable[[], str]
     planner_model: Callable[[], str]
@@ -243,6 +244,20 @@ class AgentRunner:
         for old in [k for k, r in self.runs.items() if r["status"] in FINISHED][:max(0, len(self.runs) - MAX_RUNS)]:
             del self.runs[old]
         return run
+
+    def expire_pending(self, reason: str) -> List[str]:
+        """Close every run waiting for approval (its plan no longer fits SAP); returns their ids."""
+        expired = [r for r in self.runs.values() if r["status"] == "awaiting_approval"]
+        for r in expired:
+            r["status"], r["error"], r["finished_at"] = "rejected", reason, _iso()
+        return [r["id"] for r in expired]
+
+    async def shutdown(self) -> None:
+        """Cancel runs still working so the app can stop without orphaned tasks."""
+        tasks = list(self._tasks)
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     # ── execute ──────────────────────────────────────────────────────────────
 
@@ -464,8 +479,11 @@ class AgentRunner:
             scenario = pending.get("scenario")
             if scenario and "scenario" not in receipts:
                 version = int(self.deps.get_state()["_meta"]["version"])
+                t = run["trigger"]
+                source = {"kind": "agent_run", "run_id": run["id"], "machine_id": t.get("machine_id"),
+                          "alarm_code": t.get("alarm_code"), "alarm_text": t.get("alarm_text")}
                 receipts["scenario"] = await self.deps.approve_scenario(scenario["id"], scenario, version,
-                                                                        approved_by)
+                                                                        approved_by, source=source)
             parts = pending.get("parts")
             if parts and (parts["reservations"] or parts["purchase_requisitions"]) and "parts" not in receipts:
                 receipts["parts"] = self._apply_parts(run, parts, approved_by)

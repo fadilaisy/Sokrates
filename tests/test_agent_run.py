@@ -224,7 +224,7 @@ def test_part_gone_since_planning_becomes_a_requisition(runner):
 def test_refused_approval_is_recorded_on_the_run(runner, monkeypatch):
     run = _pending_run()
 
-    async def refuse(*_a):
+    async def refuse(*_a, **_k):
         raise ar.ApprovalRefused("Mesin CNC-02 berstatus FAULT")
 
     monkeypatch.setattr(m._agent_runner.deps, "approve_scenario", refuse)
@@ -264,3 +264,52 @@ def test_pending_runs_are_never_evicted_and_stay_latest():
         r.create({"machine_id": "CNC-03"})["status"] = "done"
     assert pending["id"] in r.runs and len(r.runs) <= ar.MAX_RUNS + 1
     assert r.latest()["id"] == pending["id"]
+
+
+def test_reset_clears_issued_scenarios_and_expires_pending_runs(runner):
+    run = _pending_run()
+    assert m._issued_scenarios
+    assert client.post("/api/state/reset").status_code == 200
+    assert m._issued_scenarios == {}
+    after = client.get(f"/api/agent/runs/{run['id']}").json()
+    assert after["status"] == "rejected" and "direset" in after["error"]
+    r = client.post(f"/api/agent/runs/{run['id']}/approve", json={"approved_by": "Supervisor Budi"})
+    assert r.status_code == 409
+
+
+def test_issued_scenarios_are_capped_but_keep_pending_ones(runner, monkeypatch):
+    run = _pending_run()
+    sid = run["pending_approval"]["scenario"]["id"]
+    monkeypatch.setattr(m, "_ISSUED_MAX", 5)
+    for i in range(20):
+        m._remember_scenario({"id": f"x{i}"})
+    assert len(m._issued_scenarios) <= 6 and sid in m._issued_scenarios and "x19" in m._issued_scenarios
+
+
+def test_shutdown_cancels_runs_still_working():
+    r = ar.AgentRunner(m._agent_runner.deps)
+
+    async def go():
+        started = asyncio.Event()
+
+        async def slow():
+            started.set()
+            await asyncio.sleep(60)
+        t = asyncio.create_task(slow())
+        r._tasks.add(t)
+        await started.wait()
+        await r.shutdown()
+        return t
+    assert asyncio.run(go()).cancelled()
+
+
+def test_agent_reroute_is_tagged_and_the_chat_can_say_so(runner):
+    run = _pending_run()
+    ok = client.post(f"/api/agent/runs/{run['id']}/approve", json={"approved_by": "Supervisor Budi"})
+    assert ok.status_code == 200, ok.text
+    entry = next(e for e in reversed(m._ledger.get_all()) if e["action_type"] == "SCENARIO_APPROVED")
+    assert entry["source"] == {"kind": "agent_run", "run_id": run["id"], "machine_id": "CNC-01",
+                               "alarm_code": "ALM-162", "alarm_text": "SPINDLE OVERLOAD"}
+    moved = [u["id"] for u in entry["delta_applied"]["order_updates"]]
+    block = m.chat_context.order_history_block(m._ledger.get_all(), moved)
+    assert f"agen SkillForge {run['id']} setelah ALM-162 (SPINDLE OVERLOAD) di CNC-01" in block
