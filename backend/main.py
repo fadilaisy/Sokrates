@@ -74,7 +74,7 @@ from rag.api import router as rag_router
 from rag.retrieve import Retriever
 from rag.generate import sanitize as rag_sanitize
 from rag import aicore
-from backend import chat_context, chat_visual
+from backend import chat_context, chat_visual, whatsapp
 from backend.agent_run import AgentDeps, AgentRunner, ApprovalRefused
 from backend.metrics import compute_metrics, events_for_approval
 from knowledge.maintenance_ledger import MaintenanceLedger
@@ -2597,7 +2597,12 @@ async def post_maintenance_entry(body: MaintenanceEntryRequest) -> dict[str, Any
     similar-case search (RAG, maintenance_log docs) → repair playbook → message to the
     relevant mechanic. Every playbook step cites the ledger entries it came from.
     """
-    return await _agent.handle_new_entry(body.model_dump())
+    res = await _agent.handle_new_entry(body.model_dump())
+    flow = res["flow"]
+    flow["delivery"] = await _notify_mechanic(flow["mechanic"], flow["message"],
+                                              {"maintenance_case_id": res["entry"].get("id"),
+                                               "machine_id": body.machine_id})
+    return res
 
 
 @app.get("/api/maintenance/entries", summary="List maintenance cases")
@@ -2751,6 +2756,32 @@ def _issue_scenarios(scenarios: list[dict[str, Any]]) -> None:
         _remember_scenario(s)
 
 
+_wa_recent: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+_WA_DEDUPE_S = 60.0
+
+
+async def _notify_mechanic(mech: dict[str, Any], message: str, context: dict[str, Any]) -> dict[str, Any]:
+    """Send the playbook message to the mechanic on WhatsApp and record the attempt in the audit ledger.
+
+    The same text to the same number within a minute is sent once (an alarm can reach this twice).
+    """
+    if not whatsapp.configured():
+        return {"channel": "whatsapp", "status": "not_configured"}
+    key = (whatsapp.recipient(mech.get("whatsapp")), message)
+    now = time.monotonic()
+    hit = _wa_recent.get(key)
+    if hit and now - hit[0] < _WA_DEDUPE_S:
+        return {**hit[1], "duplicate": True}
+    res = await asyncio.to_thread(whatsapp.send_text, mech.get("whatsapp"), message)
+    _wa_recent[key] = (now, res)
+    for k in [k for k, (at, _) in _wa_recent.items() if now - at >= _WA_DEDUPE_S]:
+        del _wa_recent[k]
+    _ledger.append({"action_type": "WHATSAPP_SENT" if res["status"] == "sent" else "WHATSAPP_FAILED",
+                    "mechanic_id": mech.get("id"), "mechanic_name": mech.get("name"), "to": res.get("to"),
+                    "message_id": res.get("message_id"), "error": res.get("error"), **context})
+    return res
+
+
 _agent_runner = AgentRunner(AgentDeps(
     get_state=_sap.get_state,
     apply_delta=lambda delta, version: _sap.apply_delta(delta, expected_version=version),
@@ -2762,6 +2793,7 @@ _agent_runner = AgentRunner(AgentDeps(
     llm=_agent_run_llm,
     active_model=_active_model,
     planner_model=lambda: os.getenv("AGENT_MODEL", "anthropic--claude-4.5-sonnet").strip() or None,
+    notify=_notify_mechanic,
 ))
 
 

@@ -313,3 +313,23 @@ def test_agent_reroute_is_tagged_and_the_chat_can_say_so(runner):
     moved = [u["id"] for u in entry["delta_applied"]["order_updates"]]
     block = m.chat_context.order_history_block(m._ledger.get_all(), moved)
     assert f"agen SkillForge {run['id']} setelah ALM-162 (SPINDLE OVERLOAD) di CNC-01" in block
+
+
+@pytest.mark.parametrize("delivery, expect", [
+    ({"status": "sent", "to": "6281••••101"}, "dikirim ke"),
+    ({"status": "failed", "error": "token kedaluwarsa"}, "gagal: token kedaluwarsa"),
+    ({"status": "not_configured"}, "belum dikonfigurasi"),
+])
+def test_notify_team_summary_follows_delivery(runner, monkeypatch, delivery, expect):
+    seen = []
+
+    async def notify(mech, message, context):
+        seen.append(context)
+        return delivery
+
+    monkeypatch.setattr(m._agent_runner.deps, "notify", notify)
+    run = _wait(client.post("/api/agent/run", json={"machine_id": "CNC-01", "alarm_code": "ALM-162",
+                                                    "alarm_text": "SPINDLE OVERLOAD"}).json()["id"])
+    step = next(s for s in run["steps"] if s["tool"] == "notify_team")
+    assert expect in step["summary"] and step["output"]["delivery"] == delivery
+    assert seen == [{"agent_run_id": run["id"], "machine_id": "CNC-01"}]

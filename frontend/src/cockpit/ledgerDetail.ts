@@ -90,6 +90,10 @@ export function ledgerDetail(e: LedgerEntry): string[] {
       return [`Pengembalian oleh ${person(e.approved_by)} ditolak karena data SAP sudah berubah (v${e.sap_version_before} → v${e.sap_version_after}). Tidak ada yang ditulis.`];
     case "SKILL_APPROVED":
       return [`${person(e.approved_by)} menyetujui skill ${e.skill_id} versi ${e.skill_version}: ${e.hooks_count ?? 0} hook, ${e.interlocks_count ?? 0} interlock.`];
+    case "WHATSAPP_SENT":
+      return [`Pesan perbaikan ${m ? `untuk ${m} ` : ""}dikirim via WhatsApp ke ${e.mechanic_name ?? "mekanik"} (${e.to ?? "?"}).`];
+    case "WHATSAPP_FAILED":
+      return [`Pesan WhatsApp ke ${e.mechanic_name ?? "mekanik"} (${e.to ?? "?"}) gagal: ${e.error ?? "tanpa alasan"}.`, "Playbook tetap ada di halaman Perawatan."];
     case "PLC_AUTONOMY_ENABLED":
     case "PLC_AUTONOMY_DISABLED": {
       const acts = (e.autonomous_actions as Record<string, { action_id: string }[]> | undefined) ?? {};

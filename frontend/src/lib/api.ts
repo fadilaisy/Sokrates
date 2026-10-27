@@ -789,6 +789,7 @@ export interface MaintFlow {
   mechanic: { id: string; name: string; role: string; whatsapp: string; shift: string; reasons: string[] };
   message: string;
   message_source: "llm" | "template";
+  delivery?: { channel: "whatsapp"; to: string; status: "sent" | "failed" | "not_configured"; message_id?: string; error?: string };
   timings_ms: Record<string, number>;
   playbook_ledger_id: string;
   playbook_ledger_hash: string;

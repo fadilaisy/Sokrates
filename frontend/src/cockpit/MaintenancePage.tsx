@@ -325,6 +325,15 @@ export function MaintenancePage() {
               <p className="mb-1 text-[13px] text-muted-ink">
                 Pesan ke {flow.mechanic.name} · {flow.mechanic.whatsapp} · {flow.message_source === "llm" ? "ditulis AI, sitasi diverifikasi" : "templat"}
               </p>
+              {flow.delivery && (
+                <p className={`mb-1 text-[13px] font-semibold ${flow.delivery.status === "failed" ? "text-red-700" : flow.delivery.status === "sent" ? "text-green-700" : "text-muted-ink"}`}>
+                  {flow.delivery.status === "sent"
+                    ? `Terkirim via WhatsApp ke ${flow.delivery.to}`
+                    : flow.delivery.status === "failed"
+                      ? `WhatsApp gagal: ${flow.delivery.error ?? "tanpa alasan"}`
+                      : "Disiapkan saja (pengiriman WhatsApp belum dikonfigurasi)"}
+                </p>
+              )}
               <p className="text-[16px]">{flow.message}</p>
             </div>
           </div>

@@ -78,6 +78,8 @@ class AgentDeps:
     llm: Callable[[str, int, Optional[str]], Awaitable[str]]               # prompt, max_tokens, model
     active_model: Callable[[], str]
     planner_model: Callable[[], str]
+    # (mechanic, message, context) → delivery result {"status": sent|failed|not_configured, …}
+    notify: Optional[Callable[[Dict[str, Any], str, Dict[str, Any]], Awaitable[Dict[str, Any]]]] = None
     now: Callable[[], datetime] = lambda: datetime.now(_WIB)
     step_delay: float = 0.35      # seconds between steps, so a watcher can follow the run live
 
@@ -435,10 +437,18 @@ class AgentRunner:
     async def _tool_notify_team(self, run, ctx):
         flow = await self._flow(run, ctx)
         mech = flow["mechanic"]
-        return (f"Playbook dikirim ke {mech.get('name') or 'tim mekanik'} via WhatsApp; "
-                f"supervisor menerima ringkasan di cockpit.",
+        name = mech.get("name") or "tim mekanik"
+        delivery = (await self.deps.notify(mech, flow["message"], {"agent_run_id": run["id"], "machine_id": run["trigger"]["machine_id"]})
+                    if self.deps.notify else {"status": "not_configured"})
+        if delivery.get("status") == "sent":
+            head = f"Playbook dikirim ke {name} via WhatsApp ({delivery.get('to')})"
+        elif delivery.get("status") == "failed":
+            head = f"Pesan WhatsApp ke {name} gagal: {delivery.get('error')}; playbook tetap ada di halaman Perawatan"
+        else:
+            head = f"Pesan WhatsApp untuk {name} disiapkan (pengiriman WhatsApp belum dikonfigurasi)"
+        return (head + "; supervisor menerima ringkasan di cockpit.",
                 {"message": flow["message"], "playbook_ledger_id": flow.get("playbook_ledger_id"),
-                 "mechanic_id": mech.get("id")})
+                 "mechanic_id": mech.get("id"), "delivery": delivery})
 
     def _pending(self, run) -> Dict[str, Any]:
         if run["pending_approval"] is None:
