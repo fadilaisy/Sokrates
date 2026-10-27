@@ -96,6 +96,47 @@ export function TelemetryPanel() {
   );
 }
 
+// Tags shown per machine while the line is quiet, with the WARNING line of the shipped skills.
+const READING_TAGS: { tag: string; label: string; unit: string; warn: (v: number) => boolean }[] = [
+  { tag: "motor_temp_celsius", label: "Suhu", unit: "°C", warn: (v) => v >= 85 },
+  { tag: "spindle_vibration_mm_per_s", label: "Getaran", unit: "mm/s", warn: (v) => v >= 5 },
+  { tag: "coolant_pressure_bar", label: "Coolant", unit: "bar", warn: (v) => v > 0 && v < 2.5 },
+];
+
+/** Live tags per machine, so the quiet line still shows what the PLC is reading. */
+function PlcReadings() {
+  const { plcMachines } = useCockpit();
+  const rows = Object.values(plcMachines).sort((a, b) => a.machine_id.localeCompare(b.machine_id));
+  if (!rows.length) return null;
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      {rows.map((m) => (
+        <div key={m.machine_id} className="flex flex-col gap-2 rounded-md border border-line px-3 py-2">
+          <div className="flex items-center justify-between gap-2">
+            <Mono className="text-[14px] font-semibold">{m.machine_id}</Mono>
+            <span className={cn("text-[13px] font-semibold", m.run ? "text-running" : "text-muted-ink")}>
+              {m.run ? "Berjalan" : m.status}
+            </span>
+          </div>
+          <dl className="grid grid-cols-3 gap-2">
+            {READING_TAGS.map((t) => {
+              const v = m.tags[t.tag];
+              return (
+                <div key={t.tag} className="flex min-w-0 flex-col">
+                  <dt className="truncate text-[12px] text-muted-ink">{t.label}</dt>
+                  <dd className={cn("font-mono text-[15px]", v != null && t.warn(v) && "font-bold text-warn")}>
+                    {v == null ? "–" : `${fmt1(v)} ${t.unit}`}
+                  </dd>
+                </div>
+              );
+            })}
+          </dl>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** The PLC block under the schedule: controls on the left, what the machines are saying on the right. */
 export function PlcPanel() {
   const { plcOn, plcPrediction, plcAlarm, plcAction } = useCockpit();
@@ -109,9 +150,12 @@ export function PlcPanel() {
             Sambungkan PLC untuk membaca tag mesin langsung, melihat prediksi sebelum alarm, dan mengirim aksi yang sudah disetujui.
           </p>
         ) : quiet ? (
-          <p className="rounded-md bg-page px-3 py-2 text-[14px] text-muted-ink">
-            Belum ada prediksi atau alarm. Semua mesin terbaca normal; pilih skenario untuk demo.
-          </p>
+          <>
+            <p className="rounded-md bg-page px-3 py-2 text-[14px] text-muted-ink">
+              Belum ada prediksi atau alarm. Semua mesin terbaca normal; pilih skenario untuk demo.
+            </p>
+            <PlcReadings />
+          </>
         ) : (
           <>
             <PlcPredictionCard />
@@ -321,6 +365,7 @@ function CopilotCard({ skill }: { skill: SkillGuidance }) {
           Skill: <span className="font-semibold text-navy">{skill.name}</span>
           {skill.version ? ` v${skill.version}` : ""}
           {skill.owner ? ` · ${skill.owner}` : ""}
+          {skill.status === "trial" && <span className="ml-2 font-semibold text-maint">Uji lapangan · saran saja</span>}
         </button>
       </div>
       <div className="grid gap-3 md:grid-cols-3">

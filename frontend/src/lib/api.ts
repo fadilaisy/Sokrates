@@ -87,6 +87,8 @@ export interface SkillGuidance {
   version: string | null;
   owner: string | null;
   has_know_how: boolean;
+  /** "trial": field trial, advice only, no PLC action. */
+  status?: string;
   confirm: { kind: "auto" | "operator"; text: string }[];
   root_causes: { cause: string; evidence?: string; sources: string[]; evidence_found: boolean }[];
   tasks: string[];
@@ -630,7 +632,15 @@ export const api = {
     }),
   skills: () => req<SkillLibrary>("/api/skills"),
   skill: (id: string) => req<SkillFiles>(`/api/skills/${encodeURIComponent(id)}`),
-  composeSkill: (b: { story: string; case_ids: string[]; name?: string; machines?: string[]; owner?: string }) =>
+  skillProposals: () => req<SkillProposal[]>("/api/skills/proposals"),
+  skillProposalDraft: (id: string) =>
+    req<SkillCompose & { proposal: SkillProposal }>(`/api/skills/proposals/${encodeURIComponent(id)}/draft`, { method: "POST" }),
+  dismissSkillProposal: (id: string) =>
+    req<{ dismissed: string }>(`/api/skills/proposals/${encodeURIComponent(id)}/dismiss`, { method: "POST" }),
+  expertNotes: () => req<ExpertNote[]>("/api/skills/expert-notes"),
+  addExpertNote: (b: Omit<ExpertNote, "id" | "timestamp">) =>
+    req<ExpertNote>("/api/skills/expert-notes", { method: "POST", body: JSON.stringify(b) }),
+  composeSkill: (b: { story: string; case_ids: string[]; expert_note_ids?: string[]; name?: string; machines?: string[]; owner?: string }) =>
     req<SkillCompose>("/api/skills/compose", { method: "POST", body: JSON.stringify(b) }),
   testRunSkill: (b: { skill_id: string; scenario_id: string; spec?: SkillSpec }) =>
     req<SkillTestRun>("/api/skills/test-run", { method: "POST", body: JSON.stringify(b) }),
@@ -843,7 +853,7 @@ export interface SkillSpec {
   schema: "skillforge_skill_v2";
   name: string;
   version?: string;
-  status?: "active" | "draft" | "disabled";
+  status?: "active" | "trial" | "draft" | "disabled";
   owner?: string | null;
   trigger: { machines: string[]; metrics: string[]; alarm_codes: string[]; predictions: boolean };
   confirm: { kind: "auto" | "operator"; text: string }[];
@@ -854,7 +864,7 @@ export interface SkillSpec {
 
 export interface SkillHistoryItem {
   id: string;
-  action_type: "SKILL_APPROVED" | "SKILL_TEST_RUN" | "SKILL_FIRED";
+  action_type: "SKILL_APPROVED" | "SKILL_TEST_RUN" | "SKILL_FIRED" | "SKILL_FEEDBACK";
   timestamp: string;
   machine_id?: string | null;
   passed?: boolean | null;
@@ -878,7 +888,38 @@ export interface SkillSummary {
   allowed_actions: string[];
   root_cause_count: number;
   fired_count: number;
+  /** Field trial: repairs that confirmed cause no. 1 so far, out of `needed`. */
+  trial: { confirmed: number; needed: number; case_ids: string[] } | null;
+  expert_sources: string[];
   history: SkillHistoryItem[];
+}
+
+/** What the agent proposes from closed repairs: a new skill, a change to one, or promoting a field trial. */
+export interface SkillProposal {
+  id: string;
+  kind: "new" | "change" | "promote";
+  name: string | null;
+  summary: string;
+  skill_id?: string;
+  case_ids?: string[];
+  case_id?: string;
+  alarm_code?: string;
+  version?: string;
+  next_version?: string;
+}
+
+/** Signed know-how a skill may cite like a case (EXPERT-xxxx). */
+export interface ExpertNote {
+  id: string;
+  author: string;
+  role: string;
+  cause: string;
+  text: string;
+  machines: string[];
+  alarm_codes: string[];
+  metric: string | null;
+  tasks: string[];
+  timestamp?: string;
 }
 
 export interface SkillTool {

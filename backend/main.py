@@ -40,6 +40,7 @@ import json
 import math
 import os
 import re
+from types import SimpleNamespace
 import sys
 import time
 import traceback
@@ -75,7 +76,7 @@ from rag.api import router as rag_router
 from rag.retrieve import Retriever
 from rag.generate import sanitize as rag_sanitize
 from rag import aicore
-from backend import chat_context, chat_visual, mechanic_updates, telegram
+from backend import chat_context, chat_visual, mechanic_updates, skill_studio, telegram
 from backend.agent_run import AgentDeps, AgentRunner, ApprovalRefused
 from backend.metrics import compute_metrics, events_for_approval
 from knowledge.maintenance_ledger import MaintenanceLedger
@@ -1064,6 +1065,8 @@ async def post_chat(body: ChatRequest) -> ChatResponse:
         f"{chat_context.order_history_block(_ledger.get_all(), [o.get('id') for o in orders])}\n"
         f"Bacaan PLC live, alarm aktif, dan prediksi tren:\n{_chat_plc_block()}\n"
         f"Agent run terbaru (agen SkillForge):\n{chat_context.agent_runs_block(list(_agent_runner.runs.values()))}\n"
+        "Skill yang dipakai agent (know-how ahli pabrik; sebut nama skill bila jawaban memakai isinya):\n"
+        f"{chat_context.skills_block([{'skill_id': sid, **spec} for sid, spec in _installed_specs().items()])}\n"
         f"Skenario dari analisis gangguan terakhir:\n{chat_context.scenarios_block(_issued_scenarios)}\n"
         f"Downtime dan OEE shift ini:\n{chat_context.metrics_block(_chat_metrics(state))}\n"
         f"Stok suku cadang:\n{stock_lines}\n"
@@ -1674,7 +1677,8 @@ def _spec_action_errors(spec: dict[str, Any]) -> list[str]:
 
 class SkillTestRunRequest(BaseModel):
     skill_id: str
-    scenario_id: str = Field(description="A simulator fault scenario id, e.g. cnc02_coolant")
+    # A simulator fault scenario id (e.g. cnc02_coolant), or "generated" / empty: a reading built from the skill's trigger.
+    scenario_id: str = Field(default="generated")
     # A draft skill.json to test before it is approved; default: the skill's file on disk.
     spec: dict | None = Field(default=None)
 
@@ -1721,8 +1725,9 @@ async def post_skills_test_run(body: SkillTestRunRequest) -> SkillTestRunRespons
     if not _valid_skill_id(body.skill_id):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="skill_id must match ^[a-z0-9_]+$")
-    sc = PLC_SCENARIOS.get(body.scenario_id)
-    if sc is None or not sc.machine_id or not sc.metric:
+    generated = body.scenario_id in ("", "generated")
+    sc = None if generated else PLC_SCENARIOS.get(body.scenario_id)
+    if not generated and (sc is None or not sc.machine_id or not sc.metric):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail=f"Unknown fault scenario: {body.scenario_id}")
     raw_spec = body.spec if body.spec is not None else _load_spec_file(body.skill_id)
@@ -1735,6 +1740,13 @@ async def post_skills_test_run(body: SkillTestRunRequest) -> SkillTestRunRespons
                             detail={"error": "InvalidSkillSpec", "errors": spec_errors})
     action_errors = _spec_action_errors(spec)
 
+    if generated:
+        machines = [w.get("id") for w in _sap.get_state().get("work_centers", []) if w.get("id")]
+        reading = skill_studio.generated_reading(spec, _maint_ledger.cases(), _case_metrics, machines)
+        if reading is None:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                detail="Tidak bisa membuat alarm uji: tidak ada mesin.")
+        sc = SimpleNamespace(**reading, target=reading["value"])
     machine_id, metric, value, code = sc.machine_id, sc.metric, sc.target, sc.alarm_code
     steps: list[SkillTestStep] = [SkillTestStep(
         id="alarm", title="Alarm diterima", ok=True,
@@ -1778,6 +1790,17 @@ async def post_skills_test_run(body: SkillTestRunRequest) -> SkillTestRunRespons
     steps.append(SkillTestStep(id="root_causes", title="Akar penyebab", ok=bool(causes) and not missing,
                                detail=cause_detail, data={"root_causes": causes}))
 
+    bt = skill_studio.backtest(spec, _maint_ledger.cases(), _case_metrics)
+    steps.append(SkillTestStep(
+        # Advisory: a low score is shown to the approvers, it does not block the test run.
+        id="backtest", title=f"Backtest: {bt['hits']} dari {bt['total']} kasus lama", ok=True,
+        detail=("Tidak ada kasus selesai yang tertangkap pemicu ini; hanya uji alarm." if not bt["total"] else
+                f"Penyebab sebenarnya ada di 3 teratas skill untuk {bt['hits']} dari {bt['total']} kasus "
+                "yang tertangkap pemicu." + ("" if bt["ok"] else " Kurang dari separuh: tambahkan penyebab "
+                                             "atau persempit pemicu sebelum menyetujui.")),
+        data=bt,
+    ))
+
     tasks = list(spec.get("tasks", []))
     steps.append(SkillTestStep(
         id="tasks", title="Pesan ke mekanik", ok=bool(tasks), data={"tasks": tasks},
@@ -1786,7 +1809,12 @@ async def post_skills_test_run(body: SkillTestRunRequest) -> SkillTestRunRespons
 
     allowed = set(spec.get("allowed_actions", []))
     action = _plc_limits.action_for(machine_id, alarm_code=code, metric=metric)
-    if action and action["action_id"] in allowed:
+    if action and action["action_id"] in allowed and spec["status"] == "trial":
+        steps.append(SkillTestStep(
+            id="plc_action", title="Aksi PLC: hanya saran (uji lapangan)", ok=True,
+            detail=f"Selama uji lapangan, {action['label']} hanya ditampilkan sebagai saran; agent tidak menulis ke PLC.",
+        ))
+    elif action and action["action_id"] in allowed:
         row = {"machine_id": machine_id, "setpoints": dict(PLC_DEFAULT_SETPOINTS), "estop": False, "lockout": False}
         wc = next((w for w in _sap.get_state().get("work_centers", []) if w.get("id") == machine_id), {})
         autonomous = bool(action.get("autonomous"))
@@ -1838,22 +1866,24 @@ async def post_skills_test_run(body: SkillTestRunRequest) -> SkillTestRunRespons
     ]
     passed = all(st.ok for st in steps) and all(c["ok"] for c in checks)
     sha = _spec_hash(raw_spec)
-    _skill_tests[(body.skill_id, sha)] = {"passed": passed, "scenario_id": body.scenario_id}
+    scenario_id = "generated" if generated else body.scenario_id
+    _skill_tests[(body.skill_id, sha)] = {"passed": passed, "scenario_id": scenario_id}
     entry = _ledger.append({
         "action_type": "SKILL_TEST_RUN",
         "skill_id": body.skill_id,
-        "scenario_id": body.scenario_id,
+        "scenario_id": scenario_id,
         "machine_id": machine_id,
         "passed": passed,
+        "backtest": f"{bt['hits']}/{bt['total']}",
         "spec_sha256": sha,
     })
     return SkillTestRunResponse(
-        skill_id=body.skill_id, scenario_id=body.scenario_id, passed=passed,
+        skill_id=body.skill_id, scenario_id=scenario_id, passed=passed,
         steps=steps, checks=checks, spec_sha256=sha, ledger_entry_id=entry["id"],
     )
 
 
-_SKILL_LEDGER_TYPES = ("SKILL_APPROVED", "SKILL_TEST_RUN", "SKILL_FIRED")
+_SKILL_LEDGER_TYPES = ("SKILL_APPROVED", "SKILL_TEST_RUN", "SKILL_FIRED", "SKILL_FEEDBACK")
 
 
 @app.get("/api/skills", summary="Skill library: every skill, its trigger, status and ledger history")
@@ -1864,6 +1894,7 @@ async def get_skills() -> dict[str, Any]:
             history.setdefault(e["skill_id"], []).append(
                 {k: e.get(k) for k in ("id", "action_type", "timestamp", "machine_id", "passed",
                                        "scenario_id", "approved_by", "skill_version", "trigger", "sha256_hash")})
+    feedback = _skill_feedback()
     skills = []
     for skill_id, entry in sorted(_skills.skills.items()):
         spec = entry.get("spec")
@@ -1881,6 +1912,10 @@ async def get_skills() -> dict[str, Any]:
             "allowed_actions": (spec or {}).get("allowed_actions", []),
             "root_cause_count": len((spec or {}).get("root_causes", [])),
             "fired_count": sum(1 for e in events if e["action_type"] == "SKILL_FIRED"),
+            "trial": skill_studio.trial_progress(feedback, skill_id, (spec or {}).get("version"))
+            if (spec or {}).get("status") == "trial" else None,
+            "expert_sources": sorted({s for c in (spec or {}).get("root_causes", [])
+                                      for s in c.get("sources", []) if s.startswith("EXPERT-")}),
             "history": events[-5:][::-1],
         })
     used_by: dict[str, list[str]] = {}
@@ -1899,21 +1934,6 @@ async def get_skills() -> dict[str, Any]:
     return {"skills": skills, "tools": tools,
             "scenarios": [{"id": sc.id, "label": sc.label, "machine_id": sc.machine_id, "alarm_code": sc.alarm_code}
                           for sc in PLC_SCENARIOS.values() if sc.machine_id]}
-
-
-@app.get("/api/skills/{skill_id}", summary="One skill: its skill.json and SKILL.md")
-async def get_skill(skill_id: str) -> dict[str, Any]:
-    if not _valid_skill_id(skill_id) or skill_id not in _skills.skills:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown skill: {skill_id}")
-    d = _ROOT / "skills" / skill_id
-    md = (d / "SKILL.md").read_text(encoding="utf-8") if (d / "SKILL.md").exists() else ""
-    return {"skill_id": skill_id, "name": _skills.skills[skill_id].get("name"),
-            "spec": _load_spec_file(skill_id), "spec_errors": _skills.skills[skill_id].get("spec_errors", []),
-            "skill_md": md,
-            "hooks": [h.__dict__ for h in _skills.load_hooks(skill_id)],
-            "interlocks": json.loads((d / "rules" / "safety_interlocks.json").read_text(encoding="utf-8"))
-            if (d / "rules" / "safety_interlocks.json").exists() else [],
-            "sla_penalties": _skills.load_sla_penalties(skill_id)}
 
 
 def _render_skill_md(skill_id: str, spec: dict[str, Any]) -> str:
@@ -1960,7 +1980,9 @@ _METRIC_SKILL_NAMES = {
 
 class SkillComposeRequest(BaseModel):
     story: str = Field(default="", max_length=4000, description="The expert's own words, Bahasa or English")
-    case_ids: list[str] = Field(min_length=1, max_length=6, description="Resolved maintenance cases to learn from")
+    case_ids: list[str] = Field(default_factory=list, max_length=6, description="Resolved maintenance cases to learn from")
+    expert_note_ids: list[str] = Field(default_factory=list, max_length=6,
+                                       description="Signed expert notes (EXPERT-xxxx) to use as sources")
     name: str | None = Field(default=None, max_length=120)
     machines: list[str] = Field(default_factory=list, description="Empty = every machine")
     owner: str | None = Field(default=None, max_length=120)
@@ -2120,9 +2142,18 @@ async def post_skills_compose(body: SkillComposeRequest) -> SkillComposeResponse
     for cid in dict.fromkeys(c.strip().upper() for c in body.case_ids):
         e = _maint_ledger.get_entry(cid)
         (cases if e and e.get("entry_type") == "CASE" else missing).append(e or cid)
+    notes = []
+    for nid in dict.fromkeys(n.strip().upper() for n in body.expert_note_ids):
+        e = _maint_ledger.get_entry(nid)
+        (notes if e and e.get("entry_type") == "EXPERT_NOTE" else missing).append(e or nid)
     if missing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail=f"Kasus tidak ditemukan: {', '.join(map(str, missing))}")
+    if not cases and not notes:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="Pilih minimal satu kasus atau catatan ahli.")
+    if not cases:
+        return _compose_from_notes(body, notes)
     spec = _compose_rules(body, cases)
     ids = [c["id"] for c in cases]
     provenance = {k: {"by": "rules", "from": ids} for k in ("name", "trigger", "confirm", "root_causes", "tasks")}
@@ -2141,11 +2172,157 @@ async def post_skills_compose(body: SkillComposeRequest) -> SkillComposeResponse
         warnings.append("Draf disusun langsung dari kasus (AI tidak tersedia atau jawabannya ditolak).")
     if body.name:
         provenance["name"] = {"by": "expert", "from": []}
+    if notes:
+        spec["root_causes"] += [_note_cause(n) for n in notes]
+        provenance["root_causes"] = {**provenance["root_causes"],
+                                     "from": provenance["root_causes"]["from"] + [n["id"] for n in notes]}
     spec["allowed_actions"] = _compose_actions(spec)
     if not spec["trigger"]["metrics"] and not spec["trigger"]["alarm_codes"]:
         warnings.append("Kasus tidak punya kode alarm atau sinyal yang dikenali; isi pemicu secara manual.")
     return SkillComposeResponse(skill_id=_slug(spec["name"]), spec=spec, provenance=provenance,
                                 model_used=model_used, warnings=warnings)
+
+
+def _note_cause(note: dict[str, Any]) -> dict[str, Any]:
+    return {"cause": note["cause"], "evidence": f'"{note["text"]}" ({note["author"]}, {note["role"]})',
+            "sources": [note["id"]]}
+
+
+def _compose_from_notes(body: SkillComposeRequest, notes: list[dict[str, Any]]) -> SkillComposeResponse:
+    """A skill from expert know-how alone: it starts as a field trial until repairs prove it."""
+    machines = list(body.machines) or sorted({m for n in notes for m in n.get("machines") or []})
+    codes = list(dict.fromkeys(c for n in notes for c in n.get("alarm_codes") or []))
+    metrics = list(dict.fromkeys(n["metric"] for n in notes if n.get("metric")))
+    spec = {
+        "schema": "skillforge_skill_v2",
+        "name": body.name or notes[0]["cause"][:60],
+        "version": "0.1.0",
+        "status": "trial",
+        "owner": body.owner or f'{notes[0]["author"]}, {notes[0]["role"]}',
+        "trigger": {"machines": machines, "metrics": metrics, "alarm_codes": codes, "predictions": bool(metrics)},
+        "confirm": [{"kind": "operator", "text": "Apakah kondisinya sama dengan catatan ahli: "
+                     + "; ".join(n["text"] for n in notes[:2]) + "?"}],
+        "root_causes": [_note_cause(n) for n in notes],
+        "tasks": list(dict.fromkeys(t for n in notes for t in n.get("tasks") or []))
+                 or ["Lakukan lockout-tagout sebelum membuka mesin.", "Periksa penyebab sesuai catatan ahli."],
+        "allowed_actions": [],
+    }
+    spec["allowed_actions"] = _compose_actions(spec)
+    ids = [n["id"] for n in notes]
+    provenance = {k: {"by": "expert", "from": ids} for k in ("name", "trigger", "confirm", "root_causes", "tasks")}
+    provenance["allowed_actions"] = {"by": "rules", "from": ["plc_adapter/machine_limits.json"]}
+    warnings = ["Skill ini hanya berdasar catatan ahli, jadi mulai sebagai uji lapangan: agent memberi saran "
+                f"tanpa aksi PLC sampai {skill_studio.TRIAL_CONFIRMATIONS} perbaikan membuktikannya."]
+    if not metrics and not codes:
+        warnings.append("Catatan ahli tidak menyebut kode alarm atau sinyal; isi pemicu secara manual.")
+    return SkillComposeResponse(skill_id=_slug(spec["name"]), spec=spec, provenance=provenance,
+                                model_used=None, warnings=warnings)
+
+
+# ── Expert notes: signed know-how that a skill may cite like a case ──────────
+
+class ExpertNoteRequest(BaseModel):
+    author: str = Field(min_length=2, max_length=120)
+    role: str = Field(min_length=2, max_length=120)
+    cause: str = Field(min_length=3, max_length=200, description="The cause in a few words")
+    text: str = Field(min_length=3, max_length=1000, description="The expert's own words")
+    machines: list[str] = Field(default_factory=list)
+    alarm_codes: list[str] = Field(default_factory=list)
+    metric: Optional[str] = None
+    tasks: list[str] = Field(default_factory=list, max_length=8)
+
+
+@app.post("/api/skills/expert-notes", summary="Save a signed expert note (EXPERT-xxxx) a skill can cite")
+async def post_expert_note(body: ExpertNoteRequest) -> dict[str, Any]:
+    note = _maint_ledger.append("EXPERT_NOTE", "EXPERT", {
+        **body.model_dump(), "timestamp": datetime.now(timezone.utc).isoformat()})
+    _ledger.append({"action_type": "EXPERT_NOTE_SIGNED", "note_id": note["id"], "author": body.author,
+                    "role": body.role, "sha256_hash_note": note.get("sha256_hash")})
+    return note
+
+
+@app.get("/api/skills/expert-notes", summary="All signed expert notes")
+async def get_expert_notes() -> list[dict[str, Any]]:
+    return [e for e in _maint_ledger.raw() if e.get("entry_type") == "EXPERT_NOTE"]
+
+
+# ── Proposals: the agent writes skills from the repair history ───────────────
+
+def _skill_feedback() -> list[dict[str, Any]]:
+    return [e for e in _ledger.get_all() if e.get("action_type") == "SKILL_FEEDBACK"]
+
+
+def _dismissed_proposals() -> list[str]:
+    return [e["proposal_id"] for e in _ledger.get_all() if e.get("action_type") == "SKILL_PROPOSAL_DISMISSED"]
+
+
+def _installed_specs() -> dict[str, dict[str, Any]]:
+    return {sid: e["spec"] for sid, e in _skills.skills.items() if e.get("spec")}
+
+
+def _skill_proposals() -> list[dict[str, Any]]:
+    specs, dismissed = _installed_specs(), _dismissed_proposals()
+    out = skill_studio.new_skill_proposals(_maint_ledger.cases(), specs, _case_metrics, dismissed)
+    for p in out:
+        cases = [c for c in _maint_ledger.cases() if c["id"] in p["case_ids"]]
+        name = _compose_rules(SkillComposeRequest(case_ids=p["case_ids"]), cases)["name"]
+        p["name"] = f"Alarm {p['alarm_code']}" if name.startswith("Alarm ") else name
+    return out + skill_studio.change_proposals(_skill_feedback(), specs, dismissed)
+
+
+def _record_skill_feedback(case: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Learning loop: a closed repair tells the skill that handled its alarm whether it was right."""
+    codes = case.get("error_codes") or []
+    metrics = _case_metrics([case])
+    skill_id = _skills.match(case.get("machine_id"), metrics[0] if metrics else None, codes[0] if codes else None)
+    spec = _skills.get_spec(skill_id) if skill_id else None
+    if not spec or not case.get("root_cause"):
+        return None
+    return _ledger.append({"action_type": "SKILL_FEEDBACK", **skill_studio.feedback_for(case, skill_id, spec)})
+
+
+@app.get("/api/skills/proposals", summary="Skills and skill changes the agent proposes from closed repairs")
+async def get_skill_proposals() -> list[dict[str, Any]]:
+    return _skill_proposals()
+
+
+@app.post("/api/skills/proposals/{proposal_id}/draft", summary="The skill.json a proposal leads to, ready to review")
+async def post_skill_proposal_draft(proposal_id: str) -> dict[str, Any]:
+    prop = next((p for p in _skill_proposals() if p["id"] == proposal_id), None)
+    if prop is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown proposal: {proposal_id}")
+    if prop["kind"] == "new":
+        draft = await post_skills_compose(SkillComposeRequest(case_ids=prop["case_ids"], owner="SkillForge agent"))
+        return {"proposal": prop, **draft.model_dump()}
+    spec = _skills.get_spec(prop["skill_id"])
+    if prop["kind"] == "change":
+        new = skill_studio.apply_change(spec, prop)
+    else:
+        new = {**spec, "status": "active", "version": skill_studio.bump(spec.get("version"))}
+    new["trigger"] = dict(spec["trigger"])
+    return {"proposal": prop, "skill_id": prop["skill_id"], "spec": new, "provenance": {},
+            "model_used": None, "warnings": []}
+
+
+@app.post("/api/skills/proposals/{proposal_id}/dismiss", summary="Hide a proposal (logged)")
+async def post_skill_proposal_dismiss(proposal_id: str) -> dict[str, Any]:
+    entry = _ledger.append({"action_type": "SKILL_PROPOSAL_DISMISSED", "proposal_id": proposal_id})
+    return {"dismissed": proposal_id, "ledger_entry_id": entry["id"]}
+
+
+@app.get("/api/skills/{skill_id}", summary="One skill: its skill.json and SKILL.md")
+async def get_skill(skill_id: str) -> dict[str, Any]:
+    if not _valid_skill_id(skill_id) or skill_id not in _skills.skills:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown skill: {skill_id}")
+    d = _ROOT / "skills" / skill_id
+    md = (d / "SKILL.md").read_text(encoding="utf-8") if (d / "SKILL.md").exists() else ""
+    return {"skill_id": skill_id, "name": _skills.skills[skill_id].get("name"),
+            "spec": _load_spec_file(skill_id), "spec_errors": _skills.skills[skill_id].get("spec_errors", []),
+            "skill_md": md,
+            "hooks": [h.__dict__ for h in _skills.load_hooks(skill_id)],
+            "interlocks": json.loads((d / "rules" / "safety_interlocks.json").read_text(encoding="utf-8"))
+            if (d / "rules" / "safety_interlocks.json").exists() else [],
+            "sla_penalties": _skills.load_sla_penalties(skill_id)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2644,6 +2821,8 @@ async def post_maintenance_resolve(entry_id: str, body: MaintenanceResolveReques
     if case.get("status") == "RESOLVED":
         raise HTTPException(status_code=409, detail=f"Case {entry_id} is already resolved")
     out = await _agent.resolve(entry_id, body.model_dump())
+    feedback = _record_skill_feedback(out["case"])
+    out["skill_feedback"] = {k: feedback.get(k) for k in ("skill_id", "verdict", "rank")} if feedback else None
     out["case"] = _case_view(out["case"])
     return out
 
@@ -2826,6 +3005,8 @@ _agent_runner = AgentRunner(AgentDeps(
     active_model=_active_model,
     planner_model=lambda: os.getenv("AGENT_MODEL", "anthropic--claude-4.5-sonnet").strip() or None,
     notify=_notify_mechanic,
+    skill_guidance=lambda machine_id, metric, code, evidence: _skill_guidance(
+        machine_id, metric=metric, alarm_code=code, evidence_ids=evidence),
 ))
 
 
@@ -3187,6 +3368,7 @@ def _skill_guidance(machine_id: str, *, metric: Optional[str] = None, alarm_code
         "version": (spec or {}).get("version"),
         "owner": (spec or {}).get("owner"),
         "has_know_how": spec is not None,
+        "status": (spec or {}).get("status", "active"),
         "confirm": (spec or {}).get("confirm", []),
         "root_causes": causes,
         "tasks": (spec or {}).get("tasks", []),
@@ -3198,6 +3380,8 @@ def _skill_allows(guidance: Optional[dict[str, Any]], proposal: Optional[dict[st
     """A skill with a skill.json only proposes the PLC actions it allows; v1 skills keep the limits-file default."""
     if not proposal or not guidance or not guidance["has_know_how"]:
         return proposal
+    if guidance.get("status") == "trial":
+        return None  # a field-trial skill only advises; it never proposes a PLC write
     return proposal if proposal["action_id"] in guidance["allowed_actions"] else None
 
 

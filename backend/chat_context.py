@@ -211,3 +211,22 @@ def history_block(history: List[Dict[str, str]], max_turns: int = 6, max_chars: 
         if text:
             rows.append(f"{who}: {text}")
     return "\n".join(rows)
+
+
+def skills_block(skills: List[Dict[str, Any]]) -> str:
+    """Installed skills: what each catches, its status and the experts' top causes and first tasks."""
+    if not skills:
+        return "- Belum ada skill dengan know-how."
+    out = []
+    for sk in skills:
+        trig = sk.get("trigger") or {}
+        status = {"trial": "uji lapangan (saran saja, tanpa aksi PLC)"}.get(sk.get("status"), sk.get("status"))
+        out.append(f"- {sk.get('name')} v{sk.get('version') or '-'} ({sk.get('skill_id')}), {status}, "
+                   f"pemilik {sk.get('owner') or '-'}: kode {', '.join(trig.get('alarm_codes') or []) or '-'}, "
+                   f"sinyal {', '.join(trig.get('metrics') or []) or '-'}, "
+                   f"mesin {', '.join(trig.get('machines') or []) or 'semua'}")
+        for n, c in enumerate((sk.get("root_causes") or [])[:3], 1):
+            out.append(f"  - Penyebab {n}: {c.get('cause')} [{', '.join(c.get('sources') or [])}]")
+        if sk.get("tasks"):
+            out.append(f"  - Tugas pertama: {'; '.join(sk['tasks'][:2])}")
+    return "\n".join(out)
