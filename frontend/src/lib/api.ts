@@ -218,6 +218,33 @@ export interface SapState {
   [k: string]: unknown;
 }
 
+export interface SparePart {
+  part_no: string;
+  description: string;
+  machine_models: string[];
+  stock_qty: number;
+  unit: string;
+  storage_location?: string;
+  supplier?: string;
+  lead_time_days: number;
+  unit_price_idr?: number;
+  reorder_point: number;
+}
+
+/** A reservation or purchase requisition an approved agent run wrote to the SAP mock. */
+export interface SparePartOrder {
+  id: string;
+  part_no: string;
+  description: string;
+  qty: number;
+  unit: string;
+  status: string;
+  approved_by?: string;
+  created_at?: string;
+  supplier?: string;
+  lead_time_days?: number;
+}
+
 export interface GanttChange {
   order_id: string;
   from_machine: string;
