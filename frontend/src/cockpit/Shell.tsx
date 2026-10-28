@@ -1,9 +1,11 @@
-import { RefreshCw, Volume2, VolumeX } from "lucide-react";
+import { BookOpen, RefreshCw, Volume2, VolumeX, X } from "lucide-react";
+import { useState } from "react";
 import type { ReactNode } from "react";
 import SkillStudio from "../components/SkillStudio";
 import { cn } from "../lib/utils";
 import { API_BASE } from "../lib/api";
 import { SHIFT_END, SHIFT_START } from "../lib/shift";
+import { GuideDrawer } from "./Overlays";
 import { useCockpit } from "./store";
 import type { Page } from "./store";
 import { AssistantFace, LogoMark, Mono } from "./ui";
@@ -16,7 +18,7 @@ const NAV: { page: Page; label: string }[] = [
 ];
 
 function Sidebar() {
-  const { page, setPage, setSkillStudioOpen, skillStudioOpen } = useCockpit();
+  const { page, setPage, setSkillStudioOpen, skillStudioOpen, guideOpen, setGuideOpen } = useCockpit();
   return (
     <aside className="sticky top-0 hidden h-screen w-[280px] shrink-0 flex-col justify-between overflow-y-auto bg-page px-8 py-10 lg:flex">
       <div className="flex flex-col gap-8">
@@ -54,6 +56,18 @@ function Sidebar() {
           <p className="text-[15px] font-bold text-navy">BANTUAN</p>
           <button
             type="button"
+            onClick={() => setGuideOpen(true)}
+            aria-current={guideOpen ? "page" : undefined}
+            className={cn(
+              "flex min-h-12 items-center gap-3 rounded-r-md border-l-4 px-4 text-left text-[17px] transition-colors",
+              guideOpen ? "border-accent-blue font-bold text-navy" : "border-transparent text-navy hover:bg-white/70",
+            )}
+          >
+            <span className={cn("size-2.5 rounded-full", guideOpen ? "bg-accent-blue" : "bg-disabled")} aria-hidden />
+            Panduan
+          </button>
+          <button
+            type="button"
             onClick={() => setSkillStudioOpen(true)}
             aria-current={skillStudioOpen ? "page" : undefined}
             className={cn(
@@ -86,7 +100,7 @@ function Sidebar() {
 
 /** Compact top nav for screens narrower than the sidebar layout. */
 function MobileNav() {
-  const { page, setPage, setSkillStudioOpen } = useCockpit();
+  const { page, setPage, setSkillStudioOpen, setGuideOpen } = useCockpit();
   return (
     <nav aria-label="Menu utama" className="flex gap-2 overflow-x-auto border-b border-line bg-page px-4 py-2 lg:hidden">
       {NAV.map((n) => (
@@ -108,6 +122,13 @@ function MobileNav() {
         className="min-h-12 shrink-0 rounded-md bg-surface px-4 text-[16px] text-navy"
       >
         Skill Studio
+      </button>
+      <button
+        type="button"
+        onClick={() => setGuideOpen(true)}
+        className="min-h-12 shrink-0 rounded-md bg-surface px-4 text-[16px] text-navy"
+      >
+        Panduan
       </button>
     </nav>
   );
@@ -188,17 +209,65 @@ export function ChatFab() {
   );
 }
 
+const GUIDE_SEEN_KEY = "sf_guide_seen";
+
+/** First-visit hint for testers from outside manufacturing; dismissed for good once acted on. */
+function GuideBanner() {
+  const { setGuideOpen } = useCockpit();
+  const [seen, setSeen] = useState(() => {
+    try {
+      return localStorage.getItem(GUIDE_SEEN_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  if (seen) return null;
+  const dismiss = () => {
+    setSeen(true);
+    try {
+      localStorage.setItem(GUIDE_SEEN_KEY, "1");
+    } catch {
+      /* private mode: banner just returns next visit */
+    }
+  };
+  return (
+    <div role="note" className="flex flex-wrap items-center gap-3 rounded-lg border border-accent-blue/40 bg-surface px-4 py-3">
+      <BookOpen className="size-6 shrink-0 text-accent-blue" aria-hidden />
+      <p className="min-w-0 flex-1 text-[16px]">
+        <b>Baru mengenal dunia pabrik?</b> Baca panduan singkat: arti istilah seperti PLC, OEE, dan SAP, plus demo 3 menit.
+      </p>
+      <button
+        type="button"
+        onClick={() => {
+          setGuideOpen(true);
+          dismiss();
+        }}
+        className="min-h-12 rounded-lg bg-navy px-5 text-[16px] font-bold text-white hover:bg-[#10243a]"
+      >
+        Buka panduan
+      </button>
+      <button type="button" onClick={dismiss} aria-label="Tutup saran panduan" className="grid size-12 place-items-center rounded-md hover:bg-page">
+        <X className="size-5" aria-hidden />
+      </button>
+    </div>
+  );
+}
+
 export function Shell({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-screen bg-page text-navy">
       <Sidebar />
       <div className="min-w-0 flex-1">
         <MobileNav />
-        <main className="mx-auto flex max-w-[1440px] flex-col gap-4 p-4 pb-24">{children}</main>
+        <main className="mx-auto flex max-w-[1440px] flex-col gap-4 p-4 pb-24">
+          <GuideBanner />
+          {children}
+        </main>
       </div>
       <Toast />
       <ChatFab />
       <SkillStudio />
+      <GuideDrawer />
     </div>
   );
 }

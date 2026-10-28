@@ -157,6 +157,9 @@ interface CockpitValue {
   resetting: boolean;
   skillStudioOpen: boolean;
   setSkillStudioOpen: (v: boolean) => void;
+  /** Plain-language guide drawer for visitors from outside manufacturing. */
+  guideOpen: boolean;
+  setGuideOpen: (v: boolean) => void;
   skillStudioState: "interview" | "draft" | "lint" | "approved";
   setSkillStudioState: (s: "interview" | "draft" | "lint" | "approved") => void;
   skillStudioFormData: SkillStudioFormData;
@@ -240,6 +243,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
 
   // Phase 3: Skill Studio
   const [skillStudioOpen, setSkillStudioOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
   const [skillStudioState, setSkillStudioState] = useState<"interview" | "draft" | "lint" | "approved">("interview");
   const [skillStudioFormData, setSkillStudioFormData] = useState<SkillStudioFormData>({
     machine_type: "Vertical Machining Center",
@@ -938,6 +942,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       chatOpen, chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat,
       muted, toggleMute, toast, reset, resetting, reload: load, showToast, agentRunPing,
       // Phase 3: Skill Studio
+      guideOpen, setGuideOpen,
       skillStudioOpen, setSkillStudioOpen, skillStudioState, setSkillStudioState,
       skillStudioFormData, setSkillStudioFormData, skillStudioDraft, setSkillStudioDraft,
       skillStudioLintResult, setSkillStudioLintResult,
@@ -948,7 +953,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       lastAnalysis, safety, sendTelemetry, runFullAnalysis, autoIn, plcOn, plcStatus, plcInfo, plcAlarm, plcOffline, startPlcScenario,
       plcMachines, plcPrediction, plcAction, plcBusy, approvePlcAction, setPlcAutonomy, setPlcLockout, planMaintenance, ledgerOpen, verifying, verifyResult, verify, chatOpen,
       chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat, muted, toggleMute, toast, reset, resetting,
-      load, showToast, agentRunPing,
+      load, showToast, agentRunPing, guideOpen,
       skillStudioOpen, skillStudioState, skillStudioFormData, skillStudioDraft, skillStudioLintResult,
     ],
   );
