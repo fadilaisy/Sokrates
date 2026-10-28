@@ -201,14 +201,14 @@ def test_scenario_c_costs_are_internally_consistent(solver):
     sc_c = next(s for s in scenarios if s["id"] == "scenario_c")
 
     brk = sc_c["cost_breakdown"]
-    assert brk["sla"] == 0
     assert sc_c["total_cost_idr"] == brk["sla"] + brk["overtime"] + brk["changeover"]
+    assert brk["sla"] == sum(c.get("sla_penalty_idr", 0) for c in sc_c["gantt_changes"])
 
     co_sum = sum(c.get("changeover_cost_idr", 0) for c in sc_c["gantt_changes"])
     ot_sum = sum(c.get("overtime_cost_idr", 0) for c in sc_c["gantt_changes"])
     assert co_sum == brk["changeover"]
     assert ot_sum == brk["overtime"]
-    assert co_sum + ot_sum == sc_c["total_cost_idr"]
+    assert co_sum + ot_sum + brk["sla"] == sc_c["total_cost_idr"]
 
 
 def test_resume_time_uses_end_hour_not_duration(solver):

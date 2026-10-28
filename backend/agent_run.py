@@ -432,7 +432,8 @@ class AgentRunner:
         # Waiting for a part blocks the machine for the rest of the shift; otherwise the repair time does.
         downtime_h = SHIFT_HOURS if lead_days else float(repair_h)
         window = shift_window(self.deps.now(), downtime_h)
-        disruption = {"machine_id": t["machine_id"], "disruption_type": "BREAKDOWN", **window}
+        disruption = {"machine_id": t["machine_id"], "disruption_type": "BREAKDOWN", **window,
+                      "machine_back_today": not lead_days}
         state = self.deps.get_state()
         scenarios = await asyncio.to_thread(self.deps.solve, state, disruption)
         for s in scenarios:
@@ -453,11 +454,17 @@ class AgentRunner:
                  for c in best["gantt_changes"]]
         moved = [m for m in moves if m["to"] != m["from"]]
         targets = sorted({m["to"] for m in moved})
-        return (f"Solver CP-SAT ({reason}): {best.get('name_id') or best['id']} — "
-                f"{len(moved)} order dipindah ke {', '.join(targets) or 'mesin yang sama'}, "
-                f"biaya {_rp(best.get('total_cost_idr'))}, hemat {_rp(best.get('net_savings_idr'))}." + AWAITING,
+        late = sum(1 for c in best["gantt_changes"] if c.get("late"))
+        where = (f"{len(moved)} order dipindah ke {', '.join(targets)}" if moved
+                 else f"order tetap di {t['machine_id']}")
+        checked = "; ".join(f"{c['machine_id']} {c['reason']}" for c in best.get("machine_checks", []))
+        return (f"Solver CP-SAT ({reason}): {best.get('name_id') or best['id']} — {where}"
+                + (f", {late} order terlambat (denda dihitung)" if late else "")
+                + f", biaya {_rp(best.get('total_cost_idr'))}, hemat {_rp(best.get('net_savings_idr'))}."
+                + (f" Mesin lain dicek: {checked}." if checked else "") + AWAITING,
                 {"disruption": disruption, "scenario_id": best["id"], "scenario_name": best.get("name_id"),
-                 "moves": moves, "total_cost_idr": best.get("total_cost_idr"),
+                 "moves": moves, "machine_checks": best.get("machine_checks", []),
+                 "total_cost_idr": best.get("total_cost_idr"),
                  "net_savings_idr": best.get("net_savings_idr"),
                  "alternatives": [s["id"] for s in scenarios if s is not best]})
 

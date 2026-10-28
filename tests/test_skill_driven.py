@@ -33,12 +33,13 @@ def test_solver_matches_skill_file_costs(solver, live_state):
 
     scenarios = solver.solve(live_state, DISRUPTION)
     by_id = {s["id"]: s for s in scenarios}
-    # Scenario B cost = ceil(total affected hours) * skill overtime rate.
-    total_work = sum(solver._duration_h(o) for o in live_state["production_orders"]
-                     if o.get("work_center_id") == "CNC-02"
-                     and o.get("status") in ("IN_PROGRESS", "QUEUED", "PLANNED"))
-    import math
-    assert by_id["scenario_b"]["total_cost_idr"] == math.ceil(total_work) * ot
+    # Scenario B prices overtime and changeovers at the skill file's rates.
+    co = skill["operational_costs"]["changeover_cost_idr"]
+    b = by_id["scenario_b"]
+    moved = [c for c in b["gantt_changes"] if c["to_machine"] != c["from_machine"]]
+    assert b["cost_breakdown"]["overtime"] > 0
+    assert all(c.get("overtime_cost_idr", 0) % ot == 0 for c in b["gantt_changes"])
+    assert b["cost_breakdown"]["changeover"] == len(moved) * co
     assert a_rate > 0 and a_max > 0  # sanity: file was actually read
 
 

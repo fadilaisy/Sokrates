@@ -65,10 +65,12 @@ def test_approve_rejects_unissued_scenario_id():
 
 
 def test_approve_blocks_tier1_target_after_status_change():
-    r, sc = _disrupt_and_pick()
-    moved = next((c for c in sc["gantt_changes"] if c["to_machine"] != c["from_machine"]), None)
-    if moved is None:
-        pytest.skip("recommended scenarios did not reroute in this fixture")
+    client.post("/api/state/reset")
+    r = client.post("/api/disrupt", json={"machine_id": "CNC-02", "disruption_type": "BREAKDOWN",
+                                          "start_hour": 0, "end_hour": 8}).json()
+    sc = next(s for s in r["scenarios"]
+              if any(c["to_machine"] != c["from_machine"] for c in s["gantt_changes"]))
+    moved = next(c for c in sc["gantt_changes"] if c["to_machine"] != c["from_machine"])
     inj = client.post("/api/disrupt/inject", json={"machine_id": moved["to_machine"], "new_status": "FAULT",
                                                    "disruption_type": "MOTOR_OVERLOAD"}).json()
     res = client.post("/api/approve", json={"scenario_id": sc["id"], "scenario_data": sc,
