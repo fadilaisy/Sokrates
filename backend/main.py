@@ -1055,7 +1055,7 @@ async def post_chat(body: ChatRequest) -> ChatResponse:
     order_lines = "\n".join(
         f"- {o.get('id')} kelas {o.get('order_class')} di {o.get('work_center_id')}, "
         f"{_hhmm(o.get('planned_start'))}–{_hhmm(o.get('planned_end'))}, deadline {_hhmm(o.get('deadline'))}, "
-        f"status {o.get('status')}, progres {o.get('progress_percent', 0)}%, "
+        f"status {o.get('status')}, "
         f"denda SLA Rp {o.get('sla_penalty_per_hour_idr', 0):,}/jam{chat_context.late_note(o)}"
         for o in orders
     )

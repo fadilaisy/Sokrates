@@ -1,6 +1,7 @@
 import { ArrowRight } from "lucide-react";
 import type { ReactNode } from "react";
-import { API_BASE } from "../lib/api";
+import { API_BASE, isOvertimeLabel, parseHour } from "../lib/api";
+import type { LedgerEntry, SapState } from "../lib/api";
 import { cn } from "../lib/utils";
 import { fmt1, ordersToday, STATUS_STYLE, telemetryOf } from "../lib/shift";
 import type { MachineStatus } from "../lib/shift";
@@ -56,23 +57,69 @@ function Donut({ pct, label }: { pct: number; label: string }) {
   );
 }
 
+function OrderCount({ label, value, tone, highlight = false }: { label: string; value: number; tone: string; highlight?: boolean }) {
+  return (
+    <div className={cn("flex flex-col-reverse gap-1 rounded-lg border bg-white p-3", highlight ? "border-2 border-maint bg-warn-bg" : "border-line")}>
+      <dt className={cn("text-[14px] font-semibold", highlight && "text-maint")}>{label}</dt>
+      <dd className={cn("text-[34px] font-bold leading-none", tone)}>{value}</dd>
+    </div>
+  );
+}
+
+interface MovedOrder {
+  id: string;
+  from: string | null;
+  to: string;
+  start: string;
+  overtime: boolean;
+  approvedBy: string | null;
+}
+
+/**
+ * Today's RESCHEDULED orders, newest approval first. Where each one came from and who
+ * approved it come from the SCENARIO_APPROVED ledger entry that moved it (its order snapshots).
+ */
+function rescheduledOrders(state: SapState | null, ledger: LedgerEntry[]): MovedOrder[] {
+  const shiftEnd = parseHour(state?.shop_floor_config?.shift_end ?? "15:00") ?? 15;
+  const approvals = ledger.filter((e) => e.action_type === "SCENARIO_APPROVED").reverse();
+  return ordersToday(state)
+    .filter((o) => o.status === "RESCHEDULED")
+    .map((o) => {
+      const entry = approvals.find((e) => {
+        const snaps = (e.delta_applied as { order_snapshots?: Record<string, unknown> } | undefined)?.order_snapshots;
+        return !!snaps && o.id in snaps;
+      });
+      const snap = ((entry?.delta_applied as { order_snapshots?: Record<string, { work_center_id?: string }> } | undefined)
+        ?.order_snapshots ?? {})[o.id];
+      const startH = parseHour(o.planned_start);
+      const endH = parseHour(o.planned_end);
+      return {
+        id: o.id,
+        from: snap?.work_center_id ?? null,
+        to: o.work_center_id,
+        start: startH == null ? "?" : `${String(Math.floor(startH)).padStart(2, "0")}:${String(Math.round((startH % 1) * 60)).padStart(2, "0")}`,
+        overtime: isOvertimeLabel(o.planned_start) || isOvertimeLabel(o.planned_end) || (endH ?? 0) > shiftEnd || (startH ?? 0) >= shiftEnd,
+        approvedBy: entry?.approved_by ?? null,
+      };
+    });
+}
+
 function Pill({ children, tone = "neutral" }: { children: ReactNode; tone?: "neutral" | "ok" | "warn" }) {
   const t = { neutral: "bg-[#8ca2c0] text-navy", ok: "bg-running text-white", warn: "bg-maint text-white" }[tone];
   return <span className={cn("inline-flex min-w-14 justify-center rounded-full px-2.5 py-0.5 text-[14px] font-bold", t)}>{children}</span>;
 }
 
 function DashboardPage() {
-  const { state, metrics, displayStatus, setPage } = useCockpit();
+  const { state, metrics, ledger, displayStatus, setPage } = useCockpit();
   const machines = state?.work_centers ?? [];
   const bucket = (s: MachineStatus): MachineStatus => (s === "DISRUPTED" ? "FAULT" : s === "RECOVERING" ? "MAINTENANCE" : s);
   const counts: Record<string, number> = { RUNNING: 0, FAULT: 0, IDLE: 0, MAINTENANCE: 0 };
   for (const w of machines) counts[bucket(displayStatus(w.id, w.status))]++;
 
   const today = ordersToday(state);
-  const target = today.reduce((a, o) => a + (Number(o.quantity) || 0), 0);
-  const made = Math.round(today.reduce((a, o) => a + ((Number(o.quantity) || 0) * (Number(o.progress_percent) || 0)) / 100, 0));
-  const outPct = target ? Math.round((made / target) * 100) : 0;
-  const unit = String(today[0]?.quantity_unit ?? "pcs").toLowerCase();
+  const running = today.filter((o) => o.status === "IN_PROGRESS").length;
+  const queued = today.filter((o) => o.status === "QUEUED" || o.status === "PLANNED").length;
+  const moved = rescheduledOrders(state, ledger);
   const dt = metrics?.downtime ?? null;
   const ox = metrics?.oee ?? null;
   const oee = ox ? Math.round(ox.oee) : 0;
@@ -117,21 +164,34 @@ function DashboardPage() {
 
       <div className="grid gap-4 lg:grid-cols-3">
         <Card className="flex flex-col gap-3 bg-page p-4">
-          <h3 className="border-b border-accent-blue/40 pb-2 text-[17px] font-semibold">Output vs target</h3>
-          <p className="flex items-center gap-2 text-[16px]">
-            {made} / {target} {unit} <Pill>{outPct}%</Pill>
-          </p>
-          <div className="flex items-center gap-4">
-            <Donut pct={outPct} label={`${outPct}%`} />
-            <dl className="grid flex-1 grid-cols-[1fr_auto] items-center gap-y-2 text-[15px]">
-              <dt>Order berjalan</dt>
-              <dd><Pill>{today.filter((o) => o.status === "IN_PROGRESS").length}</Pill></dd>
-              <dt>Antri</dt>
-              <dd><Pill>{today.filter((o) => o.status === "QUEUED" || o.status === "PLANNED").length}</Pill></dd>
-              <dt>Dijadwal ulang</dt>
-              <dd><Pill>{today.filter((o) => o.status === "RESCHEDULED").length}</Pill></dd>
-            </dl>
-          </div>
+          <h3 className="border-b border-accent-blue/40 pb-2 text-[17px] font-semibold">
+            Order hari ini{" "}
+            <span className="text-[14px] font-normal text-muted-ink">
+              · {today.length} order{state?.shop_floor_config ? ` · shift ${state.shop_floor_config.shift_start ?? "07:00"}–${state.shop_floor_config.shift_end ?? "15:00"}` : ""}
+            </span>
+          </h3>
+          <dl className="grid grid-cols-3 gap-2">
+            <OrderCount label="Berjalan" value={running} tone="text-running" />
+            <OrderCount label="Antri" value={queued} tone="text-idle" />
+            <OrderCount label="Dijadwal ulang" value={moved.length} tone={moved.length > 0 ? "text-maint" : "text-muted-ink"} highlight={moved.length > 0} />
+          </dl>
+          {moved.length === 0 ? (
+            <p className="text-[14px] text-muted-ink">Belum ada order yang dipindah agen hari ini.</p>
+          ) : (
+            <div className="flex flex-col gap-1.5 text-[14px]">
+              <p className="font-semibold text-muted-ink">
+                Dipindah agen{moved[0].approvedBy ? ` · disetujui ${moved[0].approvedBy}` : ""}
+              </p>
+              <ul className="flex flex-col gap-1">
+                {moved.map((m) => (
+                  <li key={m.id}>
+                    <Mono>{m.id}</Mono> {m.from && m.from !== m.to ? `${m.from} → ` : ""}{m.to} · {m.start}
+                    {m.overtime && <span className="font-semibold text-maint"> lembur</span>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </Card>
 
         <Card className="flex flex-col gap-3 bg-page p-4">
