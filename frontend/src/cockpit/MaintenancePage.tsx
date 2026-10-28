@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { API_BASE, maintApi } from "../lib/api";
-import type { DocRef, MaintCase, MaintChat, MaintFlow, MaintSearch, Playbook } from "../lib/api";
+import type { DocRef, MaintCase, MaintChat, MaintFlow, MaintSearch, Playbook, SparePart, SparePartOrder } from "../lib/api";
 import { chainVerdict } from "../lib/shift";
 import { cn } from "../lib/utils";
 import { Header } from "./Shell";
 import { SourceCitations } from "./Citations";
+import { useCockpit } from "./store";
 import { Btn, Card, Mono, Spinner } from "./ui";
 
 /*
@@ -176,6 +177,78 @@ function Section({ title, sub, children }: { title: string; sub?: string; childr
       </div>
       {children}
     </Card>
+  );
+}
+
+/**
+ * Spare-part stock from the SAP mock, with the reservations and purchase requisitions approved
+ * agent runs wrote (backend/agent_run.py `_apply_parts`). Lead time is what makes the agent
+ * order a part and reschedule work instead of just reserving it.
+ */
+function StockPanel() {
+  const { state } = useCockpit();
+  const parts = (state?.spare_parts as SparePart[] | undefined) ?? [];
+  const orders = [
+    ...((state?.reservations as SparePartOrder[] | undefined) ?? []).map((o) => ({ ...o, kind: "Reservasi" })),
+    ...((state?.purchase_requisitions as SparePartOrder[] | undefined) ?? []).map((o) => ({ ...o, kind: "Purchase requisition" })),
+  ].sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")));
+  const low = parts.filter((p) => p.stock_qty <= p.reorder_point).length;
+
+  return (
+    <Section
+      title="Stok suku cadang"
+      sub={`${parts.length} part di SAP · ${low} perlu restock (stok ≤ reorder point). Stok berkurang dan PR muncul saat agent run disetujui.`}
+    >
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[720px] text-left text-[15px] tabular-nums">
+          <thead className="border-b border-line text-[14px] text-muted-ink">
+            <tr>
+              <th className="py-2 pr-3 font-semibold">Part</th>
+              <th className="py-2 pr-3 font-semibold">Deskripsi</th>
+              <th className="py-2 pr-3 font-semibold">Mesin</th>
+              <th className="py-2 pr-3 text-right font-semibold">Stok</th>
+              <th className="py-2 pr-3 text-right font-semibold">Reorder point</th>
+              <th className="py-2 text-right font-semibold">Lead time</th>
+            </tr>
+          </thead>
+          <tbody>
+            {parts.map((p) => {
+              const isLow = p.stock_qty <= p.reorder_point;
+              return (
+                <tr key={p.part_no} className="border-b border-line last:border-0">
+                  <td className="py-2 pr-3"><Mono>{p.part_no}</Mono></td>
+                  <td className="py-2 pr-3">{p.description}</td>
+                  <td className="py-2 pr-3 text-muted-ink">{p.machine_models.join(", ")}</td>
+                  <td className="py-2 pr-3 text-right">
+                    <span className={cn("inline-flex min-w-14 justify-center rounded-full px-2.5 py-0.5 font-bold", isLow ? "bg-warn-bg text-maint" : "text-navy")}>
+                      {p.stock_qty} {p.unit.toLowerCase()}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-3 text-right">{p.reorder_point}</td>
+                  <td className="py-2 text-right">{p.lead_time_days} hari</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="flex flex-col gap-1.5 text-[14px]">
+        <p className="font-semibold text-muted-ink">Reservasi &amp; PR dari agen hari ini</p>
+        {orders.length === 0 ? (
+          <p className="text-muted-ink">Belum ada. Muncul setelah agent run disetujui.</p>
+        ) : (
+          <ul className="flex flex-col gap-1">
+            {orders.map((o) => (
+              <li key={o.id}>
+                <Mono>{o.id}</Mono> {o.kind} · {o.part_no} ×{o.qty}
+                {o.lead_time_days ? `, tiba ~${o.lead_time_days} hari` : ""}
+                {o.approved_by ? ` · disetujui ${o.approved_by}` : ""}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </Section>
   );
 }
 
@@ -490,6 +563,8 @@ export function MaintenancePage() {
           </div>
         )}
       </Section>
+
+      <StockPanel />
 
       <Card className="p-5">
         <button type="button" onClick={() => setChatOpen((o) => !o)} className="min-h-12 text-[16px] font-semibold text-muted-ink hover:text-navy">
