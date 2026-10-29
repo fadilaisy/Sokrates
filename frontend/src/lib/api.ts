@@ -613,7 +613,7 @@ export const api = {
   resetState: () => req<SapState>("/api/state/reset", { method: "POST" }),
   health: () => req<Record<string, string>>("/health"),
   metrics: () => req<ShiftMetrics>("/api/metrics"),
-  disrupt: (b: { machine_id: string; disruption_type: string; start_hour: number; end_hour: number }) =>
+  disrupt: (b: { machine_id: string; disruption_type: string; start_hour: number; end_hour: number; symptom?: string }) =>
     req<DisruptResponse>("/api/disrupt", { method: "POST", body: JSON.stringify(b) }),
   approve: (b: { scenario_id: string; scenario_data: unknown; expected_sap_version: number; approved_by: string }) =>
     req<ApproveReceipt>(

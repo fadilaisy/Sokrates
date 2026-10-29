@@ -4,7 +4,7 @@ import { cn } from "../lib/utils";
 import type { PlcActionResult, SkillGuidance } from "../lib/api";
 import { fmt1, shortHash, telemetryOf, windowLabel } from "../lib/shift";
 import { audioReady, onAudioReady, playAlarmNow } from "../lib/sound";
-import { DEMO_DISRUPTION, useCockpit } from "./store";
+import { DEMO_DISRUPTION, WHAT_IF_SYMPTOMS, useCockpit } from "./store";
 import { Btn, Card, Mono, StatusBadge } from "./ui";
 
 /** CNC-01 → CNC-05 left to right, same order as the physical line. */
@@ -483,6 +483,7 @@ export function WhatIfPanel() {
   const { runDisruption, phase, injectDrill, injecting, result, autoIn } = useCockpit();
   // During an alert countdown the agent is about to analyse; a what-if now would race it.
   const busy = phase === "detecting" || autoIn != null;
+  const [symptom, setSymptom] = useState(DEMO_DISRUPTION.symptom ?? "");
   return (
     <Card className="flex flex-col gap-3 p-4">
       <h2 className="text-[17px] font-semibold">Gangguan / What-if</h2>
@@ -494,7 +495,18 @@ export function WhatIfPanel() {
           {windowLabel(DEMO_DISRUPTION.start_hour, DEMO_DISRUPTION.end_hour)}
         </div>
       </div>
-      <Btn size="lg" onClick={() => runDisruption(DEMO_DISRUPTION)} disabled={busy}>
+      <label className="flex flex-col gap-1 text-[14px] text-muted-ink">
+        Kerusakan (dicatat di log perawatan setelah disetujui)
+        <select
+          value={symptom}
+          onChange={(e) => setSymptom(e.target.value)}
+          className="min-h-11 rounded-md border border-line bg-surface px-3 text-[15px] text-navy"
+        >
+          {WHAT_IF_SYMPTOMS.map((s) => <option key={s} value={s}>{s}</option>)}
+          <option value="">Belum diketahui</option>
+        </select>
+      </label>
+      <Btn size="lg" onClick={() => runDisruption({ ...DEMO_DISRUPTION, symptom: symptom || undefined })} disabled={busy}>
         What-if: CNC-02 rusak 3 jam
       </Btn>
       <Btn variant="secondary" onClick={injectDrill} disabled={busy || injecting}>

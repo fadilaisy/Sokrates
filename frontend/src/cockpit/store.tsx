@@ -21,10 +21,21 @@ export interface DisruptionParams {
   disruption_type: string;
   start_hour: number; // shift-relative, 0 = 07:00
   end_hour: number;
+  /** What broke; the approved what-if logs it as a maintenance case and searches past fixes with it. */
+  symptom?: string;
 }
 
 /** The PRD's one-click demo: always CNC-02, hours 2–5, BREAKDOWN. */
-export const DEMO_DISRUPTION: DisruptionParams = { machine_id: "CNC-02", disruption_type: "BREAKDOWN", start_hour: 2, end_hour: 5 };
+export const DEMO_DISRUPTION: DisruptionParams = {
+  machine_id: "CNC-02", disruption_type: "BREAKDOWN", start_hour: 2, end_hour: 5,
+  symptom: "Spindel bunyi kasar dan getaran tinggi",
+};
+/** Faults CNC-02 has had before (maintenance ledger), so the what-if case finds a fix route. */
+export const WHAT_IF_SYMPTOMS = [
+  "Spindel bunyi kasar dan getaran tinggi",
+  "Tekanan coolant rendah, pompa berisik",
+  "Bearing spindel panas",
+];
 
 const APPROVER_KEY = "sf.approver";
 /** Signs PLC writes and reverts when nobody has typed a name yet. Scenario approval needs a real name. */
