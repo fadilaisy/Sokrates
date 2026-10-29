@@ -69,7 +69,7 @@ if str(_ROOT) not in sys.path:
 from erp_adapter.sap_client import DriftError, SAPClient
 import copy
 from erp_adapter.audit_ledger import AuditLedger
-from solver.schedule_solver import ScheduleSolver, TIER1_BLOCKED_STATUSES
+from solver.schedule_solver import ScheduleSolver, TIER1_BLOCKED_STATUSES, reroute_violations
 from skills.loader import (DEFAULT_SKILL_ID, SafetyInterlock, SkillRegistry, normalize_alarm_code, parse_skill_spec,
                            trigger_score)
 from fastapi.concurrency import run_in_threadpool
@@ -797,6 +797,22 @@ async def _approve_scenario(body: ApproveRequest, source: dict[str, Any]) -> App
                         "message": f"Mesin {target} berstatus {_wc_status[target]}; "
                                    "pekerjaan tidak boleh dialihkan ke sana (Tier 1)."},
             )
+    # The target must be able to make the part and have room after the work already
+    # on it (same rules the solver used, re-checked on live SAP). Refusals are ledgered.
+    _violations = reroute_violations(_live, body.scenario_data.get("gantt_changes", []))
+    if _violations:
+        _ledger.append({
+            "action_type":     "APPROVAL_REJECTED_CONSTRAINT",
+            "scenario_chosen": body.scenario_id,
+            "violations":      _violations,
+            "approved_by":     body.approved_by,
+        })
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": _violations[0]["error"],
+                    "message": " ".join(v["message"] for v in _violations),
+                    "violations": _violations},
+        )
 
     gantt_changes: list[dict] = body.scenario_data.get("gantt_changes", [])
     # The solver labels times for display ("09:00 WIB", "15:00 WIB (Lembur)"); SAP keeps

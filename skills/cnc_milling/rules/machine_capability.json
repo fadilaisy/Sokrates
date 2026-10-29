@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "facility": "PT Karawang Precision Manufacturing",
+  "note": "Which machine types may take over work from which. Demo plant assumption, not measured: in a real plant this comes from the SAP routing's alternative work centers. An order's own eligible_work_centers list, when present, overrides this table.",
+  "note_id": "Jenis mesin mana yang boleh mengambil alih pekerjaan dari jenis mana. Asumsi pabrik demo; di pabrik nyata diambil dari work center alternatif di routing SAP. Daftar eligible_work_centers pada order, jika ada, mengalahkan tabel ini.",
+  "can_take_work_from": {
+    "Vertical Machining Center": ["Vertical Machining Center", "Compact Machining Center"],
+    "5-Axis Machining Center": ["5-Axis Machining Center", "Vertical Machining Center", "Compact Machining Center"],
+    "Compact Machining Center": ["Compact Machining Center"],
+    "CNC Turning Center": ["CNC Turning Center"]
+  }
+}
