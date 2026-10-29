@@ -198,6 +198,9 @@ class DisruptionRequest(BaseModel):
     disruption_type: str = Field(..., example="BREAKDOWN")
     start_hour: int      = Field(..., ge=0, le=7, example=2)
     end_hour: int        = Field(..., ge=1, le=8, example=5)
+    # What broke, in the operator's words. Logged on the maintenance case when the
+    # what-if is approved, so the similar-case search can find a fix route.
+    symptom: Optional[str] = Field(None, max_length=200, example="Spindel bunyi kasar dan getaran tinggi")
 
 
 class DisruptionResponse(BaseModel):
@@ -592,6 +595,8 @@ async def post_disrupt(body: DisruptionRequest) -> DisruptionResponse:
         "start_hour":      body.start_hour,
         "end_hour":        body.end_hour,
     }
+    if body.symptom and body.symptom.strip():
+        disruption["symptom"] = body.symptom.strip()
 
     try:
         scenarios = _solver.solve(state, disruption)
@@ -732,6 +737,10 @@ async def post_disrupt_inject(body: DisruptionInjectRequest) -> DisruptionInject
         "sap_version_before": version_before,
         "sap_version_after": version_after,
     })
+    await _log_disruption_case(body.machine_id, body.disruption_type,
+                               f"status {old_status} → {body.new_status}", "drill",
+                               "Drill gangguan susulan", entry["id"],
+                               _FAULT_PHRASES.get(body.disruption_type.upper()))
 
     return DisruptionInjectResponse(
         success=True,
@@ -748,12 +757,54 @@ async def post_disrupt_inject(body: DisruptionInjectRequest) -> DisruptionInject
 )
 async def post_approve(body: ApproveRequest) -> ApproveResponse:
     res = await _approve_scenario(body, {"kind": "dashboard"})
+    d = _issued_scenarios.get(body.scenario_id, {}).get("disruption") or {}
+    if d.get("machine_id"):
+        hours = d["end_hour"] - d["start_hour"]
+        await _log_disruption_case(d["machine_id"], d.get("disruption_type", ""),
+                                   f"{hours} jam ({7 + d['start_hour']:02d}:00–{7 + d['end_hour']:02d}:00 WIB)",
+                                   "what-if", body.approved_by, res.receipt_id, d.get("symptom"))
     changes = _issued_scenarios.get(body.scenario_id, {}).get("gantt_changes") or []
     machine = next((c.get("from_machine") for c in changes), None)
     await _notify_mechanic({"name": "Tim mekanik"},
                            [mechanic_updates.approved(body.approved_by, machine, changes)],
                            {"update": "approved", "scenario_receipt_id": res.receipt_id, "machine_id": machine})
     return res
+
+
+# Fault types without a typed symptom, in the words the maintenance cases use.
+_FAULT_PHRASES = {
+    "MOTOR_OVERLOAD": "Motor overload, spindel motor overheat",
+}
+
+
+async def _log_disruption_case(machine_id: str, disruption_type: str, detail: str, source: str,
+                               reported_by: str, receipt_id: str, symptom: Optional[str] = None) -> None:
+    """
+    A what-if the supervisor approved (or a drill fault) is a real stop, so it opens a
+    case in the maintenance ledger like a PLC alarm does. Analysis alone stays a
+    simulation and logs nothing here. Agent runs open their own case. The case gets the
+    usual cited repair playbook, sent to the routed mechanic; it needs a symptom to find
+    similar cases, otherwise it says to escalate to a senior mechanic.
+    """
+    kind = disruption_type.upper()
+    label = "Perawatan terjadwal" if kind == "MAINTENANCE" else f"Gangguan {disruption_type}"
+    try:
+        res = await _agent.handle_new_entry({
+            "machine_id": machine_id,
+            "symptom": f"{symptom} — {label} {machine_id}, {detail}" if symptom else f"{label} {machine_id} — {detail}",
+            "text": f"{label} pada {machine_id}, {detail}. Jadwal dialihkan, receipt audit {receipt_id}.",
+            "source": source,
+            "severity": "WARNING" if kind == "MAINTENANCE" else "CRITICAL",
+            "language": "id",
+            "reported_by": reported_by,
+        }, use_llm=False)
+        # Same as any new case: the repair playbook goes to the routed mechanic.
+        flow = res["flow"]
+        flow["delivery"] = await _notify_mechanic(flow["mechanic"], flow["chat_messages"],
+                                                  {"maintenance_case_id": res["entry"].get("id"),
+                                                   "machine_id": machine_id})
+    except Exception as exc:  # the SAP write already happened; never fail it over the log
+        print(f"[maintenance] disruption case not logged: {exc}", file=sys.stderr)
 
 
 async def _approve_scenario(body: ApproveRequest, source: dict[str, Any]) -> ApproveResponse:

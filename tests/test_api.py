@@ -68,6 +68,48 @@ def test_inject_mutates_state_and_stale_approve_conflicts():
     assert r.json()["detail"]["error"] == "DriftError"
 
 
+def _case_ids(machine_id):
+    return {c["id"] for c in client.get("/api/maintenance/entries", params={"machine_id": machine_id}).json()}
+
+
+def test_approved_what_if_and_drill_open_maintenance_cases():
+    before = _case_ids("CNC-02")
+    d = client.post("/api/disrupt", json=DISRUPTION).json()
+    assert _case_ids("CNC-02") == before          # analysis alone stays a simulation
+    sc = next(s for s in d["scenarios"] if s["recommended"])
+    r = client.post("/api/approve", json={
+        "scenario_id": sc["id"], "scenario_data": sc,
+        "expected_sap_version": d["sap_version"], "approved_by": "Tester",
+    })
+    assert r.status_code == 200
+    new = [c for c in client.get("/api/maintenance/entries", params={"machine_id": "CNC-02"}).json()
+           if c["id"] not in before]
+    assert len(new) == 1
+    case = new[0]
+    assert case["source"] == "what-if" and case["status"] == "OPEN" and case["reported_by"] == "Tester"
+    assert "09:00–12:00" in case["symptom"] and r.json()["receipt_id"] in case["text"]
+
+    # With a symptom the case finds a fix route (cited playbook) from CNC-02's past cases.
+    client.post("/api/state/reset")
+    d = client.post("/api/disrupt", json={**DISRUPTION, "symptom": "Tekanan coolant rendah, pompa berisik"}).json()
+    sc = next(s for s in d["scenarios"] if s["recommended"])
+    r = client.post("/api/approve", json={
+        "scenario_id": sc["id"], "scenario_data": sc,
+        "expected_sap_version": d["sap_version"], "approved_by": "Tester",
+    })
+    assert r.status_code == 200
+    flow = client.get("/api/maintenance/flows", params={"limit": 1}).json()[0]
+    assert flow["case"]["symptom"].startswith("Tekanan coolant rendah")
+
+    before = _case_ids("CNC-03")
+    client.post("/api/disrupt/inject", json={
+        "machine_id": "CNC-03", "new_status": "FAULT", "disruption_type": "MOTOR_OVERLOAD",
+    })
+    drill = [c for c in client.get("/api/maintenance/entries", params={"machine_id": "CNC-03"}).json()
+             if c["id"] not in before]
+    assert len(drill) == 1 and drill[0]["source"] == "drill" and drill[0]["severity"] == "CRITICAL"
+
+
 def test_approve_requires_an_approver_name():
     d = client.post("/api/disrupt", json=DISRUPTION).json()
     sc = next(s for s in d["scenarios"] if s["recommended"])

@@ -1,4 +1,4 @@
-import { ChevronDown, TriangleAlert } from "lucide-react";
+import { ArrowLeft, ChevronDown, TriangleAlert } from "lucide-react";
 import { useState } from "react";
 import type { ReactNode } from "react";
 import React from "react";
@@ -183,6 +183,15 @@ function ScenarioCard({ s }: { s: Scenario }) {
   );
 }
 
+function BackButton() {
+  const { closeScenarios } = useCockpit();
+  return (
+    <Btn variant="secondary" className="self-start" onClick={closeScenarios}>
+      <ArrowLeft className="size-4" aria-hidden /> Kembali
+    </Btn>
+  );
+}
+
 function Proposing() {
   const { result } = useCockpit();
   if (!result) return null;
@@ -195,6 +204,7 @@ function Proposing() {
         label="PROPOSING"
         text={noImpact ? "Tidak ada order terdampak. Tidak perlu tindakan." : `3 skenario siap. Rekomendasi: ${best?.name_id ?? "-"}.`}
       />
+      <BackButton />
       {result.claude_summary && (
         <div className="rounded-md bg-page px-4 py-3">
           <p className="text-[14px] font-semibold text-muted-ink">Ringkasan AI (SAP AI Core)</p>
@@ -218,6 +228,7 @@ function Resolved() {
   return (
     <>
       <StateBanner tone="ok" label="RESOLVED" text={`Skenario ${LETTER[receipt.scenario_id] ?? ""} · ${receipt.scenario.name_id} diterapkan. Jadwal dan audit ledger diperbarui.`} />
+      <BackButton />
       <div className="grid gap-4 lg:grid-cols-[1fr_440px]">
         <div className="grid grid-cols-1 gap-4 rounded-lg bg-page p-5 sm:grid-cols-3">
           <Metric label="Biaya total" value={formatIDR(receipt.scenario.total_cost_idr)} />
