@@ -160,6 +160,8 @@ interface CockpitValue {
   toggleMute: () => void;
   toast: string | null;
   reset: () => Promise<void>;
+  /** Leave the scenario view (proposing / resolved) and go back to free play. SAP is not touched. */
+  closeScenarios: () => void;
   /** Reload SAP state, metrics and ledger (after a write made outside the store, e.g. an agent run). */
   reload: () => Promise<void>;
   showToast: (t: string) => void;
@@ -909,6 +911,15 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     [chatMode, recalc, machineSummary, runDisruption],
   );
 
+  const closeScenarios = useCallback(() => {
+    setPhase("normal");
+    setParams(null);
+    setResult(null);
+    setReceipt(null);
+    setApprovalFor(null);
+    setConflict(null);
+  }, []);
+
   // ── reset ────────────────────────────────────────────────────────────────
   const reset = useCallback(async () => {
     setResetting(true);
@@ -951,7 +962,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       plcMachines, plcPrediction, plcAction, plcBusy, approvePlcAction, setPlcAutonomy, setPlcLockout, planMaintenance,
       ledgerOpen, setLedgerOpen, verifying, verifyResult, verify,
       chatOpen, chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat,
-      muted, toggleMute, toast, reset, resetting, reload: load, showToast, agentRunPing,
+      muted, toggleMute, toast, reset, closeScenarios, resetting, reload: load, showToast, agentRunPing,
       // Phase 3: Skill Studio
       guideOpen, setGuideOpen,
       skillStudioOpen, setSkillStudioOpen, skillStudioState, setSkillStudioState,
@@ -963,7 +974,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       approvalFor, approving, conflict, approver, openApproval, closeApproval, confirmApproval, injecting, injectDrill, displayStatus, live, wsStatus,
       lastAnalysis, safety, sendTelemetry, runFullAnalysis, autoIn, plcOn, plcStatus, plcInfo, plcAlarm, plcOffline, startPlcScenario,
       plcMachines, plcPrediction, plcAction, plcBusy, approvePlcAction, setPlcAutonomy, setPlcLockout, planMaintenance, ledgerOpen, verifying, verifyResult, verify, chatOpen,
-      chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat, muted, toggleMute, toast, reset, resetting,
+      chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat, muted, toggleMute, toast, reset, closeScenarios, resetting,
       load, showToast, agentRunPing, guideOpen,
       skillStudioOpen, skillStudioState, skillStudioFormData, skillStudioDraft, skillStudioLintResult,
     ],
