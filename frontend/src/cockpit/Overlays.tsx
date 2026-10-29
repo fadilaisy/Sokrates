@@ -9,6 +9,7 @@ import { ChatVisual } from "./ChatVisual";
 import { CitedText, SourceCitations } from "./Citations";
 import { ledgerDetail, ledgerSubject } from "./ledgerDetail";
 import { DEFAULT_SIGNER, useCockpit } from "./store";
+import type { Page } from "./store";
 import { AssistantFace, Btn, Card, Mono, Spinner } from "./ui";
 
 function useEscape(onClose: () => void, active: boolean) {
@@ -514,6 +515,189 @@ export function ChatDrawer() {
         </button>
       </form>
       <p className="text-[14px] text-muted-ink">Chat hanya membaca data. Perubahan jadwal tetap lewat tombol “Setujui skenario ini”.</p>
+    </Drawer>
+  );
+}
+
+/* ── Guide drawer (plain-language help for visitors outside manufacturing) ── */
+type GuideTab = "page" | "tour" | "terms";
+
+const PAGE_GUIDE: Record<Page, { title: string; what: string; look: string[] }> = {
+  dashboard: {
+    title: "Dasbor",
+    what: "Ringkasan satu layar: berapa mesin yang jalan, mana yang bermasalah, dan apakah pabrik hari ini sesuai target.",
+    look: [
+      "Kartu Status Mesin: hijau = jalan, merah = rusak, abu-abu gelap = menganggur, cokelat = sedang dirawat.",
+      "Order hari ini: pesanan produksi yang sedang dikerjakan atau mengantre.",
+      "OEE: satu angka persen yang menilai seberapa produktif mesin (makin tinggi makin baik).",
+      "Tombol \"Buka cockpit\" membawa Anda ke ruang kendali untuk menangani gangguan.",
+    ],
+  },
+  cockpit: {
+    title: "Cockpit",
+    what: "Ruang kendali supervisor. Saat mesin rusak, agen AI menyusun ulang jadwal, dan manusia cukup menyetujui sebelum perubahan ditulis ke SAP.",
+    look: [
+      "Baris mesin CNC-01 sampai CNC-05, urut kiri ke kanan seperti di lantai pabrik.",
+      "Gantt: tiap batang adalah satu order di satu mesin. Garis putus-putus biru = usulan agen yang belum disetujui.",
+      "Panel PLC: data langsung dari mesin. Tombol skenario membuat alarm simulasi.",
+      "Agen SkillForge: langkah-langkah yang dikerjakan agen sendiri, lalu satu tombol Setujui.",
+      "Audit ledger (bawah): catatan semua aksi yang tidak bisa diubah diam-diam.",
+    ],
+  },
+  floor: {
+    title: "Lantai Pabrik",
+    what: "Denah sederhana Sel A: posisi mesin sesuai aslinya, dengan bahan masuk di kiri dan barang jadi keluar di kanan.",
+    look: [
+      "Warna tiap mesin sama dengan di Dasbor, jadi bisa dibaca dari jauh.",
+      "Area bergaris merah = zona bahaya, jaga jarak dari mesin yang sedang jalan.",
+    ],
+  },
+  maintenance: {
+    title: "Perawatan",
+    what: "Tempat teknisi mencatat kerusakan dan mencari cara memperbaikinya dari riwayat perbaikan sebelumnya.",
+    look: [
+      "Laporan Kerusakan Baru: tulis masalahnya dengan bahasa sehari-hari, agen mencari kasus serupa.",
+      "Playbook Terkirim: panduan perbaikan yang sudah dikirim ke mekanik lewat Telegram.",
+      "Cari Riwayat & Kode: ketik kode alarm (mis. ALM410) atau nomor part.",
+      "Stok suku cadang: stok di gudang; agen memesan part saat agent run disetujui.",
+    ],
+  },
+};
+
+const TOUR: { step: string; detail: string; page?: Page }[] = [
+  { step: "Lihat kondisi pabrik", detail: "Di Dasbor, perhatikan kartu Status Mesin. Semua hijau berarti produksi normal.", page: "dashboard" },
+  { step: "Buat mesin \"rusak\"", detail: "Di Cockpit, panel PLC, tekan salah satu tombol skenario. PLC simulasi akan memunculkan alarm seperti di pabrik sungguhan.", page: "cockpit" },
+  { step: "Biarkan agen bekerja", detail: "Agen mulai sendiri setelah hitung mundur (atau tekan \"Jalankan agen\"). Agen membaca alarm, mencari kasus serupa, memilih mekanik, memesan suku cadang, dan memindahkan order ke mesin lain." },
+  { step: "Setujui satu kali", detail: "Isi nama Anda lalu tekan Setujui. Hanya langkah ini yang menulis ke SAP; sebelumnya semua masih usulan." },
+  { step: "Periksa jejaknya", detail: "Buka Audit ledger di bawah Cockpit untuk melihat siapa menyetujui apa dan kapan. Tekan \"Muat ulang state\" untuk mengulang demo dari awal." },
+];
+
+const TERMS: { term: string; meaning: string }[] = [
+  { term: "Mesin CNC", meaning: "Mesin bubut/frais yang dikendalikan komputer untuk membentuk logam dengan presisi. Pabrik demo punya lima: CNC-01 sampai CNC-05." },
+  { term: "Shift", meaning: "Satu giliran kerja. Demo memakai Shift 1, pukul 07:00 sampai 15:00 WIB." },
+  { term: "Order / work order", meaning: "Perintah produksi: buat sejumlah barang tertentu di mesin tertentu sebelum tenggat. Seperti satu tiket pesanan." },
+  { term: "Gantt", meaning: "Diagram jadwal: sumbu mendatar adalah jam, tiap baris satu mesin, tiap batang satu order." },
+  { term: "SAP / ERP", meaning: "Sistem administrasi utama perusahaan yang menyimpan jadwal, stok, dan pesanan. Di demo ini memakai SAP tiruan (mock)." },
+  { term: "PLC", meaning: "Komputer kecil di dalam mesin yang membaca sensor (suhu, getaran) dan menyalakan alarm. SkillForge membaca datanya; pengaman tetap di PLC." },
+  { term: "Telemetri", meaning: "Angka sensor yang dikirim terus-menerus dari mesin, misalnya suhu spindle atau getaran." },
+  { term: "Alarm (kode ALM)", meaning: "Peringatan dari mesin dengan kode, mis. ALM410. Kode ini dipakai untuk mencari cara perbaikan di riwayat." },
+  { term: "Status mesin", meaning: "RUNNING = jalan, FAULT = rusak, IDLE = menganggur, MAINTENANCE = sedang dirawat. Selalu ada warna dan tulisannya." },
+  { term: "OEE", meaning: "Overall Equipment Effectiveness: ketersediaan × performa × kualitas. Kira-kira \"berapa persen waktu mesin benar-benar menghasilkan barang bagus\"." },
+  { term: "Downtime", meaning: "Waktu mesin berhenti padahal seharusnya berproduksi." },
+  { term: "SLA & penalti", meaning: "Janji tenggat ke pelanggan. Telat berarti denda (penalti SLA) dalam rupiah." },
+  { term: "Lembur & changeover", meaning: "Lembur = biaya jam kerja tambahan. Changeover = waktu dan biaya mengganti setelan mesin untuk produk lain." },
+  { term: "What-if", meaning: "Simulasi \"bagaimana jika\": misalnya CNC-02 rusak 3 jam, lalu sistem menghitung jadwal pengganti dan biayanya." },
+  { term: "Reroute", meaning: "Memindahkan order dari mesin yang rusak ke mesin lain yang masih bisa." },
+  { term: "Lockout", meaning: "Kunci pengaman saat mesin diperbaiki, supaya tidak bisa dinyalakan. Saat lockout aktif, SkillForge menolak menulis ke mesin itu." },
+  { term: "Suku cadang & PR", meaning: "Part pengganti di gudang. Reorder point = batas stok minimum. PR (purchase requisition) = permintaan pembelian part." },
+  { term: "Playbook", meaning: "Langkah perbaikan yang disusun dari kasus serupa dan SOP, lalu dikirim ke mekanik." },
+  { term: "Agen AI", meaning: "AI yang menjalankan beberapa langkah sendiri berturut-turut. Manusia hanya menyetujui langkah yang tidak bisa dibatalkan (menulis ke SAP)." },
+  { term: "Skill Studio", meaning: "Tempat ahli senior \"mengajarkan\" pengalamannya menjadi skill yang bisa dipakai agen, lengkap dengan uji coba sebelum disetujui." },
+  { term: "Audit ledger", meaning: "Buku catatan digital: setiap aksi tercatat dengan nama penyetuju dan sidik jari (hash), jadi perubahan diam-diam akan ketahuan." },
+  { term: "Muat ulang state", meaning: "Tombol di kanan atas yang mengembalikan data demo ke kondisi awal, supaya demo bisa diulang." },
+];
+
+export function GuideDrawer() {
+  const { guideOpen, setGuideOpen, page, setPage } = useCockpit();
+  const [tab, setTab] = useState<GuideTab>("page");
+  const [q, setQ] = useState("");
+  const close = () => setGuideOpen(false);
+  const g = PAGE_GUIDE[page];
+  const needle = q.trim().toLowerCase();
+  const terms = TERMS.filter((t) => !needle || `${t.term} ${t.meaning}`.toLowerCase().includes(needle));
+  const tabs: { id: GuideTab; label: string }[] = [
+    { id: "page", label: "Halaman ini" },
+    { id: "tour", label: "Coba 3 menit" },
+    { id: "terms", label: "Kamus istilah" },
+  ];
+
+  return (
+    <Drawer open={guideOpen} onClose={close} width={520} label="Panduan SkillForge">
+      <div className="flex items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <h2 className="text-[22px] font-bold">Panduan SkillForge</h2>
+          <p className="text-[15px] text-muted-ink">Untuk Anda yang baru mengenal dunia pabrik.</p>
+        </div>
+        <CloseBtn onClick={close} />
+      </div>
+
+      <p className="rounded-md bg-page px-4 py-3 text-[15px]">
+        Bayangkan pabrik dengan lima mesin. Saat satu mesin rusak, biasanya supervisor harus menelepon mekanik, mengecek stok part, dan menyusun ulang jadwal sendiri.
+        SkillForge membiarkan <b>agen AI</b> mengerjakan semua itu, lalu manusia cukup <b>menyetujui sekali</b>.
+      </p>
+
+      <div role="tablist" aria-label="Bagian panduan" className="flex flex-wrap gap-2">
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            aria-selected={tab === t.id}
+            onClick={() => setTab(t.id)}
+            className={cn(
+              "min-h-12 rounded-md border px-4 text-[15px] font-semibold",
+              tab === t.id ? "border-navy bg-navy text-white" : "border-line bg-surface text-navy hover:bg-page",
+            )}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="-mx-6 min-h-0 flex-1 overflow-y-auto px-6">
+        {tab === "page" && (
+          <div className="flex flex-col gap-3">
+            <h3 className="text-[18px] font-bold">Anda sedang di: {g.title}</h3>
+            <p className="text-[16px]">{g.what}</p>
+            <p className="text-[15px] font-semibold">Yang perlu diperhatikan:</p>
+            <ul className="flex list-disc flex-col gap-2 pl-5 text-[15px]">
+              {g.look.map((l) => <li key={l}>{l}</li>)}
+            </ul>
+            <p className="text-[14px] text-muted-ink">Istilah asing? Buka tab Kamus istilah. Pertanyaan lain bisa diketik ke AI Supervisor (tombol bulat di kanan bawah).</p>
+          </div>
+        )}
+
+        {tab === "tour" && (
+          <ol className="flex flex-col gap-3">
+            {TOUR.map((t, i) => (
+              <li key={t.step} className="flex gap-3 rounded-md border border-line p-3">
+                <span className="grid size-8 shrink-0 place-items-center rounded-full bg-navy text-[15px] font-bold text-white">{i + 1}</span>
+                <div className="flex min-w-0 flex-1 flex-col gap-1">
+                  <p className="text-[16px] font-semibold">{t.step}</p>
+                  <p className="text-[15px]">{t.detail}</p>
+                  {t.page && t.page !== page && (
+                    <button type="button" onClick={() => { setPage(t.page!); close(); }} className="min-h-12 self-start text-[15px] font-semibold text-accent-blue hover:underline">
+                      Buka {PAGE_GUIDE[t.page].title} <ArrowRight className="inline size-4" aria-hidden />
+                    </button>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ol>
+        )}
+
+        {tab === "terms" && (
+          <div className="flex flex-col gap-3">
+            <input
+              type="search"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Cari istilah, mis. PLC atau OEE"
+              aria-label="Cari istilah"
+              className="min-h-12 rounded-md border border-line px-3 text-[16px]"
+            />
+            <dl className="flex flex-col gap-3">
+              {terms.map((t) => (
+                <div key={t.term} className="rounded-md border border-line p-3">
+                  <dt className="text-[16px] font-bold">{t.term}</dt>
+                  <dd className="mt-1 text-[15px]">{t.meaning}</dd>
+                </div>
+              ))}
+              {terms.length === 0 && <p className="text-[15px] text-muted-ink">Tidak ada istilah yang cocok. Coba tanyakan ke AI Supervisor.</p>}
+            </dl>
+          </div>
+        )}
+      </div>
     </Drawer>
   );
 }
