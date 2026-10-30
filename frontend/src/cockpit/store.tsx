@@ -30,6 +30,11 @@ export const DEMO_DISRUPTION: DisruptionParams = {
   machine_id: "CNC-02", disruption_type: "BREAKDOWN", start_hour: 2, end_hour: 5,
   symptom: "Spindel bunyi kasar dan getaran tinggi",
 };
+// The drill's CNC-03 fault, over the hours of its two orders (WO-2025-004 09:00, WO-2025-007 11:00).
+const DRILL_DISRUPTION: DisruptionParams = {
+  machine_id: "CNC-03", disruption_type: "MOTOR_OVERLOAD", start_hour: 2, end_hour: 5,
+  symptom: "Motor overload, spindel motor overheat",
+};
 /** Faults CNC-02 has had before (maintenance ledger), so the what-if case finds a fix route. */
 export const WHAT_IF_SYMPTOMS = [
   "Spindel bunyi kasar dan getaran tinggi",
@@ -741,15 +746,17 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       showToast(
         result
           ? `Gangguan susulan diinjeksikan: CNC-03 FAULT (SAP v${r.sap_version_before} → v${r.sap_version_after}). Skenario lama basi — setujui untuk melihat 409 + hitung ulang otomatis.`
-          : `Gangguan susulan diinjeksikan: CNC-03 FAULT (SAP v${r.sap_version_before} → v${r.sap_version_after}).`,
+          : `Gangguan susulan diinjeksikan: CNC-03 FAULT (SAP v${r.sap_version_before} → v${r.sap_version_after}). Skenario pemulihan dihitung.`,
       );
+      // With no scenarios on screen, the fault alone left nothing to choose: price CNC-03's orders now.
+      if (!result) await runDisruption(DRILL_DISRUPTION);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       showToast("Injeksi gangguan gagal. Periksa koneksi ke backend.");
     } finally {
       setInjecting(false);
     }
-  }, [load, result, showToast]);
+  }, [load, result, showToast, runDisruption]);
 
   const repairMachine = useCallback(async (machineId: string) => {
     try {
