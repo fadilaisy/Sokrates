@@ -27,6 +27,10 @@ export function MachineStrip() {
               <h3 className="text-[24px] font-bold">{w.id}</h3>
               {alert && <span className="text-[14px] font-semibold text-fault">perlu tindakan</span>}
             </div>
+            <p className="-mt-2 text-[14px] leading-snug text-muted-ink" title={`${w.name} · ${w.machine_type}`}>
+              <span className="block truncate">{w.name}</span>
+              <span className="block truncate">{w.machine_type}</span>
+            </p>
             <StatusBadge status={st} />
             <Mono className="text-[15px]">{offline ? "– · –" : `${fmt1(temp)}°C · ${fmt1(vib)} mm/s`}</Mono>
             <Mono className={cn("truncate text-[14px]", st === "DISRUPTED" ? "text-warn" : "text-muted-ink")}>

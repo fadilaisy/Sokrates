@@ -24,6 +24,20 @@ const BAR_STYLE: Record<BarKind, string> = {
   pending: "bg-surface border border-dashed border-disabled text-muted-ink",
 };
 
+// What each bar style means, for judges and visitors reading the chart cold.
+const LEGEND: Record<BarKind, string> = {
+  order: "Order terjadwal di SAP",
+  rescheduled: "Order sudah dipindah (disetujui)",
+  pending: "Posisi lama (menunggu)",
+  proposed: "Usulan baru (belum disetujui)",
+  disruption: "Jendela gangguan",
+  maintenance: "Perawatan terjadwal",
+};
+
+/** "WO-2025-004" → "WO-004"; "Gearbox Housing Cover — Astra" → "Gearbox Housing Cover". */
+const shortId = (id: string) => id.replace(/^WO-\d{4}-/, "WO-");
+const shortProduct = (name?: string) => (name ?? "").split(" — ")[0];
+
 function lanes(bars: Bar[]): Bar[][] {
   const sorted = [...bars].sort((a, b) => a.start - b.start);
   const out: Bar[][] = [];
@@ -49,6 +63,7 @@ export function ShiftGantt({
   const machines = state?.work_centers ?? [];
   const orders = ordersToday(state);
   const changed = new Set((changes ?? []).map((c) => c.order_id));
+  const product = new Map((state?.production_orders ?? []).map((o) => [o.id, shortProduct(o.product_name)]));
 
   const rows = machines.map((w) => {
     const bars: Bar[] = [];
@@ -61,7 +76,7 @@ export function ShiftGantt({
         key: o.id,
         start: s,
         end: e,
-        label: pend ? `${o.id} (tertunda)` : o.id,
+        label: `${shortId(o.id)} · ${shortProduct(o.product_name)}${pend ? " (tertunda)" : ""}`,
         kind: pend ? "pending" : o.status === "RESCHEDULED" ? "rescheduled" : "order",
         title: `${o.id}${o.sap_order_number ? ` (SAP ${o.sap_order_number})` : ""} · ${o.product_name} · ${o.customer}`,
       });
@@ -82,21 +97,27 @@ export function ShiftGantt({
       const e = parseHour(c.new_end_time);
       if (s == null || e == null) continue;
       const ot = isOvertimeLabel(c.new_start_time) ? " · lembur" : "";
-      bars.push({ key: "p-" + c.order_id, start: s, end: e, label: `${c.order_id} · usulan${ot}`, kind: "proposed", title: `${c.from_machine} → ${c.to_machine}` });
+      const move = c.from_machine !== c.to_machine ? `dari ${c.from_machine}` : "digeser";
+      bars.push({
+        key: "p-" + c.order_id, start: s, end: e, kind: "proposed",
+        label: `${shortId(c.order_id)} · ${move}${ot}`,
+        title: `${c.order_id} · ${product.get(c.order_id) ?? ""} · ${c.from_machine} → ${c.to_machine}`,
+      });
     }
-    return { id: w.id, lanes: lanes(bars) };
+    return { id: w.id, name: w.name, type: w.machine_type, lanes: lanes(bars) };
   });
 
   const latest = Math.max(SHIFT_END, ...rows.flatMap((r) => r.lanes.flat().map((b) => b.end)));
   const end = latest > SHIFT_END ? NIGHT_END : SHIFT_END;
   const span = end - SHIFT_START;
   const pct = (h: number) => ((Math.min(Math.max(h, SHIFT_START), end) - SHIFT_START) / span) * 100;
+  const kinds = new Set<BarKind>(["order", ...rows.flatMap((r) => r.lanes.flat().map((b) => b.kind))]);
   const ticks = Array.from({ length: span + 1 }, (_, i) => SHIFT_START + i).filter((h) => span <= 8 || h % 2 === 1);
 
   return (
     <div className="-mx-1 overflow-x-auto px-1">
     <div className="flex min-w-[720px] flex-col gap-2">
-      <div className="grid grid-cols-[88px_1fr] items-end">
+      <div className="grid grid-cols-[136px_1fr] items-end">
         <span />
         <div className="relative h-6">
           {ticks.map((h) => (
@@ -109,9 +130,10 @@ export function ShiftGantt({
 
       <div className="flex flex-col gap-1.5" role="table" aria-label="Jadwal shift per mesin">
         {rows.map((r) => (
-          <div key={r.id} role="row" className="grid grid-cols-[88px_1fr] items-stretch">
-            <span role="rowheader" className="flex items-center font-mono text-[15px] font-medium">
-              {r.id}
+          <div key={r.id} role="row" className="grid grid-cols-[136px_1fr] items-stretch">
+            <span role="rowheader" className="flex min-w-0 flex-col justify-center pr-2" title={r.type}>
+              <span className="font-mono text-[15px] font-medium">{r.id}</span>
+              <span className="truncate text-[13px] text-muted-ink">{r.name}</span>
             </span>
             <div className="relative rounded-sm bg-[#f4f6f9]" style={{ height: r.lanes.length * 36 + 8 }}>
               {end > SHIFT_END && (
@@ -147,8 +169,23 @@ export function ShiftGantt({
         {rows.length === 0 && <p className="py-6 text-center text-[15px] text-muted-ink">Memuat jadwal dari SAP…</p>}
       </div>
 
+
       {note && <p className="text-[15px]">{note}</p>}
     </div>
+      <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5 text-[14px] text-muted-ink" aria-label="Keterangan warna">
+        {(Object.keys(LEGEND) as BarKind[]).filter((k) => kinds.has(k)).map((k) => (
+          <li key={k} className="flex items-center gap-1.5">
+            <span className={cn("inline-block h-3.5 w-6 rounded-sm", BAR_STYLE[k])} aria-hidden />
+            {LEGEND[k]}
+          </li>
+        ))}
+        {end > SHIFT_END && (
+          <li className="flex items-center gap-1.5">
+            <span className="inline-block h-3.5 w-6 rounded-sm border border-line bg-[repeating-linear-gradient(135deg,transparent_0_3px,rgba(72,98,132,.25)_3px_6px)]" aria-hidden />
+            Shift lembur 15:00–23:00
+          </li>
+        )}
+      </ul>
     </div>
   );
 }
