@@ -109,6 +109,8 @@ interface CockpitValue {
   // failure drill (Phase 4): inject a real second disruption via EXTERNAL_CHANGE
   injecting: boolean;
   injectDrill: () => Promise<void>;
+  // clear a FAULT once the machine is repaired (the drill and approved breakdowns leave it red)
+  repairMachine: (machineId: string) => Promise<void>;
   // machines
   displayStatus: (machineId: string, raw: string) => MachineStatus;
   live: Record<string, Record<string, number>>;
@@ -749,6 +751,18 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     }
   }, [load, result, showToast]);
 
+  const repairMachine = useCallback(async (machineId: string) => {
+    try {
+      const r = await api.injectDisruption({ machine_id: machineId, new_status: "RUNNING", disruption_type: "REPAIRED" });
+      await load();
+      setConflict(null);
+      showToast(`${machineId} ditandai sudah diperbaiki dan kembali RUNNING (SAP v${r.sap_version_before} → v${r.sap_version_after}).`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      showToast(`${machineId} gagal ditandai diperbaiki. Periksa koneksi ke backend.`);
+    }
+  }, [load, showToast]);
+
   // ── machine status as the supervisor should see it right now ─────────────
   const displayStatus = useCallback(
     (machineId: string, raw: string): MachineStatus => {
@@ -881,9 +895,16 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       if (q.includes("status")) {
         push({ from: "ai", text: machineSummary() });
       } else if (q.includes("what-if") || q.includes("rusak")) {
-        push({ from: "ai", text: `Menjalankan simulasi: CNC-02 BREAKDOWN ${windowLabel(2, 5)}.` });
+        // Simulate the machine the user named ("cnc03", "CNC-03", "cnc 3"); the demo machine otherwise.
+        const n = q.match(/cnc[\s-]*0?([1-9])/);
+        const named = n ? `CNC-0${n[1]}` : null;
+        const known = named && state?.work_centers.some((w) => w.id === named) ? named : null;
+        const p = known && known !== DEMO_DISRUPTION.machine_id
+          ? { ...DEMO_DISRUPTION, machine_id: known, symptom: undefined }
+          : DEMO_DISRUPTION;
+        push({ from: "ai", text: `Menjalankan simulasi: ${p.machine_id} BREAKDOWN ${windowLabel(p.start_hour, p.end_hour)}.` });
         setChatOpen(false);
-        await runDisruption(DEMO_DISRUPTION);
+        await runDisruption(p);
       } else if (q.includes("ledger") || q.includes("audit")) {
         setChatOpen(false);
         setLedgerOpen(true);
@@ -908,7 +929,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    [chatMode, recalc, machineSummary, runDisruption],
+    [chatMode, recalc, machineSummary, runDisruption, state],
   );
 
   const closeScenarios = useCallback(() => {
@@ -955,7 +976,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       page, setPage,
       phase, detectStep, params, result, receipt, runDisruption,
       approvalFor, approving, conflict, approver, setApprover, openApproval, closeApproval, confirmApproval,
-      injecting, injectDrill,
+      injecting, injectDrill, repairMachine,
       displayStatus, live,
       wsStatus, lastAnalysis, safety, sendTelemetry, runFullAnalysis, autoIn,
       plcOn, setPlcOn, plcStatus, plcInfo, plcAlarm, plcOffline, startPlcScenario,
@@ -971,7 +992,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     }),
     [
       state, metrics, online, aiConfigured, error, ledger, sapVersion, page, phase, detectStep, params, result, receipt, runDisruption,
-      approvalFor, approving, conflict, approver, openApproval, closeApproval, confirmApproval, injecting, injectDrill, displayStatus, live, wsStatus,
+      approvalFor, approving, conflict, approver, openApproval, closeApproval, confirmApproval, injecting, injectDrill, repairMachine, displayStatus, live, wsStatus,
       lastAnalysis, safety, sendTelemetry, runFullAnalysis, autoIn, plcOn, plcStatus, plcInfo, plcAlarm, plcOffline, startPlcScenario,
       plcMachines, plcPrediction, plcAction, plcBusy, approvePlcAction, setPlcAutonomy, setPlcLockout, planMaintenance, ledgerOpen, verifying, verifyResult, verify, chatOpen,
       chatMode, recalcVersions, messages, chatBusy, openChat, closeChat, sendChat, muted, toggleMute, toast, reset, closeScenarios, resetting,
