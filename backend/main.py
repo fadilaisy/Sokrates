@@ -756,9 +756,12 @@ async def post_disrupt_inject(body: DisruptionInjectRequest) -> DisruptionInject
     summary="Approve a recovery scenario and apply to SAP state",
 )
 async def post_approve(body: ApproveRequest) -> ApproveResponse:
-    res = await _approve_scenario(body, {"kind": "dashboard"})
     d = _issued_scenarios.get(body.scenario_id, {}).get("disruption") or {}
-    if d.get("machine_id"):
+    # A machine already in FAULT (the drill) had its case opened when it went down.
+    already_down = next((w.get("status") for w in _sap.get_state().get("work_centers", [])
+                         if w["id"] == d.get("machine_id")), None) == "FAULT"
+    res = await _approve_scenario(body, {"kind": "dashboard"})
+    if d.get("machine_id") and not already_down:
         hours = d["end_hour"] - d["start_hour"]
         await _log_disruption_case(d["machine_id"], d.get("disruption_type", ""),
                                    f"{hours} jam ({7 + d['start_hour']:02d}:00–{7 + d['end_hour']:02d}:00 WIB)",

@@ -110,6 +110,26 @@ def test_approved_what_if_and_drill_open_maintenance_cases():
     assert len(drill) == 1 and drill[0]["source"] == "drill" and drill[0]["severity"] == "CRITICAL"
 
 
+def test_drill_fault_gets_priced_scenarios_without_a_second_case():
+    # The drill alone leaves CNC-03 down; the cockpit then prices its orders.
+    client.post("/api/disrupt/inject", json={
+        "machine_id": "CNC-03", "new_status": "FAULT", "disruption_type": "MOTOR_OVERLOAD",
+    })
+    before = _case_ids("CNC-03")
+    d = client.post("/api/disrupt", json={
+        "machine_id": "CNC-03", "disruption_type": "MOTOR_OVERLOAD", "start_hour": 2, "end_hour": 5,
+        "symptom": "Motor overload, spindel motor overheat",
+    }).json()
+    assert len(d["scenarios"]) == 3
+    sc = next(s for s in d["scenarios"] if s["recommended"])
+    r = client.post("/api/approve", json={
+        "scenario_id": sc["id"], "scenario_data": sc,
+        "expected_sap_version": d["sap_version"], "approved_by": "Tester",
+    })
+    assert r.status_code == 200
+    assert _case_ids("CNC-03") == before          # the drill already opened its case
+
+
 def test_approve_requires_an_approver_name():
     d = client.post("/api/disrupt", json=DISRUPTION).json()
     sc = next(s for s in d["scenarios"] if s["recommended"])
