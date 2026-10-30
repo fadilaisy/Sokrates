@@ -449,9 +449,7 @@ export function ChatDrawer() {
                   <Spinner className="size-5" /> {m.text}
                 </span>
               ) : (
-                <span className="whitespace-pre-line">
-                  <CitedText text={m.text} />
-                </span>
+                <CitedText text={m.text} />
               )}
               {m.visual && <ChatVisual html={m.visual} />}
               <SourceCitations sources={m.sources} className="mt-3" />

@@ -3,6 +3,7 @@ import { Bot, CircleCheck, Circle, CircleMinus, CircleX, ShieldCheck } from "luc
 import { api, type AgentRun, type AgentRunStep } from "../lib/api";
 import { cn } from "../lib/utils";
 import { useCockpit } from "./store";
+import { AiText } from "./AiText";
 import { Btn, Card, Mono, Spinner } from "./ui";
 
 const ACTIVE = new Set(["planning", "running"]);
@@ -130,7 +131,7 @@ export function AgentRunPanel() {
               <p className="text-[14px] font-semibold text-muted-ink">
                 Ringkasan agen{run.summary_model ? ` (${run.summary_model} · SAP AI Core)` : ""}
               </p>
-              <p className="text-[16px]">{run.summary}</p>
+              <AiText text={run.summary} className="text-[16px]" />
             </div>
           )}
           {run.status === "awaiting_approval" && (
