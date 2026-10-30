@@ -864,9 +864,16 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       if (q.includes("status")) {
         push({ from: "ai", text: machineSummary() });
       } else if (q.includes("what-if") || q.includes("rusak")) {
-        push({ from: "ai", text: `Menjalankan simulasi: CNC-02 BREAKDOWN ${windowLabel(2, 5)}.` });
+        // Simulate the machine the user named ("cnc03", "CNC-03", "cnc 3"); the demo machine otherwise.
+        const n = q.match(/cnc[\s-]*0?([1-9])/);
+        const named = n ? `CNC-0${n[1]}` : null;
+        const known = named && state?.work_centers.some((w) => w.id === named) ? named : null;
+        const p = known && known !== DEMO_DISRUPTION.machine_id
+          ? { ...DEMO_DISRUPTION, machine_id: known, symptom: undefined }
+          : DEMO_DISRUPTION;
+        push({ from: "ai", text: `Menjalankan simulasi: ${p.machine_id} BREAKDOWN ${windowLabel(p.start_hour, p.end_hour)}.` });
         setChatOpen(false);
-        await runDisruption(DEMO_DISRUPTION);
+        await runDisruption(p);
       } else if (q.includes("ledger") || q.includes("audit")) {
         setChatOpen(false);
         setLedgerOpen(true);
@@ -891,7 +898,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    [chatMode, recalc, machineSummary, runDisruption],
+    [chatMode, recalc, machineSummary, runDisruption, state],
   );
 
   // ── reset ────────────────────────────────────────────────────────────────
