@@ -9,7 +9,7 @@ import { Btn, Card, Mono, StatusBadge } from "./ui";
 
 /** CNC-01 → CNC-05 left to right, same order as the physical line. */
 export function MachineStrip() {
-  const { state, displayStatus, live } = useCockpit();
+  const { state, displayStatus, live, repairMachine } = useCockpit();
   const machines = state?.work_centers ?? [];
   return (
     <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
@@ -32,6 +32,11 @@ export function MachineStrip() {
             <Mono className={cn("truncate text-[14px]", st === "DISRUPTED" ? "text-warn" : "text-muted-ink")}>
               {st === "DISRUPTED" ? "UNDER ANALYSIS · cnc_milling" : "skill: cnc_milling"}
             </Mono>
+            {w.status.toUpperCase() === "FAULT" && (
+              <Btn variant="secondary" className="min-h-10 px-3 text-[14px]" onClick={() => void repairMachine(w.id)}>
+                Tandai sudah diperbaiki
+              </Btn>
+            )}
           </Card>
         );
       })}
