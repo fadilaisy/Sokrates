@@ -3373,7 +3373,9 @@ def _make_plc_driver() -> Any:
         # Never fall back to the simulator: fake temperatures on a plant screen are worse than no start.
         raise RuntimeError(f"PLC_DRIVER={kind!r} is not supported; use one of: {', '.join(_PLC_DRIVERS)}")
     if kind == "simulated":
-        return SimulatedPLC(ramp_s=float(os.getenv("PLC_RAMP_S", "120")))
+        # PLC_ALARM_AFTER_S paces every scenario to alarm after that many seconds (0 = use PLC_RAMP_S as is).
+        return SimulatedPLC(ramp_s=float(os.getenv("PLC_RAMP_S", "120")),
+                            alarm_after_s=float(os.getenv("PLC_ALARM_AFTER_S", "10")))
     missing = [v for v in ("PLC_OPCUA_ENDPOINT", "PLC_OPCUA_MAP") if not os.getenv(v, "").strip()]
     if missing:
         raise RuntimeError(f"PLC_DRIVER=opcua needs {' and '.join(missing)} (see .env.example and docs/PLC.md)")
@@ -3705,7 +3707,9 @@ async def _plc_loop() -> None:
     peak: dict[tuple[str, str], str] = {}
     alarms: dict[str, Optional[str]] = {}
     predicted_at: dict[tuple[str, str], float] = {}
-    predictor = TrendPredictor(horizon_s=float(os.getenv("PLC_PREDICT_HORIZON_S", "600")))
+    # Five scans are enough for a fit, so the prediction lands well before a 10 s scenario alarms.
+    predictor = TrendPredictor(horizon_s=float(os.getenv("PLC_PREDICT_HORIZON_S", "600")),
+                               min_points=int(os.getenv("PLC_PREDICT_MIN_POINTS", "5")))
     while True:
         try:
             gen = _plc_generation()

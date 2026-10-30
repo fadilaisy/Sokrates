@@ -605,3 +605,15 @@ def test_autonomy_runs_with_no_cockpit_open_and_once_for_many_viewers(fresh_plc,
                 assert frames[0]["event"] == "plc_scan"
         assert writes() == ["PLC_WRITE_APPLIED"]
         c.post("/api/plc/scenario", json={"scenario": "normal"})
+
+
+@pytest.mark.parametrize("scenario_id", ["cnc04_overheat", "cnc01_bearing", "cnc02_coolant"])
+def test_alarm_after_s_paces_every_scenario_to_alarm_on_time(scenario_id):
+    clock = FakeClock()
+    plc = SimulatedPLC(ramp_s=120, alarm_after_s=10, clock=clock, noise=False)
+    plc.start(scenario_id)
+    mid = SCENARIOS[scenario_id].machine_id
+    clock.t += 9.5
+    assert _by_id(plc.scan(LINE))[mid]["alarm"] is None
+    clock.t += 1.0
+    assert _by_id(plc.scan(LINE))[mid]["alarm"]["code"] == SCENARIOS[scenario_id].alarm_code

@@ -11,9 +11,11 @@ plc_adapter/driver.py for the shape). Baselines come from the SAP mock's
 `telemetry` block, so the simulated line matches the cockpit.
 
 A scenario makes one machine creep steadily towards a fault over `ramp_s`
-seconds (slow enough that the trend is visible well before the alarm) and raise the alarm
+seconds and raise the alarm
 code a real controller would show — the same codes as the maintenance seed
-cases, so the alarm finds past fixes. Writing the scenario's mitigating
+cases, so the alarm finds past fixes. With `alarm_after_s` set the creep is
+paced instead so that every scenario reaches its alarm after that many seconds
+(the demo uses ~10 s: the trend prediction shows first, then the alarm). Writing the scenario's mitigating
 setpoint (e.g. feed override down to 50% for an overheating spindle) makes the
 tag settle back towards normal. While the scenario machine is stopped (e-stop
 or feed hold) the fault stops progressing and the reading holds where it was.
@@ -95,11 +97,13 @@ class SimulatedPLC:
         self,
         ramp_s: float = 120.0,
         *,
+        alarm_after_s: Optional[float] = None,
         clock: Callable[[], float] = time.monotonic,
         noise: bool = True,
         seed: Optional[int] = None,
     ) -> None:
         self.ramp_s = ramp_s
+        self.alarm_after_s = alarm_after_s if alarm_after_s and alarm_after_s > 0 else None
         self._clock = clock
         self._noise = noise
         self._rng = random.Random(seed)
@@ -113,9 +117,9 @@ class SimulatedPLC:
         self._setpoints: dict[str, dict[str, float]] = {}
         self._estop: dict[str, bool] = {}
         self._lockout: dict[str, bool] = {}
-        # When the scenario machine got its mitigating write (clock time), and how far the fault had got.
+        # When the scenario machine got its mitigating write (clock time), and how far the fault had got (active seconds).
         self._mitigated_at: Optional[float] = None
-        self._mitigated_p = 0.0
+        self._mitigated_s = 0.0
         # Time the scenario machine spent stopped, during which the fault does not progress.
         self._held_total = 0.0
         self._held_since: Optional[float] = None
@@ -133,6 +137,7 @@ class SimulatedPLC:
                 "run": self._run,
                 "elapsed_s": round(elapsed, 1),
                 "ramp_s": self.ramp_s,
+                "alarm_after_s": self.alarm_after_s,
                 "mitigated": self._mitigated_at is not None,
                 "scenarios": [{"id": s.id, "label": s.label, "machine_id": s.machine_id,
                                "alarm_code": s.alarm_code} for s in SCENARIOS.values()],
@@ -168,7 +173,7 @@ class SimulatedPLC:
             if (sc.machine_id == machine_id and sc.mitigation and self._mitigated_at is None
                     and _satisfies(sc.mitigation, tag, float(value))):
                 self._mitigated_at = self._clock()
-                self._mitigated_p = self._progress(self._mitigated_at)
+                self._mitigated_s = self._active_s(self._mitigated_at)
             self._update_hold()
             return sp[tag]
 
@@ -186,18 +191,23 @@ class SimulatedPLC:
             self._held_total += now - self._held_since
             self._held_since = None
 
-    def _progress(self, at: float) -> float:
-        """How far (0..1) the fault has got at clock time `at`, not counting time the machine was stopped."""
+    def _active_s(self, at: float) -> float:
+        """Seconds the fault has been progressing at clock time `at`, not counting time the machine was stopped."""
         held = self._held_total + (max(0.0, at - self._held_since) if self._held_since is not None else 0.0)
-        return min(1.0, max(0.0, (at - self._started - held) / self.ramp_s))
+        return max(0.0, at - self._started - held)
 
     def _jitter(self, tag: str) -> float:
         amp = TAG_NOISE.get(tag, 0.0)
         return self._rng.uniform(-amp, amp) if self._noise and amp else 0.0
 
-    def _drift(self, start: float, p: float) -> float:
-        """Scenario tag value at progress `p`: a steady creep from baseline to the fault value."""
-        return start + (self._scenario.target - start) * p
+    def _drift(self, start: float, active_s: float) -> float:
+        """Scenario tag value after `active_s` seconds: a steady creep from baseline to the fault value."""
+        sc = self._scenario
+        ramp_s = self.ramp_s
+        if self.alarm_after_s and sc.target != start and (sc.alarm_at - start) * (sc.target - start) > 0:
+            # Same steady creep, paced so the alarm value is crossed after alarm_after_s seconds.
+            ramp_s = self.alarm_after_s * (sc.target - start) / (sc.alarm_at - start)
+        return start + (sc.target - start) * min(1.0, active_s / ramp_s)
 
     def scan(self, work_centers: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """One PLC scan across the line: tags, setpoints, interlocks and the active alarm per machine."""
@@ -227,9 +237,9 @@ class SimulatedPLC:
                     start = base[sc.metric]
                     if self._mitigated_at is None or (sc.mitigation and sc.mitigation[0] == "feed_hold"):
                         # Feed hold or e-stop stops the cut; the reading holds while the machine is stopped.
-                        value = self._drift(start, self._progress(now))
+                        value = self._drift(start, self._active_s(now))
                     else:
-                        peak = self._drift(start, self._mitigated_p)
+                        peak = self._drift(start, self._mitigated_s)
                         value = start + (peak - start) * math.exp(-(now - self._mitigated_at) / SETTLE_TAU_S)
                     tags[sc.metric] = value + (self._jitter(sc.metric) * 0.5 if running else 0.0)
                     rising = sc.target >= start
