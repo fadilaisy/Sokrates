@@ -6,6 +6,7 @@ import { formatIDR } from "../lib/api";
 import type { CostBreakdown, Scenario } from "../lib/api";
 import { cn } from "../lib/utils";
 import { affectedOrders, DISRUPTION_TYPES, fmt1, shortHash, windowLabel } from "../lib/shift";
+import { AiText } from "./AiText";
 import { useCockpit } from "./store";
 import { Btn, Card, Mono, Spinner, StateBanner } from "./ui";
 
@@ -208,7 +209,7 @@ function Proposing() {
       {result.claude_summary && (
         <div className="rounded-md bg-page px-4 py-3">
           <p className="text-[14px] font-semibold text-muted-ink">Ringkasan AI (SAP AI Core)</p>
-          <p className="text-[16px]">{result.claude_summary}</p>
+          <AiText text={result.claude_summary} className="text-[16px]" />
         </div>
       )}
       <div className="grid gap-3 lg:grid-cols-3">

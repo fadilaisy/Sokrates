@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { ragPageUrl } from "../lib/api";
 import type { RagSource } from "../lib/api";
 import { cn } from "../lib/utils";
+import { AiText } from "./AiText";
 import { Mono } from "./ui";
 
 /** Number shown for a source id: "S2" → 2 (falls back to its list position). */
@@ -11,8 +12,8 @@ function num(s: RagSource, i: number) {
   return Number.isFinite(n) && n > 0 ? n : i + 1;
 }
 
-/** Reply text with inline [S1] markers rendered as small numbered badges. */
-export function CitedText({ text }: { text: string }) {
+/** Plain text with inline [S1] markers rendered as small numbered badges. */
+function citationBadges(text: string): ReactNode {
   const parts: ReactNode[] = [];
   let last = 0;
   for (const m of text.matchAll(/\[(S\d+(?:\s*,\s*S\d+)*)\]/g)) {
@@ -30,7 +31,12 @@ export function CitedText({ text }: { text: string }) {
     last = (m.index ?? 0) + m[0].length;
   }
   parts.push(text.slice(last));
-  return <p className="whitespace-pre-wrap">{parts}</p>;
+  return parts;
+}
+
+/** Reply text with its Markdown formatted and its [S1] markers as badges. */
+export function CitedText({ text }: { text: string }) {
+  return <AiText text={text} leaf={citationBadges} />;
 }
 
 /** Passage text with the supporting sentences marked. */
