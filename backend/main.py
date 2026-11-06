@@ -55,7 +55,7 @@ from urllib.parse import quote as url_quote
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
@@ -77,7 +77,7 @@ from rag.api import router as rag_router
 from rag.retrieve import Retriever
 from rag.generate import sanitize as rag_sanitize
 from rag import aicore
-from backend import chat_context, chat_visual, mechanic_updates, skill_studio, telegram
+from backend import auth, chat_context, chat_visual, mechanic_updates, skill_studio, telegram
 from backend.agent_run import AgentDeps, AgentRunner, ApprovalRefused
 from backend.metrics import compute_metrics, events_for_approval
 from knowledge.maintenance_ledger import MaintenanceLedger
@@ -163,6 +163,10 @@ app = FastAPI(
         "Indonesian manufacturers recover from shop-floor disruptions."
     ),
 )
+
+# Login and roles (backend/auth.py). Added before CORS so CORS stays the outer
+# layer and a 401/403 still carries the CORS headers the browser needs to read it.
+app.add_middleware(auth.AuthMiddleware)
 
 # CORS: explicit allow-list from CORS_ORIGINS (comma-separated). Browsers reject
 # a wildcard together with credentials, and this API is served same-origin in
@@ -3870,6 +3874,44 @@ async def ws_plc(websocket: WebSocket) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Login
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64)
+    password: str = Field(..., min_length=1, max_length=256)
+
+
+@app.get("/api/auth/config", summary="Whether login is on, and the roles")
+async def get_auth_config() -> dict[str, Any]:
+    return {"enabled": auth.enabled(), "roles": auth.ROLES, "approver_roles": sorted(auth.APPROVER_ROLES)}
+
+
+@app.post("/api/auth/login", summary="Log in with a username and password; returns a bearer token")
+async def post_auth_login(body: LoginRequest, request: Request) -> dict[str, Any]:
+    if not auth.enabled():
+        raise HTTPException(status_code=404, detail="Login tidak aktif di server ini (AUTH_USERS kosong).")
+    key = f"{request.client.host if request.client else '?'}:{body.username.strip().lower()}"
+    if auth.login_blocked(key):
+        raise HTTPException(status_code=429, detail="Terlalu banyak percobaan. Coba lagi dalam 1 menit.")
+    user = auth.authenticate(body.username, body.password)
+    if user is None:
+        auth.record_failure(key)
+        raise HTTPException(status_code=401, detail="Username atau password salah.")
+    token, exp = auth.issue_token(user)
+    return {"token": token, "expires_at": datetime.fromtimestamp(exp, timezone.utc).isoformat(), "user": user.public()}
+
+
+@app.get("/api/auth/me", summary="The logged-in user")
+async def get_auth_me(request: Request) -> dict[str, Any]:
+    user = request.scope.get("state", {}).get("user")
+    if user is None:
+        # Login off: everyone is the shared demo cockpit.
+        return {"enabled": False, "user": None}
+    return {"enabled": True, "user": user.public()}
+
+
 @app.get("/health", include_in_schema=False)
 async def health() -> dict[str, str]:
     return {
@@ -3882,6 +3924,7 @@ async def health() -> dict[str, str]:
         "sap_error":          str(_sap.get_state()["_meta"].get("s4hana_error", "")),
         "ledger_entries":     str(len(_ledger.get_all())),
         "maintenance_cases":  str(len(_maint_ledger.cases())),
+        "auth":               "on" if auth.enabled() else "off — set AUTH_USERS to require login",
     }
 
 

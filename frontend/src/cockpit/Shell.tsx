@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import SkillStudio from "../components/SkillStudio";
 import { cn } from "../lib/utils";
 import { API_BASE } from "../lib/api";
+import { UserBadge } from "./Login";
 import { SHIFT_END, SHIFT_START } from "../lib/shift";
 import { GuideDrawer } from "./Overlays";
 import { useCockpit } from "./store";
@@ -88,6 +89,8 @@ function Sidebar() {
           </a>
         </div>
       </div>
+
+      <UserBadge className="mt-8 border-t border-accent-blue/40 pt-6" />
 
       <div className="mt-8 flex flex-col gap-3 border-t border-accent-blue/40 pt-6 text-[15px] text-navy">
         <a href="#" className="hover:underline">Kebijakan Privasi</a>
