@@ -167,6 +167,10 @@ app = FastAPI(
 # Login and roles (backend/auth.py). Added before CORS so CORS stays the outer
 # layer and a 401/403 still carries the CORS headers the browser needs to read it.
 app.add_middleware(auth.AuthMiddleware)
+try:
+    auth.users()  # a malformed AUTH_USERS is logged once at startup, not only on first request
+except auth.AuthConfigError:
+    pass
 
 # CORS: explicit allow-list from CORS_ORIGINS (comma-separated). Browsers reject
 # a wildcard together with credentials, and this API is served same-origin in
@@ -223,6 +227,16 @@ class DisruptionInjectRequest(BaseModel):
     machine_id: str = Field(..., example="CNC-03")
     new_status: str = Field(..., example="FAULT")
     disruption_type: str = Field(..., example="MOTOR_OVERLOAD")
+
+    @field_validator("new_status")
+    @classmethod
+    def _known_status(cls, v: str) -> str:
+        # A lower-case "maintenance" would slip past the Tier-1 check that blocks
+        # rerouting onto FAULT/MAINTENANCE machines, so only known statuses get in.
+        s = v.strip().upper()
+        if s not in ("RUNNING", "IDLE", "FAULT", "MAINTENANCE"):
+            raise ValueError("new_status must be RUNNING, IDLE, FAULT or MAINTENANCE")
+        return s
 
 
 class DisruptionInjectResponse(BaseModel):

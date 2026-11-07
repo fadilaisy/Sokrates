@@ -136,3 +136,43 @@ def test_websocket_needs_a_token():
             pass
     with client.websocket_connect(f"/ws/plc?token={_token('tamu', 'tamu-pw')}") as ws:
         assert ws.receive_json()
+
+
+def test_malformed_accounts_fail_closed_with_a_clear_message(monkeypatch):
+    monkeypatch.setenv("AUTH_USERS", "budi:boss:pw")
+    r = client.get("/api/state")
+    assert r.status_code == 503 and "AUTH_USERS" in r.json()["detail"]
+    assert client.post("/api/auth/login", json={"username": "budi", "password": "pw"}).status_code == 401
+
+
+def test_accounts_are_parsed_once_per_value(monkeypatch):
+    calls = []
+    real = auth._parse_users
+    monkeypatch.setattr(auth, "_parse_users", lambda raw: calls.append(raw) or real(raw))
+    monkeypatch.setenv("AUTH_USERS", USERS + ";x:viewer:x")
+    for _ in range(3):
+        auth.users()
+    assert len(calls) == 1
+
+
+def test_approval_records_the_account_even_without_the_field():
+    # LedgerEntryId and SkillApproveRequest default approved_by to a placeholder name.
+    body = auth.stamp_identity({"id": "abc"}, auth.users()["budi"][0], approval=True)
+    assert body["approved_by"] == "Budi Santoso — Kepala Maintenance (@budi)"
+
+
+def test_bm25_mode_still_applies_document_access():
+    from rag.retrieve import IncidentContext, Retriever
+    where, params, applied = Retriever.__new__(Retriever)._filters(
+        IncidentContext(role="operator"), None, "bm25", False)
+    assert "json_each(d.acl)" in where and "operator" in params
+
+
+def test_inject_accepts_only_known_statuses():
+    h = _h("sari", "sari-pw")
+    bad = client.post("/api/disrupt/inject", json={"machine_id": "CNC-03", "new_status": "maintenance-ish",
+                                                   "disruption_type": "X"}, headers=h)
+    assert bad.status_code == 422
+    import backend.main as mm
+    assert mm.DisruptionInjectRequest(machine_id="CNC-03", new_status="maintenance",
+                                      disruption_type="X").new_status == "MAINTENANCE"

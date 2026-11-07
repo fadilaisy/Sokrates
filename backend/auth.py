@@ -38,6 +38,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -46,6 +47,8 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs
+
+log = logging.getLogger("skillforge.auth")
 
 ROLES: Dict[str, str] = {
     "admin": "Admin",
@@ -147,12 +150,32 @@ def _parse_users(raw: str) -> Dict[str, Tuple[User, str]]:
     return users
 
 
+class AuthConfigError(RuntimeError):
+    """AUTH_USERS is set but can't be read. Every request is refused until it is fixed."""
+
+
+_cache: Dict[str, Any] = {"raw": None, "users": {}, "error": None}
+
+
 def users() -> Dict[str, Tuple[User, str]]:
-    return _parse_users(os.getenv("AUTH_USERS", ""))
+    """Accounts from AUTH_USERS, parsed once per value (not on every request)."""
+    raw = os.getenv("AUTH_USERS", "")
+    if raw != _cache["raw"]:
+        try:
+            _cache.update(raw=raw, users=_parse_users(raw), error=None)
+        except ValueError as e:
+            _cache.update(raw=raw, users={}, error=str(e))
+            log.error("Login: %s. Every API request is refused until AUTH_USERS is fixed.", e)
+    if _cache["error"]:
+        raise AuthConfigError(_cache["error"])
+    return _cache["users"]
 
 
 def enabled() -> bool:
-    return bool(users())
+    try:
+        return bool(users())
+    except AuthConfigError:
+        return True  # fail closed: a broken AUTH_USERS must not open every route
 
 
 def hash_password(password: str, *, iterations: int = 240_000, salt: Optional[str] = None) -> str:
@@ -173,7 +196,11 @@ def _check_password(stored: str, given: str) -> bool:
 
 
 def authenticate(username: str, password: str) -> Optional[User]:
-    entry = users().get((username or "").strip().lower())
+    try:
+        accounts = users()
+    except AuthConfigError:
+        return None
+    entry = accounts.get((username or "").strip().lower())
     if entry is None:
         # Same work as a real check, so timing doesn't reveal which usernames exist.
         _check_password(hash_password("x", iterations=1000, salt="0"), password or "")
@@ -219,7 +246,10 @@ def verify_token(token: str, *, now: Optional[float] = None) -> Optional[User]:
         return None
     if int(data.get("exp", 0)) < (time.time() if now is None else now):
         return None
-    entry = users().get(str(data.get("u", "")))
+    try:
+        entry = users().get(str(data.get("u", "")))
+    except AuthConfigError:
+        return None
     # Account removed or its role changed since the token was issued: log in again.
     if entry is None or entry[0].role != data.get("r"):
         return None
@@ -309,11 +339,14 @@ def _with_role_header(scope: Dict[str, Any], user: User) -> Dict[str, Any]:
     return {**scope, "headers": headers}
 
 
-def stamp_identity(body: Any, user: User) -> Any:
+def stamp_identity(body: Any, user: User, *, approval: bool = False) -> Any:
     if isinstance(body, dict):
         for f in IDENTITY_FIELDS:
             if f in body:
                 body[f] = user.signature
+        # Some approval models default approved_by to a placeholder; never let that reach the ledger.
+        if approval:
+            body["approved_by"] = user.signature
     return body
 
 
@@ -334,6 +367,11 @@ class AuthMiddleware:
             await self.app(scope, receive, send)
             return
 
+        try:
+            users()
+        except AuthConfigError as e:
+            await _deny(kind, receive, send, 503, f"Login salah dikonfigurasi (AUTH_USERS): {e}")
+            return
         user = verify_token(_token_from_scope(scope))
         if user is None:
             await _deny(kind, receive, send, 401, "Silakan login dulu.")
@@ -346,7 +384,7 @@ class AuthMiddleware:
         scope = _with_role_header(scope, user)
         scope.setdefault("state", {})["user"] = user
         if kind == "http" and method in ("POST", "PUT", "PATCH") and _is_json(scope):
-            receive = await _stamped_receive(receive, user)
+            receive = await _stamped_receive(receive, user, approval=need in ("approve", "admin"))
         await self.app(scope, receive, send)
 
 
@@ -357,7 +395,7 @@ def _is_json(scope: Dict[str, Any]) -> bool:
     return False
 
 
-async def _stamped_receive(receive: Any, user: User) -> Any:
+async def _stamped_receive(receive: Any, user: User, *, approval: bool = False) -> Any:
     chunks: List[bytes] = []
     while True:
         msg = await receive()
@@ -368,7 +406,7 @@ async def _stamped_receive(receive: Any, user: User) -> Any:
             break
     raw = b"".join(chunks)
     try:
-        raw = json.dumps(stamp_identity(json.loads(raw), user)).encode() if raw else raw
+        raw = json.dumps(stamp_identity(json.loads(raw), user, approval=approval)).encode() if raw else raw
     except (ValueError, UnicodeDecodeError):
         pass  # not JSON after all: let FastAPI report the error
     sent = False
