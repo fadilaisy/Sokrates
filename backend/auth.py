@@ -95,6 +95,12 @@ _READ_ONLY_POSTS = [re.compile(p) for p in (
     r"^/api/retrieve$",
     r"^/api/answer$",
 )]
+# Writes a mechanic may do: log and close maintenance cases, add expert notes.
+_MECHANIC_WRITES = [re.compile(p) for p in (
+    r"^/api/maintenance/entries$",
+    r"^/api/maintenance/entries/[^/]+/resolve$",
+    r"^/api/skills/expert-notes$",
+)]
 # Reachable without a token.
 _PUBLIC = [re.compile(p) for p in (
     r"^/health$",
@@ -195,6 +201,15 @@ def _check_password(stored: str, given: str) -> bool:
     return hmac.compare_digest(stored.encode(), given.encode())
 
 
+_DUMMY: List[str] = []
+
+
+def _dummy_hash() -> str:
+    if not _DUMMY:
+        _DUMMY.append(hash_password(secrets.token_hex(8)))  # default iterations, like a real hash
+    return _DUMMY[0]
+
+
 def authenticate(username: str, password: str) -> Optional[User]:
     try:
         accounts = users()
@@ -203,7 +218,7 @@ def authenticate(username: str, password: str) -> Optional[User]:
     entry = accounts.get((username or "").strip().lower())
     if entry is None:
         # Same work as a real check, so timing doesn't reveal which usernames exist.
-        _check_password(hash_password("x", iterations=1000, salt="0"), password or "")
+        _check_password(_dummy_hash(), password or "")
         return None
     user, stored = entry
     return user if _check_password(stored, password or "") else None
@@ -263,16 +278,41 @@ LOGIN_MAX_FAILS = 5
 LOGIN_WINDOW_S = 60.0
 
 
+_FAILS_MAX_KEYS = 10_000
+
+
 def login_blocked(key: str, *, now: Optional[float] = None) -> bool:
     now = time.time() if now is None else now
-    q = _FAILS[key]
+    q = _FAILS.get(key)
+    if q is None:
+        return False  # don't create an entry just for checking
     while q and q[0] < now - LOGIN_WINDOW_S:
         q.popleft()
+    if not q:
+        del _FAILS[key]
+        return False
     return len(q) >= LOGIN_MAX_FAILS
 
 
 def record_failure(key: str, *, now: Optional[float] = None) -> None:
-    _FAILS[key].append(time.time() if now is None else now)
+    now = time.time() if now is None else now
+    if key not in _FAILS and len(_FAILS) >= _FAILS_MAX_KEYS:
+        # Drop keys whose failures have all aged out; if still full, drop the oldest.
+        for k in [k for k, q in _FAILS.items() if not q or q[-1] < now - LOGIN_WINDOW_S]:
+            del _FAILS[k]
+        if len(_FAILS) >= _FAILS_MAX_KEYS:
+            del _FAILS[min(_FAILS, key=lambda k: _FAILS[k][-1])]
+    _FAILS[key].append(now)
+
+
+def client_ip(host: Optional[str], headers: Any) -> str:
+    """The caller's IP. Behind Caddy every request comes from the proxy, so with
+    AUTH_TRUST_PROXY=1 the last X-Forwarded-For hop (the one Caddy adds) is used."""
+    if os.getenv("AUTH_TRUST_PROXY", "") == "1":
+        fwd = (headers.get("x-forwarded-for") or "").split(",")
+        if fwd[-1].strip():
+            return fwd[-1].strip()
+    return host or "?"
 
 
 def reset_failures() -> None:
@@ -300,7 +340,7 @@ def required(method: str, path: str) -> str:
     return "write"
 
 
-def allowed(user: User, need: str) -> bool:
+def allowed(user: User, need: str, path: str = "") -> bool:
     if user.role == "admin":
         return True
     if need == "admin":
@@ -308,7 +348,11 @@ def allowed(user: User, need: str) -> bool:
     if need == "approve":
         return user.can_approve
     if need == "write":
-        return user.role != "viewer"
+        if user.role == "viewer":
+            return False
+        if user.role == "mechanic":
+            return _matches(path, _MECHANIC_WRITES)
+        return True
     return True
 
 
@@ -316,7 +360,7 @@ def denial_message(need: str) -> str:
     return {
         "approve": "Hanya Kepala Maintenance atau Admin yang boleh menyetujui perubahan ini.",
         "admin": "Hanya Admin yang boleh melakukan ini.",
-        "write": "Akun tamu hanya bisa melihat.",
+        "write": "Akun Anda tidak boleh mengubah ini.",
     }.get(need, "Tidak diizinkan.")
 
 
@@ -377,22 +421,38 @@ class AuthMiddleware:
             await _deny(kind, receive, send, 401, "Silakan login dulu.")
             return
         need = required(method, path)
-        if not allowed(user, need):
+        if not allowed(user, need, path):
             await _deny(kind, receive, send, 403, denial_message(need))
             return
 
         scope = _with_role_header(scope, user)
         scope.setdefault("state", {})["user"] = user
-        if kind == "http" and method in ("POST", "PUT", "PATCH") and _is_json(scope):
+        if kind == "websocket" and not allowed(user, "write", ""):
+            # /ws/telemetry turns client frames into maintenance cases and playbooks:
+            # read-only roles may watch the feed but what they send is dropped.
+            receive = _listen_only(receive)
+        if kind == "http" and method in ("POST", "PUT", "PATCH") and _has_json_body(scope):
             receive = await _stamped_receive(receive, user, approval=need in ("approve", "admin"))
         await self.app(scope, receive, send)
 
 
-def _is_json(scope: Dict[str, Any]) -> bool:
+def _has_json_body(scope: Dict[str, Any]) -> bool:
+    """True unless the body is a form or upload. FastAPI parses JSON whatever the
+    content-type's case or +json suffix, and even with none, so stamp all of those."""
     for k, v in scope.get("headers") or []:
         if k == b"content-type":
-            return b"application/json" in v
-    return False
+            ct = v.decode("latin-1").strip().lower()
+            return not (ct.startswith("multipart/") or ct.startswith("application/x-www-form-urlencoded"))
+    return True
+
+
+def _listen_only(receive: Any) -> Any:
+    async def wrapped() -> Dict[str, Any]:
+        while True:
+            msg = await receive()
+            if msg.get("type") != "websocket.receive":
+                return msg
+    return wrapped
 
 
 async def _stamped_receive(receive: Any, user: User, *, approval: bool = False) -> Any:

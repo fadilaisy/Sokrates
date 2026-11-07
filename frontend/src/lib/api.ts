@@ -593,8 +593,9 @@ export function authHeaders(): Record<string, string> {
   return t ? { Authorization: `Bearer ${t}` } : {};
 }
 
-function onUnauthorized(path: string, status: number): void {
-  if (status === 401 && !path.startsWith("/api/auth/")) {
+export function onUnauthorized(path: string, status: number): void {
+  // A wrong password on the login form is not an expired session.
+  if (status === 401 && path !== "/api/auth/login") {
     clearSession();
     window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
   }
@@ -763,6 +764,7 @@ export const rag = {
     fd.append("file", file);
     for (const [k, v] of Object.entries(meta)) if (v) fd.append(k, v);
     const res = await fetch(API_BASE + "/api/documents", { method: "POST", body: fd, headers: { ...roleHeaders(), ...authHeaders() } });
+    onUnauthorized("/api/documents", res.status);
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error((body as { detail?: string }).detail ?? `HTTP ${res.status}`);
     return body as { doc_id: string; status: string; duplicate: boolean; version: number; message?: string };

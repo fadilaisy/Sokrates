@@ -176,3 +176,66 @@ def test_inject_accepts_only_known_statuses():
     import backend.main as mm
     assert mm.DisruptionInjectRequest(machine_id="CNC-03", new_status="maintenance",
                                       disruption_type="X").new_status == "MAINTENANCE"
+
+
+def test_identity_is_stamped_whatever_the_json_content_type():
+    h = _h("budi", "budi-pw")
+    # (No content-type at all is refused by FastAPI with 422, so it never reaches the ledger.)
+    for ct in ("APPLICATION/JSON", "application/vnd.x+json"):
+        hdr = {**h, **({"Content-Type": ct} if ct else {})}
+        r = client.post("/api/plc/autonomy", content=b'{"enabled": false, "by": "Someone Else"}', headers=hdr)
+        assert r.status_code == 200, (ct, r.text)
+        entry = next(e for e in reversed(m._ledger.get_all()) if e["id"] == r.json()["receipt_id"])
+        assert entry["approved_by"].endswith("(@budi)"), ct
+
+
+def test_read_only_roles_cannot_send_on_the_telemetry_socket():
+    received = []
+
+    async def app(scope, receive, send):
+        await receive()  # connect
+        received.append(await receive())
+
+    mw = auth.AuthMiddleware(app)
+    user = auth.users()["tamu"][0]
+    tok, _ = auth.issue_token(user)
+    msgs = [{"type": "websocket.connect"}, {"type": "websocket.receive", "text": "{}"},
+            {"type": "websocket.disconnect", "code": 1000}]
+
+    async def recv():
+        return msgs.pop(0)
+
+    async def send(msg):
+        pass
+
+    import asyncio
+    asyncio.run(mw({"type": "websocket", "path": "/ws/telemetry", "query_string": f"token={tok}".encode(),
+                    "headers": []}, recv, send))
+    assert received == [{"type": "websocket.disconnect", "code": 1000}]  # the frame was dropped
+
+
+def test_mechanic_only_logs_cases(monkeypatch):
+    monkeypatch.setenv("AUTH_USERS", USERS + ";joko:mechanic:joko-pw:Joko")
+    h = _h("joko", "joko-pw")
+    assert client.post("/api/plc/interlock", json={"machine_id": "CNC-01", "estop": True}, headers=h).status_code == 403
+    assert client.post("/api/plc/scenario", json={"scenario": "normal"}, headers=h).status_code == 403
+    assert client.post("/api/maintenance/entries", json={}, headers=h).status_code not in (401, 403)
+
+
+def test_rate_limit_memory_is_bounded(monkeypatch):
+    monkeypatch.setattr(auth, "_FAILS_MAX_KEYS", 50)
+    for i in range(200):
+        auth.record_failure(f"ip:{i}")
+        auth.login_blocked(f"other:{i}")  # checking alone adds nothing
+    assert len(auth._FAILS) <= 50
+
+
+def test_client_ip_uses_forwarded_for_only_when_trusted(monkeypatch):
+    hdr = {"x-forwarded-for": "6.6.6.6, 1.2.3.4"}
+    assert auth.client_ip("10.0.0.1", hdr) == "10.0.0.1"
+    monkeypatch.setenv("AUTH_TRUST_PROXY", "1")
+    assert auth.client_ip("10.0.0.1", hdr) == "1.2.3.4"
+
+
+def test_unknown_username_costs_a_full_hash():
+    assert auth._dummy_hash().split("$")[1] == "240000"

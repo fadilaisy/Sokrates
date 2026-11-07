@@ -40,7 +40,12 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }, [enabled, user]);
 
   useEffect(() => {
-    const onExpired = () => setUser(null);
+    // A 401 means the server requires login, even if the first config check failed
+    // (e.g. the backend was restarting when the page loaded).
+    const onExpired = () => {
+      setEnabled(true);
+      setUser(null);
+    };
     window.addEventListener(AUTH_EXPIRED_EVENT, onExpired);
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onExpired);
   }, []);

@@ -3906,7 +3906,8 @@ async def get_auth_config() -> dict[str, Any]:
 async def post_auth_login(body: LoginRequest, request: Request) -> dict[str, Any]:
     if not auth.enabled():
         raise HTTPException(status_code=404, detail="Login tidak aktif di server ini (AUTH_USERS kosong).")
-    key = f"{request.client.host if request.client else '?'}:{body.username.strip().lower()}"
+    ip = auth.client_ip(request.client.host if request.client else None, request.headers)
+    key = f"{ip}:{body.username.strip().lower()}"
     if auth.login_blocked(key):
         raise HTTPException(status_code=429, detail="Terlalu banyak percobaan. Coba lagi dalam 1 menit.")
     user = auth.authenticate(body.username, body.password)
