@@ -32,6 +32,10 @@ Skills hold the plant's expert know-how (`skills/<id>/skill.json`, schema `skill
 
 Main endpoints: `GET /api/skills`, `GET /api/skills/proposals`, `POST /api/skills/proposals/{id}/draft`, `POST /api/skills/expert-notes`, `POST /api/skills/compose`, `POST /api/skills/test-run`, `POST /api/skills/approve`. Full API at `/docs`.
 
+## Login and roles
+
+Set `AUTH_USERS` (see `.env.example`) and every API route and WebSocket needs a login. Only **Kepala Maintenance** (`maintenance_head`) and **Admin** can approve SAP writes, PLC writes, skills, cost changes and reverts. Resetting the demo is admin only, and viewers can only look and chat. The audit ledger records the logged-in account (`Budi Santoso — Kepala Maintenance (@budi)`), not a typed name. With `AUTH_USERS` empty, login is off and the app works as before. Hash passwords with `python scripts/hash_password.py`.
+
 ## Run locally
 - Backend: `pip install -r requirements.txt` then `uvicorn backend.main:app --port 8000`
 - Frontend: `cd frontend && npm install && VITE_API_BASE=http://localhost:8000 npm run dev`

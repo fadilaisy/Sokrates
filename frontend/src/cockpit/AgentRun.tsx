@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Bot, CircleCheck, Circle, CircleMinus, CircleX, ShieldCheck } from "lucide-react";
 import { api, type AgentRun, type AgentRunStep } from "../lib/api";
 import { cn } from "../lib/utils";
+import { useAuth } from "./Login";
 import { useCockpit } from "./store";
 import { AiText } from "./AiText";
 import { Btn, Card, Mono, Spinner } from "./ui";
@@ -230,6 +231,7 @@ function ApprovalBox({
   const parts = run.pending_approval?.parts;
   const sc = run.pending_approval?.scenario;
   const moves = (sc?.gantt_changes ?? []).filter((c) => c.to_machine !== c.from_machine);
+  const { user, canApprove } = useAuth();
   return (
     <div className="flex flex-col gap-2 rounded-md border border-warn bg-page px-4 py-3 text-[14px]">
       <p className="font-semibold">Satu persetujuan untuk penulisan ke SAP</p>
@@ -255,11 +257,17 @@ function ApprovalBox({
           value={approver}
           onChange={(e) => setApprover(e.target.value)}
           disabled={busy}
+          readOnly={!!user}
           placeholder="Production Supervisor — Nama Anda"
           className="min-h-11 rounded-md border border-line bg-surface px-3 text-[15px] disabled:opacity-60"
         />
       </label>
-      <Btn className="mt-1 self-start" disabled={busy || !named} onClick={onApprove}>
+      {!canApprove && (
+        <p className="text-[14px] font-medium text-fault">
+          Akun Anda ({user?.role_label}) tidak bisa menyetujui. Minta Kepala Maintenance untuk menyetujui.
+        </p>
+      )}
+      <Btn className="mt-1 self-start" disabled={busy || !named || !canApprove} onClick={onApprove}>
         <ShieldCheck className="size-5" aria-hidden />
         Setujui semua
       </Btn>

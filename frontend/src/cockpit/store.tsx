@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { api, ApiError, formatIDR, WS_PLC, WS_TELEMETRY } from "../lib/api";
+import { api, ApiError, formatIDR, wsUrl, WS_PLC, WS_TELEMETRY } from "../lib/api";
+import { currentUser } from "../lib/auth";
 import type { ApproveReceipt, DisruptResponse, DriftDetail, LedgerEntry, PlcActionResult, PlcAlarmFrame, PlcInfo, PlcMachine, PlcPredictionFrame, PlcProposedAction, RagSource, SapState, Scenario, ShiftMetrics, TelemetryFrame } from "../lib/api";
 import { normalizeStatus, windowLabel } from "../lib/shift";
 import { audioReady, isMuted, onAudioReady, playSound, setMuted, unlockAudio } from "../lib/sound";
@@ -47,6 +48,9 @@ const APPROVER_KEY = "sf.approver";
 export const DEFAULT_SIGNER = "Production Supervisor";
 
 function savedApprover(): string {
+  // Logged in: the server records the account anyway, so show that name.
+  const user = currentUser();
+  if (user) return user.signature;
   try {
     return localStorage.getItem(APPROVER_KEY) ?? "";
   } catch {
@@ -473,7 +477,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     let stopped = false;
     let retry: number | undefined;
     const connect = () => {
-      const ws = new WebSocket(WS_TELEMETRY);
+      const ws = new WebSocket(wsUrl(WS_TELEMETRY));
       wsRef.current = ws;
       ws.onopen = () => setWsStatus("open");
       ws.onclose = () => {
@@ -508,7 +512,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     let ws: WebSocket | null = null;
     const connect = () => {
       setPlcStatus("connecting");
-      ws = new WebSocket(WS_PLC);
+      ws = new WebSocket(wsUrl(WS_PLC));
       ws.onopen = () => setPlcStatus("open");
       ws.onmessage = (ev) => applyPlcFrame(ev.data);
       ws.onclose = () => {

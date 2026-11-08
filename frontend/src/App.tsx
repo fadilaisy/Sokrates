@@ -1,3 +1,4 @@
+import { AuthGate } from "./cockpit/Login";
 import { CurrentPage } from "./cockpit/Pages";
 import { Shell } from "./cockpit/Shell";
 import { CockpitProvider } from "./cockpit/store";
@@ -9,10 +10,12 @@ import { CockpitProvider } from "./cockpit/store";
  */
 export default function App() {
   return (
-    <CockpitProvider>
-      <Shell>
-        <CurrentPage />
-      </Shell>
-    </CockpitProvider>
+    <AuthGate>
+      <CockpitProvider>
+        <Shell>
+          <CurrentPage />
+        </Shell>
+      </CockpitProvider>
+    </AuthGate>
   );
 }

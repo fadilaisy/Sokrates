@@ -1,3 +1,5 @@
+import { AUTH_EXPIRED_EVENT, authToken, clearSession, withToken, type AuthUser } from "./auth";
+
 export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "http://localhost:8000";
 export const WS_TELEMETRY = API_BASE.replace(/^http/, "ws") + "/ws/telemetry";
 export const WS_PLC = API_BASE.replace(/^http/, "ws") + "/ws/plc";
@@ -423,12 +425,14 @@ export interface RagStatus {
   models: { aicore: string[]; claude: string };
 }
 
-/** The cockpit acts as a supervisor (uploads allowed). No real auth in the backend yet. */
+/** Role sent to the document library when login is off. With login on, the server uses the account's role. */
 export const COCKPIT_ROLE = "supervisor";
 
 export function ragPageUrl(docId: string, page: number, chunkId?: string): string {
   const q = new URLSearchParams({ role: COCKPIT_ROLE, dpi: "120" });
   if (chunkId) q.set("chunk_id", chunkId);
+  const t = authToken();
+  if (t) q.set("token", t);
   return `${API_BASE}/api/documents/${encodeURIComponent(docId)}/pages/${page}.png?${q}`;
 }
 
@@ -583,12 +587,27 @@ export interface AgentRun {
   error: string | null;
 }
 
+/** Authorization header for the logged-in user (empty when login is off). */
+export function authHeaders(): Record<string, string> {
+  const t = authToken();
+  return t ? { Authorization: `Bearer ${t}` } : {};
+}
+
+export function onUnauthorized(path: string, status: number): void {
+  // A wrong password on the login form is not an expired session.
+  if (status === 401 && path !== "/api/auth/login") {
+    clearSession();
+    window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+  }
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(API_BASE + path, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers: { "Content-Type": "application/json", ...authHeaders(), ...(init?.headers ?? {}) },
   });
   if (!res.ok) {
+    onUnauthorized(path, res.status);
     let detail: unknown = await res.text();
     try {
       detail = JSON.parse(detail as string);
@@ -601,6 +620,21 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   }
   return res.json() as Promise<T>;
 }
+
+export const authApi = {
+  config: () => req<{ enabled: boolean; roles: Record<string, string>; approver_roles: string[] }>("/api/auth/config"),
+  login: (username: string, password: string) =>
+    req<{ token: string; expires_at: string; user: AuthUser }>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+  me: () => req<{ enabled: boolean; user: AuthUser | null }>("/api/auth/me"),
+};
+
+/** WebSocket URLs carry the token in the query string (browsers can't set headers there). */
+export const wsUrl = (url: string) => withToken(url);
+/** Plain links (file downloads) carry the token the same way. */
+export const fileUrl = (url: string) => withToken(url);
 
 export const api = {
   state: () => req<SapState>("/api/state"),
@@ -729,7 +763,8 @@ export const rag = {
     const fd = new FormData();
     fd.append("file", file);
     for (const [k, v] of Object.entries(meta)) if (v) fd.append(k, v);
-    const res = await fetch(API_BASE + "/api/documents", { method: "POST", body: fd, headers: roleHeaders() });
+    const res = await fetch(API_BASE + "/api/documents", { method: "POST", body: fd, headers: { ...roleHeaders(), ...authHeaders() } });
+    onUnauthorized("/api/documents", res.status);
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error((body as { detail?: string }).detail ?? `HTTP ${res.status}`);
     return body as { doc_id: string; status: string; duplicate: boolean; version: number; message?: string };

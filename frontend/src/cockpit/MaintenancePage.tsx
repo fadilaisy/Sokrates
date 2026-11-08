@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { API_BASE, maintApi } from "../lib/api";
+import { API_BASE, fileUrl, maintApi } from "../lib/api";
 import type { DocRef, MaintCase, MaintChat, MaintFlow, MaintSearch, Playbook, SparePart, SparePartOrder } from "../lib/api";
 import { chainVerdict } from "../lib/shift";
 import { cn } from "../lib/utils";
@@ -53,7 +53,7 @@ function CaseChip({ id, onOpen }: { id: string; onOpen: (id: string) => void }) 
 function DocChip({ d }: { d: DocRef }) {
   return (
     <a
-      href={`${API_BASE}/api/documents/${encodeURIComponent(d.doc_id)}/file`}
+      href={fileUrl(`${API_BASE}/api/documents/${encodeURIComponent(d.doc_id)}/file`)}
       target="_blank"
       rel="noreferrer"
       title={d.excerpt}

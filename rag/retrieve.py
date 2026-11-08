@@ -144,15 +144,16 @@ class Retriever:
         where = ["d.status IN ('indexed'" + (",'superseded'" if include_superseded else "") + ")"]
         params: List[Any] = []
         applied = ["status=" + ("indexed|superseded" if include_superseded else "indexed")]
+        # Access control holds in every mode, including the bm25 baseline.
+        where.append("EXISTS (SELECT 1 FROM json_each(d.acl) WHERE value = ?)")
+        params.append(ctx.role)
+        applied.append(f"acl∋{ctx.role}")
         if mode == "bm25":
             return " AND ".join(where), params, applied
         plant = ctx.plant or config.DEFAULT_PLANT
         where.append("d.plant = ?")
         params.append(plant)
         applied.append(f"plant={plant}")
-        where.append("EXISTS (SELECT 1 FROM json_each(d.acl) WHERE value = ?)")
-        params.append(ctx.role)
-        applied.append(f"acl∋{ctx.role}")
         if ctx.language in ("id", "en"):
             where.append("(d.language IN (?, 'mixed', 'unknown'))")
             params.append(ctx.language)

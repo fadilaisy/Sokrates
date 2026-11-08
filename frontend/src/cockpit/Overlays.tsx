@@ -8,6 +8,7 @@ import { chainVerdict, changeKind, shortHash, timeRange, wibTime } from "../lib/
 import { ChatVisual } from "./ChatVisual";
 import { CitedText, SourceCitations } from "./Citations";
 import { ledgerDetail, ledgerSubject } from "./ledgerDetail";
+import { useAuth } from "./Login";
 import { DEFAULT_SIGNER, useCockpit } from "./store";
 import type { Page } from "./store";
 import { AssistantFace, Btn, Card, Mono, Spinner } from "./ui";
@@ -28,6 +29,7 @@ function Scrim({ onClick, tone = 0.45 }: { onClick: () => void; tone?: number })
 /* ── Approval modal (field-level diff + optimistic lock) ─────────────────── */
 export function ApprovalModal() {
   const { approvalFor, conflict, approving, sapVersion, approver, setApprover, closeApproval, confirmApproval, openChat, setLedgerOpen, verify } = useCockpit();
+  const { user, canApprove } = useAuth();
   useEscape(closeApproval, !!approvalFor && !approving);
   if (!approvalFor) return null;
   const c = conflict;
@@ -110,6 +112,7 @@ export function ApprovalModal() {
                 value={approver}
                 onChange={(e) => setApprover(e.target.value)}
                 disabled={approving || !!c}
+                readOnly={!!user}
                 placeholder="Production Supervisor — Nama Anda"
                 aria-describedby={!c && !named ? "appr-name-hint" : undefined}
                 className="min-h-12 rounded-md border border-line bg-surface px-4 text-[16px] disabled:opacity-60"
@@ -117,6 +120,11 @@ export function ApprovalModal() {
               {!c && !named && (
                 <span id="appr-name-hint" className="text-[14px] text-muted-ink">
                   Isi nama Anda untuk menyetujui
+                </span>
+              )}
+              {!canApprove && (
+                <span className="text-[14px] font-medium text-fault">
+                  Akun Anda ({user?.role_label}) tidak bisa menyetujui. Minta Kepala Maintenance untuk menyetujui.
                 </span>
               )}
             </label>
@@ -134,7 +142,7 @@ export function ApprovalModal() {
                 <Btn onClick={() => openChat("recalc")}>Hitung ulang skenario</Btn>
               </>
             ) : (
-              <Btn onClick={confirmApproval} disabled={approving || !named}>
+              <Btn onClick={confirmApproval} disabled={approving || !named || !canApprove}>
                 {approving ? <Spinner className="size-5" /> : null}
                 Setujui skenario ini
               </Btn>
